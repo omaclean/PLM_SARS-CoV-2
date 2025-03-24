@@ -1,9 +1,11 @@
 This is the GitHub Repository for the paper:
 ["From a single sequence to evolutionary trajectories: protein language models capture the evolutionary potential of SARS-CoV-2 protein sequences"](https://www.biorxiv.org/content/10.1101/2024.07.05.602129v2).
 ## Table of Contents
-1. [Paper Abstract](#abstract)
-2. [Installation](#installation)
-3. [Figures](#figures)
+- [Table of Contents](#table-of-contents)
+- [](#)
+- [Paper Abstract](#paper-abstract)
+- [Installation](#installation)
+- [Figures](#figures)
 
 ![Graphical Paper Abstract](https://www.biorxiv.org/content/biorxiv/early/2024/09/18/2024.07.05.602129/F1.large.jpg?width=800&height=600&carousel=1)
 ---
@@ -26,4 +28,4 @@ elif model_name == 'esm2-small':
     )
 ```
 ## Figures
-Many of the figures in the paper can be found in an interactive form on [Observable](https://observablehq.com/@cvr-bioinfo/from-a-single-sequence-to-evolutionary-trajectorie).
+Many of the figures in the paper can be found in an interactive form on [Observable](https://observablehq.com/@cvr-bioinfo/from-a-single-sequence-nature-communications).
