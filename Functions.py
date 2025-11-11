@@ -604,3 +604,7 @@ def remap_logits(mutated_logits,ref_seq_aligned,mutated_seq_aligned):
     return rows
 
 def check_valid (v,min,max):
+  if v < min or v >max:
+    return v
+  return None
+  
