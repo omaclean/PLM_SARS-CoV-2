@@ -7,7 +7,7 @@ This is the GitHub Repository for the paper:
 - [Installation](#installation)
 - [Figures](#figures)
 
-![Graphical Paper Abstract](https://www.biorxiv.org/content/biorxiv/early/2024/09/18/2024.07.05.602129/F1.large.jpg?width=800&height=600&carousel=1)
+![Graphical Paper Abstract]([https://www.biorxiv.org/content/biorxiv/early/2024/09/18/2024.07.05.602129/F1.large.jpg](https://static.observableusercontent.com/files/2385a58ebeb9c024fccbcce00ee26aa7dd2976c12858809540ed469c0ff95b31c4f8004b9d314129567c0204fad684c563fbcf68ead4eba508e81038d03935f0)?width=800&height=600&carousel=1)
 ---
 ## Paper Abstract
 Protein language models (PLMs) capture features of protein three-dimensional structure from amino acid sequences alone, without requiring multiple sequence alignments (MSA). The concepts of grammar and semantics from natural language have the potential to capture functional properties of proteins. Here, we investigate how these representations enable assessment of variation due to mutation. Applied to SARS-CoV-2’s spike protein using in silico deep mutational scanning (DMS) we demonstrate the PLM, ESM-2, has learned the sequence context within which variation occurs, capturing evolutionary constraint. This recapitulates what conventionally requires MSA data to predict. Unlike other state-of-the-art methods which require protein structures or multiple sequences for training, we show what can be accomplished using an unmodified pretrained PLM. We demonstrate that the grammaticality and semantic scores represent novel metrics. Applied to SARS-CoV-2 variants across the pandemic we show that ESM-2 representations encode the evolutionary history between variants, as well as the distinct nature of variants of concern upon their emergence, associated with shifts in receptor binding and antigenicity. PLM likelihoods can also identify epistatic interactions among sites in the protein. Our results here affirm that PLMs are broadly useful for variant-effect prediction, including unobserved changes, and can be applied to understand novel viral pathogens with the potential to be applied to any protein sequence, pathogen or otherwise.
@@ -28,4 +28,5 @@ elif model_name == 'esm2-small':
     )
 ```
 ## Figures
+
 Many of the figures in the paper can be found in an interactive form on [Observable](https://observablehq.com/@cvr-bioinfo/from-a-single-sequence-nature-communications).
