@@ -149,7 +149,7 @@ def embed_sequence(sequence,model,device,model_layers,batch_converter,alphabet):
     #Get Embedding and probabilities for reference sequence (Should be first sequence in data)
     lsoftmax = torch.nn.LogSoftmax(dim=1)
     base_logits = lsoftmax((results["logits"][0]).to(device="cpu"))
-    return base_logits, base_mean_embedding
+    return results, base_logits, base_mean_embedding,full_embedding
 
 def process_protein_sequence(sequence,model,model_layers,batch_converter,alphabet,device):
     #Embed Sequence
