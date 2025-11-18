@@ -163,7 +163,7 @@ def process_protein_sequence(sequence,model,model_layers,batch_converter,alphabe
 
 def embed_protein_sequences(protein_sequences,reference_protein,coding_region_name,model,model_layers,device,batch_converter,alphabet,scores=False):
     #Embed Reference Protein Sequence
-    reference_logits, reference_mean_embedding = embed_sequence(reference_protein,model,device,model_layers,batch_converter,alphabet)
+    results, reference_logits, reference_mean_embedding, full_embedding = embed_sequence(reference_protein,model,device,model_layers,batch_converter,alphabet)
     
     embeddings = {}
     
@@ -227,7 +227,7 @@ def embed_protein_sequences(protein_sequences,reference_protein,coding_region_na
             
         #If no need for scores, sequences can be embedded as is with insertions, deletions truncations etc
         else:
-            embeddings[coding_region_name][name] = process_protein_sequence(str(fasta.seq),model,model_layers)
+            embeddings[coding_region_name][name] = process_protein_sequence(str(fasta.seq),model,model_layers,batch_converter,alphabet,device)
         i+=1
     return embeddings
 
