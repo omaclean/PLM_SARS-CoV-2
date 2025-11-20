@@ -178,6 +178,7 @@ def embed_protein_sequences(protein_sequences,reference_protein,coding_region_na
     embeddings['Reference'][coding_region_name] = {"Mean_Embedding":reference_mean_embedding.tolist(),
                                         "Logits":reference_logits.tolist(),
                                         "sequence_grammaticality":get_sequence_grammaticality(reference_protein,reference_logits,alphabet)
+                                        
                                     }
     #Process Fasta Files       
     fasta_sequences = protein_sequences
@@ -189,11 +190,14 @@ def embed_protein_sequences(protein_sequences,reference_protein,coding_region_na
         name, sequence = fasta[0], str(fasta[1])
         print(name)
         
+
         #Scores work by creating sequences with no insertions or deletions, then calculating changes from this sequence
         #These embeddings are thus not "real" sequences 
         if scores == True:
             print(len(reference_protein),len(sequence))
             mutations = get_mutations(reference_protein,sequence)
+            #get mutation position
+            mut_pos= [int(mut[1:-1])-1 for mut in mutations if "del" not in mut ]
             mutation_only_sequence = mutate_sequence(reference_protein,mutations)
             embeddings[name] = {coding_region_name:process_protein_sequence(mutation_only_sequence,model,model_layers,batch_converter,alphabet,device)}
             
@@ -215,9 +219,12 @@ def embed_protein_sequences(protein_sequences,reference_protein,coding_region_na
 
             #Probability of whole sequence
             embeddings[name][coding_region_name]['sequence_grammaticality'] = get_sequence_grammaticality(sequence,embeddings[name][coding_region_name]['Logits'],alphabet)
+            embeddings[name][coding_region_name]['narrow_sequence_grammaticality'] = get_sequence_grammaticality(sequence,embeddings[name][coding_region_name]['Logits'],alphabet,mask_pos=mut_pos)
             print('Sequence Grammaticality: ', embeddings[name][coding_region_name]['sequence_grammaticality'])
             #Probability ratio between the mutant sequence and the reference sequence
             embeddings[name][coding_region_name]['relative_sequence_grammaticality'] = embeddings[name][coding_region_name]['sequence_grammaticality']-embeddings['Reference'][coding_region_name]['sequence_grammaticality']
+            ref_narrow=get_sequence_grammaticality(reference_protein,reference_logits,alphabet,mask_pos=mut_pos)
+            embeddings[name][coding_region_name]['relative_narrow_sequence_grammaticality'] = embeddings[name][coding_region_name]['narrow_sequence_grammaticality']-ref_narrow
 
             embeddings[name][coding_region_name]["probability"] = np.exp(gm)
 
@@ -263,14 +270,17 @@ def grammaticality_and_evolutionary_index(word_pos_prob, seq, mutations):
             mut_probs.append(word_pos_prob[(aa_mut, aa_pos)])
     return np.sum(mut_probs), np.sum(ev_ratios)
 
-def get_sequence_grammaticality(sequence,sequence_logits,alphabet):   
+def get_sequence_grammaticality(sequence,sequence_logits,alphabet,mask_pos=None):   
     prob_list = []
     sequence_logits = torch.FloatTensor(sequence_logits)
     for pos in range(len(sequence)):
         word_idx = alphabet.get_idx(sequence[pos])
         word = sequence_logits[(pos + 1,word_idx)]
         prob_list.append(word)
-    base_grammaticality =np.sum(prob_list)
+    if mask_pos is None:
+        base_grammaticality = np.sum(prob_list)
+    else:
+        base_grammaticality = np.sum([prob_list[i] for i in range(len(prob_list)) if i not in mask_pos])
     return base_grammaticality
 
 def semantic_calc(target,base):
@@ -319,16 +329,6 @@ def get_region_from_genbank(sequence,genbank,region_name):
     Merged_Coding_Region = {region_name:Merged_Coding_Regions[region_name]}
     return Merged_Coding_Region
 
-
-def get_sequence_grammaticality(sequence,sequence_logits,alphabet):   
-    prob_list = []
-    sequence_logits = torch.FloatTensor(sequence_logits)
-    for pos in range(len(sequence)):
-        word_idx = alphabet.get_idx(sequence[pos])
-        word = sequence_logits[(pos + 1,word_idx)]
-        prob_list.append(word)
-    base_grammaticality =np.sum(prob_list)
-    return base_grammaticality
 
 
 def process_and_dms_sequence_genbank(sequence,genbank,model,model_layers,device,batch_converter,alphabet,specify_orf=""):
