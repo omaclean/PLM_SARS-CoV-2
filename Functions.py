@@ -217,12 +217,14 @@ def embed_protein_sequences(protein_sequences,reference_protein,coding_region_na
             embeddings[name][coding_region_name]["grammaticality"] = gm
             embeddings[name][coding_region_name]["relative_grammaticality"] = ev
 
-            #Probability of whole sequence
+            #Probability of whole sequence including mutation
             embeddings[name][coding_region_name]['sequence_grammaticality'] = get_sequence_grammaticality(sequence,embeddings[name][coding_region_name]['Logits'],alphabet)
+            #narrow sense gramaticallity excludes the mutation- so looks at how whole sequence shifts excluding the focal site
             embeddings[name][coding_region_name]['narrow_sequence_grammaticality'] = get_sequence_grammaticality(sequence,embeddings[name][coding_region_name]['Logits'],alphabet,mask_pos=mut_pos)
             print('Sequence Grammaticality: ', embeddings[name][coding_region_name]['sequence_grammaticality'])
             #Probability ratio between the mutant sequence and the reference sequence
             embeddings[name][coding_region_name]['relative_sequence_grammaticality'] = embeddings[name][coding_region_name]['sequence_grammaticality']-embeddings['Reference'][coding_region_name]['sequence_grammaticality']
+            #get probability of all the un-mutated sites
             ref_narrow=get_sequence_grammaticality(reference_protein,reference_logits,alphabet,mask_pos=mut_pos)
             embeddings[name][coding_region_name]['relative_narrow_sequence_grammaticality'] = embeddings[name][coding_region_name]['narrow_sequence_grammaticality']-ref_narrow
 
@@ -278,8 +280,10 @@ def get_sequence_grammaticality(sequence,sequence_logits,alphabet,mask_pos=None)
         word = sequence_logits[(pos + 1,word_idx)]
         prob_list.append(word)
     if mask_pos is None:
+        # take probability of whole sequence
         base_grammaticality = np.sum(prob_list)
     else:
+        # if "mask" positions given, get the probabilities of observed AAs in sequence except for mutation site tested
         base_grammaticality = np.sum([prob_list[i] for i in range(len(prob_list)) if i not in mask_pos])
     return base_grammaticality
 
