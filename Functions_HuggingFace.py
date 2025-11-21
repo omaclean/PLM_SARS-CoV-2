@@ -22,16 +22,41 @@ import pickle
 import _pickle as cPickle
 
 def compressed_pickle(title, data):
-  with bz2.BZ2File(title + '.pbz2', 'w') as f:
-    cPickle.dump(data, f)
+    """Compress and serialize arbitrary Python data to disk.
+
+    Args:
+            title (str): File path (without extension) where the pickle will be saved.
+            data (Any): Python object to serialize.
+
+    Returns:
+            None
+    """
+    with bz2.BZ2File(title + '.pbz2', 'w') as f:
+        cPickle.dump(data, f)
 
 def decompress_pickle(file):
-  data = bz2.BZ2File(file, 'rb')
-  data = cPickle.load(data)
-  return data
+    """Load a bz2-compressed pickle created by ``compressed_pickle``.
+
+    Args:
+            file (str): Path to the ``.pbz2`` file.
+
+    Returns:
+            Any: The deserialized Python object.
+    """
+    data = bz2.BZ2File(file, 'rb')
+    data = cPickle.load(data)
+    return data
 ##################################################################################
 ## Genbank Annotation Functions ##################################################
 def makeOrfTable(genbank_record):
+    """Build a dataframe describing each CDS ORF in a GenBank record.
+
+    Args:
+        genbank_record (SeqRecord): Biopython GenBank record containing CDS features.
+
+    Returns:
+        pandas.DataFrame: Indexed by ORF name with start, end, part, and location columns.
+    """
     orfs=[]
     for feature in genbank_record.features:
         if feature.type =="CDS":
@@ -44,6 +69,14 @@ def makeOrfTable(genbank_record):
     return orfs
 
 def makeMatProteinTable(genbank_record):
+    """Create a dataframe of mature peptide annotations from a GenBank record.
+
+    Args:
+        genbank_record (SeqRecord): Biopython GenBank record containing ``mat_peptide`` features.
+
+    Returns:
+        pandas.DataFrame: Indexed by protein name with ORF, coordinates, and location parts.
+    """
     proteins=[]
     for feature in genbank_record.features:
         if feature.type =="mat_peptide":
@@ -59,6 +92,15 @@ def makeMatProteinTable(genbank_record):
 ###################################################################################
 ## Mutation Functions #############################################################
 def mutate_sequence(reference_sequence,mutations):
+    """Apply point mutations to a reference protein sequence.
+
+    Args:
+        reference_sequence (str): Original amino-acid sequence (1-indexed positions).
+        mutations (Iterable[str]): Strings like ``A12T`` describing source AA, position, and target AA.
+
+    Returns:
+        str: The mutated amino-acid sequence.
+    """
     mutated_seq = reference_sequence
     for mutation in mutations:
         if 'ins' not in mutation and 'del' not in mutation and "X" not in mutation:
@@ -68,16 +110,32 @@ def mutate_sequence(reference_sequence,mutations):
     return mutated_seq
 
 def DMS(reference):
-  seq_list = []
-  amino_acids = ["A","R","N","D","C","Q","E","G","H","I","L","K","M","F","P","S","T","W","Y","V"]
-  for i,ref_amino_acid in enumerate(reference):
-    for mutant_amino_acid in amino_acids:
-        mutated_seq = reference[:i]+mutant_amino_acid+reference[i+1:]
-        seq = SeqRecord(Seq(mutated_seq), id=ref_amino_acid+str(i+1)+mutant_amino_acid)
-        seq_list.append(seq)
-  return seq_list
+    """Generate all single–amino acid mutants for a reference sequence.
+
+    Args:
+        reference (str): Amino-acid sequence used as the background.
+
+    Returns:
+        list[SeqRecord]: Biopython records for every single substitution mutant.
+    """
+    seq_list = []
+    amino_acids = ["A","R","N","D","C","Q","E","G","H","I","L","K","M","F","P","S","T","W","Y","V"]
+    for i,ref_amino_acid in enumerate(reference):
+        for mutant_amino_acid in amino_acids:
+            mutated_seq = reference[:i]+mutant_amino_acid+reference[i+1:]
+            seq = SeqRecord(Seq(mutated_seq), id=ref_amino_acid+str(i+1)+mutant_amino_acid)
+            seq_list.append(seq)
+    return seq_list
 
 def DMS_Table(reference):
+    """Return a dataframe mapping mutation labels to mutant sequences.
+
+    Args:
+        reference (str): Amino-acid reference sequence.
+
+    Returns:
+        pandas.DataFrame: Columns ``Mutations`` and ``Sequence`` for each single mutant.
+    """
     seq_list = []
     amino_acids = ["A","R","N","D","C","Q","E","G","H","I","L","K","M","F","P","S","T","W","Y","V"]
     for i,ref_amino_acid in enumerate(reference):
@@ -90,6 +148,15 @@ def DMS_Table(reference):
 #####################################################################################
 ## Translation Functions ############################################################
 def iterative_translate(sequence,truncate_proteins=False):
+    """Translate a nucleotide sequence codon-by-codon while handling gaps.
+
+    Args:
+        sequence (str | Seq): Nucleotide sequence (can include gaps or ambiguous bases).
+        truncate_proteins (bool): If True, truncate translation at the first stop codon.
+
+    Returns:
+        str: Amino-acid sequence ("-" for gap codons, "X" for partial codons).
+    """
     amino_acid = ""
     for i in range(0,len(sequence)-2,3):
         codon = str(sequence[i:i+3])
@@ -107,11 +174,29 @@ def iterative_translate(sequence,truncate_proteins=False):
     return amino_acid
 
 def translate_with_genbank(sequence,ref):
+    """Translate every CDS from a GenBank annotation using an input nucleotide sequence.
+
+    Args:
+        sequence (Seq): Nucleotide sequence aligned to the GenBank reference.
+        ref (SeqRecord): GenBank record providing CDS coordinates.
+
+    Returns:
+        dict: Mapping ``"ORF:Part"`` to dictionaries containing translated sequences and ORF names.
+    """
     orfs = makeOrfTable(ref)
     translated_sequence = {orfs.index[i]+":"+str(orfs.iloc[i].Part):{"Sequence":"".join(list(iterative_translate("".join(orfs.iloc[i].Locations.extract(sequence)),truncate_proteins=True))),"ORF":orfs.index[i]} for i in range(len(orfs))}
     return translated_sequence
 
 def translate_mat_proteins_with_genbank(sequence,ref):
+    """Translate mature peptide annotations from a GenBank record.
+
+    Args:
+        sequence (Seq): Nucleotide sequence aligned to the GenBank reference.
+        ref (SeqRecord): GenBank record with ``mat_peptide`` annotations.
+
+    Returns:
+        dict: Mapping peptide names to translated sequence strings and metadata.
+    """
     proteins = makeMatProteinTable(ref)
     proteins = proteins.drop_duplicates(subset=["ORF",'Start','End','Part',],keep="first")
     proteins_dict={}
@@ -126,6 +211,20 @@ def translate_mat_proteins_with_genbank(sequence,ref):
 #####################################################################################
 ## ESM Embedding Functions ##########################################################
 def embed_sequence(sequence, model, device, model_layers, batch_converter, alphabet):
+    """Embed a protein sequence with a HuggingFace ESM model.
+
+    Args:
+        sequence (str): Amino-acid sequence with no padding tokens.
+        model (PreTrainedModel): HuggingFace ESM model instance.
+        device (torch.device): Device where tensors should reside.
+        model_layers (int): Hidden-state index to extract (falls back to last layer if too large).
+        batch_converter (callable): Function that converts (label, seq) pairs to model tokens.
+        alphabet (Any): Alphabet object exposing ``padding_idx`` for token trimming.
+
+    Returns:
+        tuple: ``(results, base_logits, base_mean_embedding, full_embedding)`` where logits are
+        log-softmax probabilities and embeddings are torch tensors on CPU.
+    """
     # Sequences to embed
     sequence_data = [('base', sequence)]
     
@@ -163,6 +262,19 @@ def embed_sequence(sequence, model, device, model_layers, batch_converter, alpha
     return results, base_logits, base_mean_embedding, full_embedding
 
 def process_protein_sequence(sequence, model, model_layers, batch_converter, alphabet, device):
+    """Embed a protein sequence and package logits, mean embeddings, and scores.
+
+    Args:
+        sequence (str): Amino-acid sequence to embed.
+        model (PreTrainedModel): HuggingFace ESM model.
+        model_layers (int): Hidden-state index to harvest.
+        batch_converter (callable): Tokenizer helper returned by ``alphabet.get_batch_converter``.
+        alphabet (Any): Alphabet object used for token lookup.
+        device (torch.device): Device for intermediate tensors.
+
+    Returns:
+        dict: ``{"Mean_Embedding": list, "Logits": list, "sequence_grammaticality": float}``.
+    """
     # Embed Sequence
     # This will now call the updated function defined in this cell, not the one in Functions.py
     results, base_logits, base_mean_embedding, full_embedding = embed_sequence(
@@ -185,6 +297,22 @@ def process_protein_sequence(sequence, model, model_layers, batch_converter, alp
 
 
 def embed_protein_sequences(protein_sequences,reference_protein,coding_region_name,model,model_layers,device,batch_converter,alphabet,scores=False):
+    """Embed reference and mutant protein sequences and optionally compute mutation scores.
+
+    Args:
+        protein_sequences (Iterable[Tuple[str,str]]): (label, sequence) pairs to evaluate.
+        reference_protein (str): Reference sequence used for scoring and logits extraction.
+        coding_region_name (str): Label for the coding region (e.g., ``"S:0"``).
+        model (PreTrainedModel): HuggingFace ESM model.
+        model_layers (int): Hidden-state index used for embeddings.
+        device (torch.device): Device for computation.
+        batch_converter (callable): Token converter from the alphabet.
+        alphabet (Any): Alphabet helper exposing tokens and indices.
+        scores (bool): When True, compute grammaticality/semantic metrics for each mutant.
+
+    Returns:
+        dict: Nested dictionary keyed by sequence label then coding region with embeddings/scores.
+    """
     #Embed Reference Protein Sequence
     results, reference_logits, reference_mean_embedding, full_embedding = embed_sequence(reference_protein,model,device,model_layers,batch_converter,alphabet)
     
@@ -266,6 +394,18 @@ def embed_protein_sequences(protein_sequences,reference_protein,coding_region_na
 ######################################################################################
 ## Scoring Functions #################################################################
 def grammaticality_and_evolutionary_index(word_pos_prob, seq, mutations):
+    """Calculate log-probability scores and evolutionary ratios for mutations.
+
+    Args:
+        word_pos_prob (dict[tuple[str,int], float]): Mapping of (aa, position) to log probability
+            from the reference logits (positions are 0-indexed).
+        seq (str): Reference amino-acid sequence.
+        mutations (Iterable[str]): Mutation strings such as ``A12T`` (no insertions/deletions).
+
+    Returns:
+        tuple[float, float]: Sum of mutant log-probabilities and the evolutionary ratio (difference
+        between mutant and original log-probabilities).
+    """
     if len(mutations) == 0:
         print('No mutations detected')
         return 0, 0
@@ -296,6 +436,17 @@ def grammaticality_and_evolutionary_index(word_pos_prob, seq, mutations):
     return np.sum(mut_probs), np.sum(ev_ratios)
 
 def get_sequence_grammaticality(sequence,sequence_logits,alphabet,mask_pos=None):   
+    """Sum log-probabilities for observed amino acids, optionally masking positions.
+
+    Args:
+        sequence (str): Amino-acid sequence being evaluated.
+        sequence_logits (array-like): Logits or log-probabilities with bos/eos tokens included.
+        alphabet (Any): Alphabet object providing ``get_idx`` for amino acids.
+        mask_pos (Iterable[int] | None): Zero-based positions to exclude from the sum.
+
+    Returns:
+        float: Log-probability sum over all (or unmasked) positions.
+    """
     prob_list = []
     sequence_logits = torch.FloatTensor(sequence_logits)
     for pos in range(len(sequence)):
@@ -311,10 +462,33 @@ def get_sequence_grammaticality(sequence,sequence_logits,alphabet,mask_pos=None)
     return base_grammaticality
 
 def semantic_calc(target,base):
+    """Compute L1 distance between two embedding vectors.
+
+    Args:
+        target (Iterable[float]): Target embedding values.
+        base (Iterable[float]): Reference embedding values.
+
+    Returns:
+        float: Sum of absolute differences.
+    """
     return float(sum(abs(np.array(target)-np.array(base) )))
 #######################################################################################
 ## Genbank Functions ##################################################################
 def process_sequence_genbank(sequence,genbank,model,model_layers,device,batch_converter,alphabet):
+    """Embed all translated proteins defined by a GenBank record.
+
+    Args:
+        sequence (Seq): Nucleotide sequence aligned to ``genbank``.
+        genbank (SeqRecord): Annotation containing CDS/mature peptide information.
+        model (PreTrainedModel): HuggingFace ESM model for embedding.
+        model_layers (int): Hidden-state index to retrieve.
+        device (torch.device): Device to run inference on.
+        batch_converter (callable): Tokenization helper for the model.
+        alphabet (Any): Alphabet helper for logits indexing.
+
+    Returns:
+        dict: Mapping coding-region names to embeddings/logits/metadata.
+    """
     #Translate nucleotide to proteins using genbank
     Coding_Regions= translate_with_genbank(sequence,genbank)
     Mature_Proteins= translate_mat_proteins_with_genbank(sequence,genbank)
@@ -344,6 +518,16 @@ def process_sequence_genbank(sequence,genbank,model,model_layers,device,batch_co
     return Merged_Coding_Regions
 
 def get_region_from_genbank(sequence,genbank,region_name):
+    """Return a single translated region from a GenBank annotation.
+
+    Args:
+        sequence (Seq): Nucleotide sequence to translate.
+        genbank (SeqRecord): Corresponding GenBank record.
+        region_name (str): Key identifying the desired region (matching ``Merged_Coding_Regions``).
+
+    Returns:
+        dict: ``{region_name: region_dict}`` containing translated sequence details.
+    """
     #Translate nucleotide to proteins using genbank
     Coding_Regions= translate_with_genbank(sequence,genbank)
     Mature_Proteins= translate_mat_proteins_with_genbank(sequence,genbank)
@@ -359,6 +543,21 @@ def get_region_from_genbank(sequence,genbank,region_name):
 
 
 def process_and_dms_sequence_genbank(sequence,genbank,model,model_layers,device,batch_converter,alphabet,specify_orf=""):
+    """Embed reference coding regions and all single mutants derived via DMS.
+
+    Args:
+        sequence (Seq): Input nucleotide sequence.
+        genbank (SeqRecord): Annotation describing coding regions.
+        model (PreTrainedModel): HuggingFace ESM model.
+        model_layers (int): Hidden-state index to extract.
+        device (torch.device): Device to run embeddings on.
+        batch_converter (callable): Token conversion callable.
+        alphabet (Any): Alphabet helper for logits.
+        specify_orf (str): Optional ORF name to restrict processing.
+
+    Returns:
+        dict: Nested structure containing reference embeddings and DMS mutant metrics per ORF.
+    """
     #Translate nucleotide to proteins using genbank
     Coding_Regions= translate_with_genbank(sequence,genbank)
     Mature_Proteins= translate_mat_proteins_with_genbank(sequence,genbank)
@@ -418,12 +617,30 @@ def process_and_dms_sequence_genbank(sequence,genbank,model,model_layers,device,
     return embeddings
 
 def read_sequences_to_dict(file_path, file_format="fasta"):
+    """Parse sequences from a FASTA/GenBank/etc file into a dictionary.
+
+    Args:
+        file_path (str): Path to the sequence file.
+        file_format (str): Format understood by ``SeqIO.parse`` (default ``"fasta"``).
+
+    Returns:
+        dict[str, str]: Mapping record IDs to plain string sequences.
+    """
     sequences = {}
     for record in SeqIO.parse(file_path, file_format):
         sequences[record.id] = str(record.seq)  # Use record.id as the key and record.seq as the value
     return sequences
 
 def get_mutations(seq1, seq2):
+    """Compute point mutations or deletions between two aligned sequences.
+
+    Args:
+        seq1 (str): Reference sequence (with gaps allowed).
+        seq2 (str): Mutated sequence aligned to ``seq1`` length.
+
+    Returns:
+        list[str]: Mutation descriptors like ``A12T`` or ``A12del``.
+    """
     mutations = []
     for i in range(len(seq1)):
         if seq1[i] != seq2[i]:
@@ -434,6 +651,16 @@ def get_mutations(seq1, seq2):
     return mutations
 
 def get_indel_mutations(aligned_reference,indel_sequence):
+    """Extract substitutions, insertions, and deletions from aligned sequences with indels.
+
+    Args:
+        aligned_reference (str): Reference sequence including gaps.
+        indel_sequence (str): Sequence containing potential insertions/deletions.
+
+    Returns:
+        tuple[list[str], list[str], list[str]]: Point mutations, insertion descriptors (``ins``),
+        and deletion descriptors (``del``).
+    """
     index = 1
     insertion_subtract = 0
     mutations =[] 
@@ -455,6 +682,22 @@ def get_indel_mutations(aligned_reference,indel_sequence):
 #######################################################################################
 ## Fasta Functions ####################################################################
 def process_fasta(filename,protein_name,reference_sequence,model,model_layers,batch_converter,device,alphabet,insertions=False):
+    """Embed each sequence in a FASTA file relative to a reference protein.
+
+    Args:
+        filename (str): Path to FASTA file with amino-acid sequences.
+        protein_name (str): Identifier used as key in the resulting dictionary.
+        reference_sequence (str): Reference amino-acid sequence for scoring.
+        model (PreTrainedModel): HuggingFace ESM model instance.
+        model_layers (int): Hidden-state index used for embeddings.
+        batch_converter (callable): Token conversion helper.
+        device (torch.device): Device for computation.
+        alphabet (Any): Alphabet helper for logits.
+        insertions (bool): If True, skip mutation-based scoring (sequence lengths may differ).
+
+    Returns:
+        dict: Embedding and scoring information for the reference and each FASTA entry.
+    """
     key = protein_name
     base_seq = reference_sequence  
     embeddings = {key:{}}
@@ -509,6 +752,14 @@ def process_fasta(filename,protein_name,reference_sequence,model,model_layers,ba
 #######################################################################################
 ## VOC Functions ####################################################################
 def build_voc_dictionary(lineage_dict):
+    """Map Pango lineages to VOC labels using a provided dictionary.
+
+    Args:
+        lineage_dict (dict[str, str | list[str]]): Mapping from variant names to lineage(s).
+
+    Returns:
+        dict[str, list[str]]: VOC name to list of matching lineage prefixes.
+    """
     vocs = {"Alpha":["B.1.1.7"],"Beta":["B.1.351"],"Gamma":["P.1"],"Delta":["B.1.617.2"],"Omicron":["B.1.1.529"]}
     
     for key in lineage_dict.keys():
@@ -534,6 +785,15 @@ def build_voc_dictionary(lineage_dict):
     return vocs
 
 def is_voc(lineage,voc_dictionary):
+    """Determine which VOC a lineage belongs to, if any.
+
+    Args:
+        lineage (str): Pango lineage string (e.g., ``"B.1.1.7.2"``).
+        voc_dictionary (dict[str, list[str]]): Output of ``build_voc_dictionary``.
+
+    Returns:
+        str: VOC label or ``"Non-VOC"`` if no match.
+    """
     for key,values in voc_dictionary.items():
         if "." in lineage:
             start  = lineage.split(".")[0]
@@ -554,6 +814,15 @@ def is_voc(lineage,voc_dictionary):
 #######################################################################################
 ## Epistasis Functions ##############################################################
 def get_reference_mutations(ref,mut):
+    """Return mutations required to transform one aligned sequence into another.
+
+    Args:
+        ref (str): Reference sequence with possible gaps.
+        mut (str): Target sequence aligned to ``ref``.
+
+    Returns:
+        list[str]: Mutation strings, ignoring gap positions in the reference.
+    """
     mutations = []
     gap_counter = 0
     for i,a in enumerate(ref):
@@ -566,6 +835,15 @@ def get_reference_mutations(ref,mut):
     return mutations   
 
 def revert_sequence(reference_sequence,mutations):
+    """Undo mutations by applying the reference amino acid at each specified position.
+
+    Args:
+        reference_sequence (str): Sequence currently containing mutations.
+        mutations (Iterable[str]): Mutation strings indicating target positions to revert.
+
+    Returns:
+        str: Sequence after reverting each supplied mutation.
+    """
     mutated_seq = reference_sequence
     for mutation in mutations:
         if 'ins' not in mutation and 'del' not in mutation and "X" not in mutation:
@@ -575,6 +853,15 @@ def revert_sequence(reference_sequence,mutations):
     return mutated_seq
 
 def format_logits(logits,alphabet):
+    """Convert raw logits to a tidy pandas DataFrame of amino-acid probabilities.
+
+    Args:
+        logits (array-like): Raw logits including BOS/EOS rows.
+        alphabet (Any): Alphabet exposing ``all_toks`` for column ordering.
+
+    Returns:
+        pandas.DataFrame: Logits trimmed to amino-acid rows with sequential index.
+    """
     amino_acids = ["A","R","N","D","C","Q","E","G","H","I","L","K","M","F","P","S","T","W","Y","V"]
     logits = pd.DataFrame(logits)
     logits.columns = alphabet.all_toks
@@ -584,6 +871,16 @@ def format_logits(logits,alphabet):
     return logits
 
 def remap_logits(mutated_logits,ref_seq_aligned,mutated_seq_aligned):
+    """Realign logits from a gapless sequence back onto an alignment with gaps.
+
+    Args:
+        mutated_logits (pandas.DataFrame): Logits dataframe produced by ``format_logits``.
+        ref_seq_aligned (str): Reference sequence including gaps.
+        mutated_seq_aligned (str): Mutant sequence including gaps (aligned to reference).
+
+    Returns:
+        pandas.DataFrame: Logits dataframe indexed by alignment positions, including gap rows.
+    """
     #Add sequence used to produce the logits to the dataframe
     mutated_logits['Sequence'] = list(mutated_seq_aligned.replace('-',''))
     
@@ -631,7 +928,17 @@ def remap_logits(mutated_logits,ref_seq_aligned,mutated_seq_aligned):
     return rows
 
 def check_valid (v,min,max):
-  if v < min or v >max:
-    return v
-  return None
+    """Return value if it lies outside [min, max], else None.
+
+    Args:
+            v (float | None): Value to test.
+            min (float): Lower threshold.
+            max (float): Upper threshold.
+
+    Returns:
+            float | None: ``v`` when outside the interval, otherwise ``None``.
+    """
+    if v < min or v >max:
+        return v
+    return None
   
