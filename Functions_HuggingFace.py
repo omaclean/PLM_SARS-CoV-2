@@ -125,41 +125,64 @@ def translate_mat_proteins_with_genbank(sequence,ref):
     return proteins_dict
 #####################################################################################
 ## ESM Embedding Functions ##########################################################
-def embed_sequence(sequence,model,device,model_layers,batch_converter,alphabet):
-    #Sequences to embed (We only embed the reference and use the probabilities from that to generate the scores)
+def embed_sequence(sequence, model, device, model_layers, batch_converter, alphabet):
+    # Sequences to embed
     sequence_data = [('base', sequence)]
     
-    #Get tokens etc
+    # Get tokens
     batch_labels, batch_strs, batch_tokens = batch_converter(sequence_data)
     batch_len = (batch_tokens != alphabet.padding_idx).sum(1)[0]
 
-    #Move tokens to GPU
+    # Move tokens to GPU
     if torch.cuda.is_available():
         batch_tokens = batch_tokens.to(device=device, non_blocking=True)
 
     with torch.no_grad():
-        results = model(batch_tokens, repr_layers=[model_layers], return_contacts=False)
+        # FIX: Use output_hidden_states instead of repr_layers
+        results = model(batch_tokens, output_hidden_states=True)
     del batch_tokens
 
-    #Embed Sequences
-    token_representation = results["representations"][model_layers][0]
+    # FIX: Handle Layer Indexing
+    # HF hidden_states is a tuple: (embeddings, layer_1, ... layer_N)
+    # Length is num_layers + 1.
+    # If model_layers is too high (e.g. 33 for a 30-layer model), default to the last layer (-1).
+    
+    try:
+        token_representation = results.hidden_states[model_layers][0]
+    except IndexError:
+        print(f"Warning: Requested layer {model_layers} is out of bounds for this model. Using last layer.")
+        token_representation = results.hidden_states[-1][0]
+
     full_embedding = token_representation[1:batch_len - 1].cpu()
-    base_mean_embedding  = token_representation[1 : batch_len - 1].mean(0).cpu()
+    base_mean_embedding = token_representation[1 : batch_len - 1].mean(0).cpu()
 
-    #Get Embedding and probabilities for reference sequence (Should be first sequence in data)
+    # FIX: Access logits directly
     lsoftmax = torch.nn.LogSoftmax(dim=1)
-    base_logits = lsoftmax((results["logits"][0]).to(device="cpu"))
-    return results, base_logits, base_mean_embedding,full_embedding
+    base_logits = lsoftmax((results.logits[0]).to(device="cpu"))
+    
+    return results, base_logits, base_mean_embedding, full_embedding
 
-def process_protein_sequence(sequence,model,model_layers,batch_converter,alphabet,device):
-    #Embed Sequence
-    base_seq = sequence
-    results,base_logits, base_mean_embedding, full_embedding = embed_sequence(base_seq,model,device,model_layers,batch_converter,alphabet)
+def process_protein_sequence(sequence, model, model_layers, batch_converter, alphabet, device):
+    # Embed Sequence
+    # This will now call the updated function defined in this cell, not the one in Functions.py
+    results, base_logits, base_mean_embedding, full_embedding = embed_sequence(
+        sequence, model, device, model_layers, batch_converter, alphabet
+    )
+    
     results_dict = {}
     results_dict["Mean_Embedding"] = base_mean_embedding.tolist()
-    # results_dict["Full_Embedding"] = full_embedding.tolist()
     results_dict["Logits"] = base_logits.tolist()
+    
+    # Recalculate grammaticality if needed, or pass through
+    # Assuming get_sequence_grammaticality is available in your scope
+    try:
+        results_dict["sequence_grammaticality"] = get_sequence_grammaticality(sequence, base_logits, alphabet)
+    except NameError:
+        print("Warning: get_sequence_grammaticality function not found in current scope.")
+        results_dict["sequence_grammaticality"] = None
+        
     return results_dict
+
 
 def embed_protein_sequences(protein_sequences,reference_protein,coding_region_name,model,model_layers,device,batch_converter,alphabet,scores=False):
     #Embed Reference Protein Sequence
