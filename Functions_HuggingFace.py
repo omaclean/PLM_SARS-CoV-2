@@ -19,6 +19,8 @@ import re
 from Bio import PDB, Align
 from Bio.SeqUtils import seq1
 from IPython.display import display, HTML
+from Bio.PDB import PDBIO
+from io import StringIO
 
 
 ## Compression Functions ########################################################
@@ -979,8 +981,14 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     structure = parser.get_structure("struct", pdb_file)
     
     # Check if monomer (1 chain) or multimer
-    is_monomer = len(list(structure.get_chains())) == 1
-    
+    # We check chains in the first model to decide if it's a monomer PDB.
+    try:
+        first_model = next(iter(structure))
+        first_model_chains = list(first_model.get_chains())
+        is_monomer = len(first_model_chains) == 1
+    except StopIteration:
+        is_monomer = True
+
     # Setup Aligner (Smith-Waterman Local)
     aligner = Align.PairwiseAligner()
     aligner.mode = 'local'
@@ -992,6 +1000,10 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     residues_to_highlight = {}
 
     print(f"Processing PDB: {pdb_file}")
+    if is_monomer:
+        print("  -> Detected Monomer PDB (will use biological assembly)")
+    else:
+        print("  -> Detected Multimer PDB (will use file content)")
     
     # 3. Iterate over ALL chains (A, B, C...) to handle Trimers
     for model in structure:
@@ -1060,15 +1072,33 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     # 5. Visualise with py3Dmol
     view = py3Dmol.view(width=800, height=600)
     
-    # Use doAssembly=True to generate the biological assembly (e.g. trimer)
-    view.addModel(open(pdb_file).read(), 'pdb', {'doAssembly': True})
+    # Check if we have multiple models (e.g. biological assembly in separate models)
+    # If so, we need to add each model individually to show them all at once
+    # instead of as an animation.
+    num_models = len(list(structure))
+    if not is_monomer and num_models > 1:
+        print(f"  -> Detected {num_models} models. Adding all models to viewer.")
+        io = PDBIO()
+        for i, model in enumerate(structure):
+            # Write model to string
+            s = StringIO()
+            io.set_structure(model)
+            io.save(s)
+            view.addModel(s.getvalue(), 'pdb')
+    else:
+        # Use doAssembly=True to generate the biological assembly (e.g. trimer) ONLY if it's a monomer file
+        # If the file is already a multimer (single model with multiple chains), we assume it represents the assembly we want.
+        view.addModel(open(pdb_file).read(), 'pdb', {'doAssembly': is_monomer})
     
     # Base style: Grey Cartoon
     view.setStyle({'cartoon': {'color': '#eeeeee'}})
     
     # Loop through our mapped hits and colour them
     count = 0
+    matched_chains = set()
+    
     for chain_id, residues in residues_to_highlight.items():
+        matched_chains.add(chain_id)
         # Remove duplicates based on residue number, but keep mutation label (assume same residue = same mutation)
         unique_residues = {}
         for r, m in residues:
@@ -1107,7 +1137,8 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
             )
 
     view.zoomTo()
-    print(f"Mapped {count} mutation sites across the structure (showing biological assembly).")
+    print(f"Mapped {count} mutation sites across the structure.")
+    print(f"Matched chains: {sorted(list(matched_chains))}")
     
     # Display Legend
     legend_html = "<div style='font-family: monospace; margin-top: 10px;'>"

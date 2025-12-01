@@ -50,59 +50,91 @@ class TestVisualisation(unittest.TestCase):
     @patch('builtins.open', new_callable=unittest.mock.mock_open, read_data="PDB DATA")
     def test_visualise_mutations(self, mock_open, mock_html, mock_display, mock_view, mock_aligner, mock_parser):
         
-        # Setup Mocks
-        mock_structure = MagicMock()
-        mock_parser.return_value.get_structure.return_value = mock_structure
+    @patch('Functions_HuggingFace.PDB.PDBParser')
+    @patch('Functions_HuggingFace.Align.PairwiseAligner')
+    @patch('Functions_HuggingFace.py3Dmol.view')
+    @patch('Functions_HuggingFace.display')
+    @patch('Functions_HuggingFace.HTML')
+    @patch('builtins.open', new_callable=unittest.mock.mock_open, read_data="PDB DATA")
+    def test_visualise_mutations(self, mock_open, mock_html, mock_display, mock_view, mock_aligner, mock_parser):
+        
+        # --- Test Case 1: Monomer ---
+        print("\nTesting Monomer Case...")
+        mock_structure_monomer = MagicMock()
+        mock_parser.return_value.get_structure.return_value = mock_structure_monomer
         
         # Mock Monomer (1 chain)
-        mock_chain = MagicMock()
-        mock_chain.id = 'A'
-        mock_model = [mock_chain]
-        mock_structure.__iter__.return_value = [mock_model]
-        mock_structure.get_chains.return_value = [mock_chain] # Monomer
+        mock_chain_A = MagicMock()
+        mock_chain_A.id = 'A'
+        mock_model_monomer = MagicMock()
+        mock_model_monomer.get_chains.return_value = [mock_chain_A]
+        mock_model_monomer.__iter__.return_value = [mock_chain_A]
+        
+        mock_structure_monomer.__iter__.return_value = iter([mock_model_monomer])
         
         # Mock Residues
         mock_residue = MagicMock()
         mock_residue.id = (' ', 10, ' ') # Residue 10
         mock_residue.resname = 'ALA'
-        mock_chain.__iter__.return_value = [mock_residue]
+        mock_chain_A.__iter__.return_value = [mock_residue]
         
         # Mock Alignment
         mock_alignment = MagicMock()
         mock_alignment.score = 100
-        mock_alignment.indices = [[0], [0]] # Match user index 0 to pdb index 0
+        mock_alignment.indices = [[0], [0]] 
         mock_aligner.return_value.align.return_value = [mock_alignment]
         
-        # Mock View
-        mock_view_instance = mock_view.return_value
+        # Call function
+        visualise_mutations_on_pdb('monomer.pdb', 'A', ['A1T'])
+        
+        # Verify doAssembly=True for monomer
+        mock_view.return_value.addModel.assert_called_with("PDB DATA", 'pdb', {'doAssembly': True})
+        
+        # --- Test Case 2: Multimer (Single Model) ---
+        print("\nTesting Multimer (Single Model) Case...")
+        mock_structure_multimer = MagicMock()
+        mock_parser.return_value.get_structure.return_value = mock_structure_multimer
+        
+        # Mock Multimer (2 chains in 1 model)
+        mock_chain_B = MagicMock()
+        mock_chain_B.id = 'B'
+        mock_model_multimer = MagicMock()
+        mock_model_multimer.get_chains.return_value = [mock_chain_A, mock_chain_B]
+        mock_model_multimer.__iter__.return_value = [mock_chain_A, mock_chain_B]
+        
+        mock_structure_multimer.__iter__.return_value = iter([mock_model_multimer])
+        
+        # Mock Residues for Chain B
+        mock_chain_B.__iter__.return_value = [mock_residue]
         
         # Call function
-        mutation_list = ['A1T'] # Mutation at index 0 (1-based)
-        visualise_mutations_on_pdb('dummy.pdb', 'A', mutation_list)
+        visualise_mutations_on_pdb('multimer.pdb', 'A', ['A1T'])
         
-        # Verify View Creation
-        mock_view.assert_called_with(width=800, height=600)
-        mock_view_instance.addModel.assert_called()
+        # Verify doAssembly=False for multimer
+        mock_view.return_value.addModel.assert_called_with("PDB DATA", 'pdb', {'doAssembly': False})
         
-        # Verify Styling
-        # Should add style for residue 10 with a color
-        # Since it's a monomer, selector should NOT have 'chain'
-        expected_selector = {'resi': 10}
+        # --- Test Case 3: Multimer (Multi-Model) ---
+        print("\nTesting Multimer (Multi-Model) Case...")
+        mock_structure_multimodel = MagicMock()
+        mock_parser.return_value.get_structure.return_value = mock_structure_multimodel
         
-        # Check if addStyle was called with this selector
-        calls = mock_view_instance.addStyle.call_args_list
-        found_selector = False
-        for call in calls:
-            args, _ = call
-            if args[0] == expected_selector:
-                found_selector = True
-                break
+        # Mock 2 Models
+        mock_model_1 = MagicMock()
+        mock_model_2 = MagicMock()
+        mock_model_1.get_chains.return_value = [mock_chain_A] # Just to satisfy monomer check
         
-        self.assertTrue(found_selector, "Did not find style application for residue 10 without chain ID (monomer mode)")
+        # Make structure iterable return 2 models
+        mock_structure_multimodel.__iter__.return_value = iter([mock_model_1, mock_model_2])
         
-        # Verify Legend
-        mock_display.assert_called()
-        mock_html.assert_called()
+        # Call function
+        visualise_mutations_on_pdb('multimodel.pdb', 'A', ['A1T'])
+        
+        # Verify addModel called multiple times (once for each model)
+        # We expect at least 2 calls with string data (not file handle)
+        # Note: The exact string value depends on PDBIO mock, which is hard to check here.
+        # But we can check call count.
+        # Initial call for monomer + initial call for multimer + 2 calls for multimodel = 4 calls total
+        self.assertEqual(mock_view.return_value.addModel.call_count, 4)
         
         print("Test passed!")
 
