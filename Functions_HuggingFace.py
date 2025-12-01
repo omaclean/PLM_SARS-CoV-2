@@ -14,6 +14,10 @@ from Bio import SeqIO
 from scipy.special import softmax
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
+import py3Dmol
+import re
+from Bio import PDB, Align
+from Bio.SeqUtils import seq1
 
 
 ## Compression Functions ########################################################
@@ -942,3 +946,160 @@ def check_valid (v,min,max):
         return v
     return None
   
+def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold_score=50):
+    """
+    Maps user-defined mutations onto a PDB structure (trimer friendly).
+    
+    Args:
+        pdb_file (str): Path to .pdb file.
+        user_sequence (str): The specific K lineage AA sequence string.
+        mutation_list (list): List of strings e.g., ['A123T', 'N145K'].
+                              Assumes 1-based indexing in the string.
+        threshold_score (int): Minimum alignment score to consider a chain a "match".
+    """
+    
+    # 1. Parse Mutation Indices from the list (e.g. 'A123T' -> 122 (0-based))
+    # We assume the input list uses standard 1-based biological numbering
+    sites_of_interest = []
+    for mut in mutation_list:
+        match = re.search(r'(\d+)', mut)
+        if match:
+            # Convert 1-based str index to 0-based list index
+            sites_of_interest.append(int(match.group(1)) - 1)
+    
+    # 2. Parse PDB Structure
+    parser = PDB.PDBParser(QUIET=True)
+    structure = parser.get_structure("struct", pdb_file)
+    
+    # Setup Aligner (Smith-Waterman Local)
+    aligner = Align.PairwiseAligner()
+    aligner.mode = 'local'
+    # High gap penalties to prevent breaking the helix/sheet structure in alignment
+    aligner.open_gap_score = -10
+    aligner.extend_gap_score = -0.5
+
+    # Dictionary to store hits: { (ChainID, ResidueID) : Color }
+    # py3Dmol expects ResidueID as integer, but PDB might have insertion codes.
+    # We will store raw PDB res numbers.
+    residues_to_highlight = {}
+
+    print(f"Processing PDB: {pdb_file}")
+    
+    # 3. Iterate over ALL chains (A, B, C...) to handle Trimers
+    for model in structure:
+        for chain in model:
+            
+            # Extract sequence from actual atom coordinates
+            pdb_residues = [] # List of (ResNum, InsertionCode)
+            pdb_seq_str = ""
+            
+            for residue in chain:
+                if PDB.is_aa(residue):
+                    pdb_residues.append(residue.id) # .id is tuple (' ', 145, ' ')
+                    pdb_seq_str += seq1(residue.resname)
+            
+            # Skip empty chains
+            if not pdb_seq_str: continue
+
+            # Align User Seq vs Chain Seq
+            alignment = aligner.align(user_sequence, pdb_seq_str)[0]
+            
+            # Simple score check to see if this chain is the protein of interest (HA1)
+            # and not the stem (HA2) or a nanobody
+            if alignment.score < threshold_score:
+                continue
+                
+            print(f"  -> Match found on Chain {chain.id} (Score: {alignment.score:.1f})")
+
+            # 4. Map User Indices to PDB Residues using the Alignment
+            # We iterate through the alignment trace
+            # aligned arrays: [0] is query (user), [1] is target (pdb)
+            
+            # alignment.indices is a list of aligned indices for the target and query
+            # But extracting exact matches requires walking the path.
+            
+            # Get the indices of the matches in both sequences
+            # Get the indices of the matches in both sequences
+            try:
+                user_indices = alignment.indices[0] # Indices in user_sequence
+                pdb_indices = alignment.indices[1]  # Indices in pdb_seq_str
+            except AttributeError:
+                # Fallback for older Biopython versions (e.g. < 1.80)
+                user_indices = []
+                pdb_indices = []
+                # alignment.aligned is a tuple of two lists of tuples: ([(u_start, u_end), ...], [(p_start, p_end), ...])
+                for (u_start, u_end), (p_start, p_end) in zip(*alignment.aligned):
+                    user_indices.extend(range(u_start, u_end))
+                    pdb_indices.extend(range(p_start, p_end))
+            
+            # Create a lookup: User_Index -> PDB_Array_Index
+            # We only care if the user index is in our sites_of_interest
+            user_to_pdb_array_map = dict(zip(user_indices, pdb_indices))
+            
+            for site in sites_of_interest:
+                if site in user_to_pdb_array_map:
+                    pdb_array_idx = user_to_pdb_array_map[site]
+                    
+                    # Retrieve the REAL PDB residue ID (handling numbering/insertion codes)
+                    # pdb_residues is a list of PDB residue objects aligned with pdb_seq_str
+                    try:
+                        real_residue_id = pdb_residues[pdb_array_idx]
+                        # real_residue_id example: (' ', 158, ' ') or (' ', 158, 'A')
+                        
+                        resi_num = real_residue_id[1]
+                        # py3Dmol handles insertion codes via specific selection if needed, 
+                        # but usually just ID is enough for broad visualisation. 
+                        # If you have insertion codes (e.g. 144A), py3Dmol needs carefully formatted strings.
+                        
+                        # Store for plotting
+                        if chain.id not in residues_to_highlight:
+                            residues_to_highlight[chain.id] = []
+                        residues_to_highlight[chain.id].append(resi_num)
+                        
+                    except IndexError:
+                        pass
+
+    # 5. Visualise with py3Dmol
+    view = py3Dmol.view(width=800, height=600)
+    
+    # Use doAssembly=True to generate the biological assembly (e.g. trimer)
+    view.addModel(open(pdb_file).read(), 'pdb', {'doAssembly': True})
+    
+    # Base style: Grey Cartoon
+    view.setStyle({'cartoon': {'color': '#eeeeee'}})
+    
+    # Loop through our mapped hits and colour them
+    count = 0
+    for chain_id, res_nums in residues_to_highlight.items():
+        # Remove duplicates
+        res_nums = list(set(res_nums))
+        count += len(res_nums)
+        
+        # Apply style to specific residues
+        # When doAssembly=True, py3Dmol might create multiple models or rename chains.
+        # If the assembly consists of copies of the chains we parsed (e.g. A, B),
+        # specifying {'chain': chain_id} will target that chain in ALL models if they preserve the ID.
+        # If they are renamed, we might miss them. 
+        # However, usually for homo-oligomers or simple assemblies, keeping the chain ID is safer 
+        # than applying to all chains (which might highlight the wrong protein in a hetero-complex).
+        # We assume here that the assembly preserves chain IDs across models or we only care about the primary chains.
+        
+        # To be more robust for multimers where we want to highlight ALL copies of the matching chain:
+        # We can try to apply the style to the specific chain ID.
+        
+        view.addStyle(
+            {'chain': chain_id, 'resi': res_nums},
+            {'cartoon': {'color': '#FF4136'}} # Bright Red for backbone
+        )
+        view.addStyle(
+            {'chain': chain_id, 'resi': res_nums},
+            {'stick': {'colorscheme': 'redCarbon'}} # Sticks for sidechains
+        )
+        view.addStyle(
+             {'chain': chain_id, 'resi': res_nums},
+             {'surface': {'opacity':0.5, 'color': '#FF4136'}} # Transparent surface
+        )
+
+    view.zoomTo()
+    print(f"Mapped {count} mutation sites across the structure (showing biological assembly).")
+    return view
