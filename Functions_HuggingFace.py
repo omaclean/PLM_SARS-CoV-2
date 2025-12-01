@@ -18,6 +18,7 @@ import py3Dmol
 import re
 from Bio import PDB, Align
 from Bio.SeqUtils import seq1
+from IPython.display import display, HTML
 
 
 ## Compression Functions ########################################################
@@ -960,16 +961,25 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     
     # 1. Parse Mutation Indices from the list (e.g. 'A123T' -> 122 (0-based))
     # We assume the input list uses standard 1-based biological numbering
-    sites_of_interest = []
+    sites_of_interest = {}
+    
+    # Color palette for mutations
+    colors = ['#FF4136', '#2ECC40', '#0074D9', '#FF851B', '#B10DC9', '#FFDC00', '#F012BE', '#39CCCC', '#01FF70', '#85144b']
+    mutation_colors = {mut: colors[i % len(colors)] for i, mut in enumerate(mutation_list)}
+
     for mut in mutation_list:
         match = re.search(r'(\d+)', mut)
         if match:
             # Convert 1-based str index to 0-based list index
-            sites_of_interest.append(int(match.group(1)) - 1)
+            idx = int(match.group(1)) - 1
+            sites_of_interest[idx] = mut
     
     # 2. Parse PDB Structure
     parser = PDB.PDBParser(QUIET=True)
     structure = parser.get_structure("struct", pdb_file)
+    
+    # Check if monomer (1 chain) or multimer
+    is_monomer = len(list(structure.get_chains())) == 1
     
     # Setup Aligner (Smith-Waterman Local)
     aligner = Align.PairwiseAligner()
@@ -978,9 +988,7 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     aligner.open_gap_score = -10
     aligner.extend_gap_score = -0.5
 
-    # Dictionary to store hits: { (ChainID, ResidueID) : Color }
-    # py3Dmol expects ResidueID as integer, but PDB might have insertion codes.
-    # We will store raw PDB res numbers.
+    # Dictionary to store hits: { ChainID : [(ResidueID, MutationLabel), ...] }
     residues_to_highlight = {}
 
     print(f"Processing PDB: {pdb_file}")
@@ -1015,10 +1023,6 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
             # We iterate through the alignment trace
             # aligned arrays: [0] is query (user), [1] is target (pdb)
             
-            # alignment.indices is a list of aligned indices for the target and query
-            # But extracting exact matches requires walking the path.
-            
-            # Get the indices of the matches in both sequences
             # Get the indices of the matches in both sequences
             try:
                 user_indices = alignment.indices[0] # Indices in user_sequence
@@ -1036,25 +1040,19 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
             # We only care if the user index is in our sites_of_interest
             user_to_pdb_array_map = dict(zip(user_indices, pdb_indices))
             
-            for site in sites_of_interest:
-                if site in user_to_pdb_array_map:
-                    pdb_array_idx = user_to_pdb_array_map[site]
+            for site_idx, mut_label in sites_of_interest.items():
+                if site_idx in user_to_pdb_array_map:
+                    pdb_array_idx = user_to_pdb_array_map[site_idx]
                     
                     # Retrieve the REAL PDB residue ID (handling numbering/insertion codes)
-                    # pdb_residues is a list of PDB residue objects aligned with pdb_seq_str
                     try:
                         real_residue_id = pdb_residues[pdb_array_idx]
-                        # real_residue_id example: (' ', 158, ' ') or (' ', 158, 'A')
-                        
                         resi_num = real_residue_id[1]
-                        # py3Dmol handles insertion codes via specific selection if needed, 
-                        # but usually just ID is enough for broad visualisation. 
-                        # If you have insertion codes (e.g. 144A), py3Dmol needs carefully formatted strings.
                         
                         # Store for plotting
                         if chain.id not in residues_to_highlight:
                             residues_to_highlight[chain.id] = []
-                        residues_to_highlight[chain.id].append(resi_num)
+                        residues_to_highlight[chain.id].append((resi_num, mut_label))
                         
                     except IndexError:
                         pass
@@ -1070,36 +1068,53 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     
     # Loop through our mapped hits and colour them
     count = 0
-    for chain_id, res_nums in residues_to_highlight.items():
-        # Remove duplicates
-        res_nums = list(set(res_nums))
-        count += len(res_nums)
+    for chain_id, residues in residues_to_highlight.items():
+        # Remove duplicates based on residue number, but keep mutation label (assume same residue = same mutation)
+        unique_residues = {}
+        for r, m in residues:
+            unique_residues[r] = m
+            
+        count += len(unique_residues)
         
-        # Apply style to specific residues
-        # When doAssembly=True, py3Dmol might create multiple models or rename chains.
-        # If the assembly consists of copies of the chains we parsed (e.g. A, B),
-        # specifying {'chain': chain_id} will target that chain in ALL models if they preserve the ID.
-        # If they are renamed, we might miss them. 
-        # However, usually for homo-oligomers or simple assemblies, keeping the chain ID is safer 
-        # than applying to all chains (which might highlight the wrong protein in a hetero-complex).
-        # We assume here that the assembly preserves chain IDs across models or we only care about the primary chains.
-        
-        # To be more robust for multimers where we want to highlight ALL copies of the matching chain:
-        # We can try to apply the style to the specific chain ID.
-        
-        view.addStyle(
-            {'chain': chain_id, 'resi': res_nums},
-            {'cartoon': {'color': '#FF4136'}} # Bright Red for backbone
-        )
-        view.addStyle(
-            {'chain': chain_id, 'resi': res_nums},
-            {'stick': {'colorscheme': 'redCarbon'}} # Sticks for sidechains
-        )
-        view.addStyle(
-             {'chain': chain_id, 'resi': res_nums},
-             {'surface': {'opacity':0.5, 'color': '#FF4136'}} # Transparent surface
-        )
+        for res_num, mut_label in unique_residues.items():
+            color = mutation_colors[mut_label]
+            
+            # If monomer, we don't specify chain to ensure it applies to the assembly if py3Dmol replicates it?
+            # Actually, if doAssembly=True, py3Dmol might create multiple chains.
+            # If it's a monomer PDB but biological assembly is a trimer, we want to highlight all copies.
+            # If we specify chain='A', it might only highlight chain A.
+            # If we DON'T specify chain, it highlights that residue number in ALL chains.
+            # So if it's a monomer PDB (1 chain parsed) but we want to show multimer, 
+            # we should probably NOT specify chain ID in the style, so it hits all generated copies.
+            # BUT if the PDB itself is a multimer (e.g. A, B, C parsed), we must specify chain ID 
+            # to avoid highlighting wrong residues in other chains (e.g. HA2 vs HA1).
+            
+            selector = {'resi': res_num}
+            if not is_monomer:
+                selector['chain'] = chain_id
+            
+            view.addStyle(
+                selector,
+                {'cartoon': {'color': color}} 
+            )
+            view.addStyle(
+                selector,
+                {'stick': {'colorscheme': 'grayCarbon', 'color': color}} 
+            )
+            view.addStyle(
+                 selector,
+                 {'surface': {'opacity':0.5, 'color': color}} 
+            )
 
     view.zoomTo()
     print(f"Mapped {count} mutation sites across the structure (showing biological assembly).")
+    
+    # Display Legend
+    legend_html = "<div style='font-family: monospace; margin-top: 10px;'>"
+    legend_html += "<b>Mutation Legend:</b><br>"
+    for mut, color in mutation_colors.items():
+        legend_html += f"<span style='color: {color}; margin-right: 15px;'>&#9632; {mut}</span>"
+    legend_html += "</div>"
+    display(HTML(legend_html))
+    
     return view
