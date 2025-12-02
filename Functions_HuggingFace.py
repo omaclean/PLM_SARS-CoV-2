@@ -335,8 +335,10 @@ def embed_protein_sequences(protein_sequences,reference_protein,coding_region_na
     embeddings['Reference'] = {}
     embeddings['Reference'][coding_region_name] = {"Mean_Embedding":reference_mean_embedding.tolist(),
                                         "Logits":reference_logits.tolist(),
-                                        "sequence_grammaticality":get_sequence_grammaticality(reference_protein,reference_logits,alphabet)
-                                        
+                                        "sequence_grammaticality":get_sequence_grammaticality(reference_protein,reference_logits,alphabet),
+                                        "sequence_entropy":get_sequence_entropy(reference_protein,reference_logits,alphabet),
+                                        "sequence_probabilities":get_reference_probabilities(reference_protein,reference_logits,alphabet)
+                                     
                                     }
     #Process Fasta Files       
     fasta_sequences = protein_sequences
@@ -391,13 +393,89 @@ def embed_protein_sequences(protein_sequences,reference_protein,coding_region_na
             embeddings[name][coding_region_name]["mutation_count"] = len(just_mutations)
             embeddings[name][coding_region_name]["mutations"] = mutations_string
             embeddings[name][coding_region_name]["deletions(not_included_in_scores)"] = deletions_string
-            
+
+            #Entropy of the sequence
+            embeddings[name][coding_region_name]["entropy"] = get_sequence_entropy(sequence, embeddings[name][coding_region_name]['Logits'], alphabet)
+            embeddings[name][coding_region_name]["sequence_probabilities"] = get_reference_probabilities(sequence, embeddings[name][coding_region_name]['Logits'], alphabet)   
         #If no need for scores, sequences can be embedded as is with insertions, deletions truncations etc
         else:
             embeddings[coding_region_name][name] = process_protein_sequence(str(fasta.seq),model,model_layers,batch_converter,alphabet,device)
         i+=1
     return embeddings
 
+######################################################################################
+## Entropy Functions ##################################################################
+# Entropy of a sequence is calculated as the sum of the log-probabilities of each amino acid in the sequence
+# returns a list of entropies for each position in the sequence
+def get_sequence_entropy(sequence, logits, alphabet):
+    """
+    Calculate the Shannon entropy of the probability distribution at each position in the sequence.
+    H(x) = - sum(p(x) * log(p(x)))
+    
+    Args:
+        sequence (str): The amino acid sequence.
+        logits (torch.Tensor): The logits from the model (seq_len_with_special_tokens, vocab_size).
+        alphabet (esm.data.Alphabet): The alphabet object to map characters to indices.
+        
+    Returns:
+        list: A list of entropy values for each position in the sequence.
+    """
+    # Ensure logits is a torch.Tensor
+    logits_tensor = torch.FloatTensor(logits)
+    
+    # The logits tensor typically includes <cls> and <eos> tokens at the beginning and end.
+    # The actual amino acid sequence corresponds to logits[1 : len(sequence) + 1].
+    # We need to slice the logits to only include the actual sequence positions.
+    aa_logits = logits_tensor[1 : len(sequence) + 1]
+    
+    # Convert logits to probabilities
+    probs = torch.softmax(aa_logits, dim=-1)
+    
+    # Calculate entropy: -sum(p * log(p))
+    # Use torch.log for the log part and clamp_min for numerical stability to avoid log(0)
+    # A common way to calculate this is using torch.special.entr(probs).sum(dim=-1)
+    # Or manually:
+    log_probs = torch.log(probs.clamp_min(1e-9)) # Clamp to avoid log(0)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+    
+    return entropy.tolist()
+
+######################################################################################
+## reference probablity for each amino acid
+def get_reference_probabilities(sequence, logits, alphabet):
+    """
+    Calculate the probability of the reference (wild-type) amino acid at each position.
+    
+    Args:
+        sequence (str): The amino acid sequence.
+        logits (torch.Tensor): The logits from the model (seq_len_with_special_tokens, vocab_size).
+        alphabet (esm.data.Alphabet): The alphabet object to map characters to indices.
+        
+    Returns:
+        list: A list of probabilities for the reference amino acid at each position.
+    """
+    # Ensure logits is a torch.Tensor
+    logits_tensor = torch.FloatTensor(logits)
+    
+    # Slice logits to match sequence (remove cls and eos)
+    aa_logits = logits_tensor[1 : len(sequence) + 1]
+    
+    # Convert logits to probabilities
+    probs = torch.softmax(aa_logits, dim=-1)
+    
+    # Get indices for the sequence characters
+    # alphabet.get_idx() maps char to index
+    seq_indices = [alphabet.get_idx(aa) for aa in sequence]
+    seq_indices_tensor = torch.tensor(seq_indices)
+    
+    # Gather probabilities for the specific amino acids in the sequence
+    # probs is (seq_len, vocab_size)
+    # we want probs[i, seq_indices[i]] for each i
+    
+    # efficient gathering:
+    ref_probs = probs.gather(1, seq_indices_tensor.unsqueeze(1)).squeeze(1)
+    
+    return ref_probs.tolist()
 ######################################################################################
 ## Scoring Functions #################################################################
 def grammaticality_and_evolutionary_index(word_pos_prob, seq, mutations):
