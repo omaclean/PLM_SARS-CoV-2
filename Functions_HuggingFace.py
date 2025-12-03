@@ -21,6 +21,7 @@ from Bio.SeqUtils import seq1
 from IPython.display import display, HTML
 from Bio.PDB import PDBIO
 from io import StringIO
+import matplotlib.pyplot as plt
 
 
 ## Compression Functions ########################################################
@@ -1082,8 +1083,30 @@ def check_valid (v,min,max):
     if v < min or v >max:
         return v
     return None
+
+def align_sequences(reference_seq, query_seq, mode='local', open_gap_score=-10, extend_gap_score=-0.5):
+    """Perform pairwise sequence alignment using Biopython's PairwiseAligner.
+    
+    Args:
+        reference_seq (str): Reference sequence (can be from FASTA, PDB, etc.)
+        query_seq (str): Query sequence to align against reference
+        mode (str): Alignment mode - 'local' (default) or 'global'
+        open_gap_score (float): Gap opening penalty (default: -10)
+        extend_gap_score (float): Gap extension penalty (default: -0.5)
+        
+    Returns:
+        Bio.Align.PairwiseAlignment: Best alignment object with .score, .indices, etc.
+    """
+    aligner = Align.PairwiseAligner()
+    aligner.mode = mode
+    aligner.open_gap_score = open_gap_score
+    aligner.extend_gap_score = extend_gap_score
+    
+    alignments = aligner.align(reference_seq, query_seq)
+    return alignments[0]  # Return best alignment
   
-def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold_score=50):
+def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold_score=50, 
+                               coordinate_map=None, background_values=None, title=None):
     """
     Maps user-defined mutations onto a PDB structure (trimer friendly).
     
@@ -1093,21 +1116,49 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
         mutation_list (list): List of strings e.g., ['A123T', 'N145K'].
                               Assumes 1-based indexing in the string.
         threshold_score (int): Minimum alignment score to consider a chain a "match".
+        coordinate_map (dict, optional): Mapping from user sequence positions (1-based) to 
+                                        canonical/reference positions. E.g., {145: 144, 146: 145}.
+                                        If provided, positions in mutation_list will be remapped.
+        background_values (dict, optional): Dict mapping positions (1-based) to continuous values
+                                           (e.g., dn/ds, surface exposure, entropy). Structure will
+                                           be colored by these values using a gradient.
+        title (str, optional): Title/label for the visualization and legend (e.g., "PLM Entropy").
     """
     
     # 1. Parse Mutation Indices from the list (e.g. 'A123T' -> 122 (0-based))
     # We assume the input list uses standard 1-based biological numbering
     sites_of_interest = {}
     
-    # Color palette for mutations
-    colors = ['#FF4136', '#2ECC40', '#0074D9', '#FF851B', '#B10DC9', '#FFDC00', '#F012BE', '#39CCCC', '#01FF70', '#85144b']
-    mutation_colors = {mut: colors[i % len(colors)] for i, mut in enumerate(mutation_list)}
+    # Color palette for mutations - using matplotlib Dark2 or tab20 colormap
+
+    
+    # If more than 8 mutations, use tab20 (20 colors), otherwise use Dark2 (8 colors)
+    if len(mutation_list) > 8:
+        colormap = plt.cm.tab20
+        n_colors = 20
+    else:
+        colormap = plt.cm.Dark2
+        n_colors = 8
+    
+    colors = [colormap(i / n_colors) for i in range(n_colors)]
+    colors_hex = ['#%02x%02x%02x' % (int(r*255), int(g*255), int(b*255)) for r, g, b, a in colors]
+    mutation_colors = {mut: colors_hex[i % len(colors_hex)] for i, mut in enumerate(mutation_list)}
 
     for mut in mutation_list:
         match = re.search(r'(\d+)', mut)
         if match:
-            # Convert 1-based str index to 0-based list index
-            idx = int(match.group(1)) - 1
+            # Get 1-based position from mutation string
+            pos_1based = int(match.group(1))
+            
+            # Apply coordinate mapping if provided
+            if coordinate_map is not None and pos_1based in coordinate_map:
+                mapped_pos = coordinate_map[pos_1based]
+                # Convert mapped position to 0-based index
+                idx = mapped_pos - 1
+            else:
+                # Convert 1-based str index to 0-based list index
+                idx = pos_1based - 1
+            
             sites_of_interest[idx] = mut
     
     # 2. Parse PDB Structure
@@ -1122,13 +1173,6 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
         is_monomer = len(first_model_chains) == 1
     except StopIteration:
         is_monomer = True
-
-    # Setup Aligner (Smith-Waterman Local)
-    aligner = Align.PairwiseAligner()
-    aligner.mode = 'local'
-    # High gap penalties to prevent breaking the helix/sheet structure in alignment
-    aligner.open_gap_score = -10
-    aligner.extend_gap_score = -0.5
 
     # Dictionary to store hits: { ChainID : [(ResidueID, MutationLabel), ...] }
     residues_to_highlight = {}
@@ -1155,8 +1199,9 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
             # Skip empty chains
             if not pdb_seq_str: continue
 
-            # Align User Seq vs Chain Seq
-            alignment = aligner.align(user_sequence, pdb_seq_str)[0]
+            # Align User Seq vs Chain Seq using shared alignment function
+            alignment = align_sequences(user_sequence, pdb_seq_str, mode='local', 
+                                       open_gap_score=-10, extend_gap_score=-0.5)
             
             # Simple score check to see if this chain is the protein of interest (HA1)
             # and not the stem (HA2) or a nanobody
@@ -1224,8 +1269,47 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
         # If the file is already a multimer (single model with multiple chains), we assume it represents the assembly we want.
         view.addModel(open(pdb_file).read(), 'pdb', {'doAssembly': is_monomer})
     
-    # Base style: Grey Cartoon
-    view.setStyle({'cartoon': {'color': '#eeeeee'}})
+    # Apply background coloring if provided
+    if background_values is not None:
+        # Normalize values to [0, 1] for color mapping
+        vals = list(background_values.values())
+        min_val = min(vals)
+        max_val = max(vals)
+        val_range = max_val - min_val if max_val != min_val else 1.0
+        
+        # Apply gradient coloring to each position with a background value
+        for pos_1based, value in background_values.items():
+            # Normalize value
+            norm_val = (value - min_val) / val_range
+            
+            # Map to color gradient (blue -> white -> red)
+            if norm_val < 0.5:
+                # Blue to white
+                t = norm_val * 2
+                r = int(255 * t)
+                g = int(255 * t)
+                b = 255
+            else:
+                # White to red
+                t = (norm_val - 0.5) * 2
+                r = 255
+                g = int(255 * (1 - t))
+                b = int(255 * (1 - t))
+            
+            color_hex = f'#{r:02x}{g:02x}{b:02x}'
+            
+            # Apply coordinate mapping if provided
+            if coordinate_map is not None and pos_1based in coordinate_map:
+                mapped_pos = coordinate_map[pos_1based]
+            else:
+                mapped_pos = pos_1based
+            
+            # Apply coloring to this residue
+            selector = {'resi': mapped_pos}
+            view.addStyle(selector, {'cartoon': {'color': color_hex}})
+    else:
+        # Base style: Grey Cartoon (only if no background coloring)
+        view.setStyle({'cartoon': {'color': '#eeeeee'}})
     
     # Loop through our mapped hits and colour them
     count = 0
@@ -1276,10 +1360,125 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     
     # Display Legend
     legend_html = "<div style='font-family: monospace; margin-top: 10px;'>"
-    legend_html += "<b>Mutation Legend:</b><br>"
-    for mut, color in mutation_colors.items():
-        legend_html += f"<span style='color: {color}; margin-right: 15px;'>&#9632; {mut}</span>"
+    
+    # Add title if provided
+    if title:
+        legend_html += f"<h3 style='margin: 5px 0;'>{title}</h3>"
+    
+    # Add background color scale if applicable
+    if background_values is not None:
+        vals = list(background_values.values())
+        min_val = min(vals)
+        max_val = max(vals)
+        
+        legend_html += "<div style='margin: 10px 0;'>"
+        legend_html += f"<b>Background Color Scale:</b> {min_val:.3f} "
+        legend_html += "<span style='display: inline-block; width: 100px; height: 15px; "
+        legend_html += "background: linear-gradient(to right, #0000ff, #ffffff, #ff0000); "
+        legend_html += "border: 1px solid #ccc; vertical-align: middle;'></span>"
+        legend_html += f" {max_val:.3f}"
+        legend_html += "</div>"
+    
+    # Add mutation legend
+    if mutation_list:
+        legend_html += "<div style='margin-top: 10px;'><b>Mutation Legend:</b><br>"
+        for mut, color in mutation_colors.items():
+            legend_html += f"<span style='color: {color}; margin-right: 15px;'>&#9632; {mut}</span>"
+        legend_html += "</div>"
+    
     legend_html += "</div>"
     display(HTML(legend_html))
     
     return view
+
+
+def create_h3_numbering_map(fasta_file, reference_id=None, query_id=None, signal_peptide_length=16, 
+                            alignment_mode='global', open_gap_score=-10, extend_gap_score=-0.5):
+    """
+    Creates a dictionary mapping sequence positions to canonical H3 numbering.
+    Reads sequences from a FASTA file, aligns them, and creates the numbering map.
+    
+    Args:
+        fasta_file (str): Path to FASTA file containing reference and query sequences.
+        reference_id (str, optional): ID of reference sequence (e.g., Aichi/68). 
+                                     If None, uses first sequence in file.
+        query_id (str, optional): ID of query sequence. If None, uses second sequence in file.
+        signal_peptide_length (int): Length of signal peptide to skip (16 for Aichi).
+        alignment_mode (str): 'global' (default) or 'local' alignment.
+        open_gap_score (float): Gap opening penalty (default: -10).
+        extend_gap_score (float): Gap extension penalty (default: -0.5).
+        
+    Returns:
+        dict: {query_position (0-based): 'H3_Position_Label'} mapping positions in the 
+              query sequence to canonical H3 numbering based on the reference.
+    """
+    
+    # Read sequences from FASTA file
+    sequences = read_sequences_to_dict(fasta_file)
+    seq_ids = list(sequences.keys())
+    
+    # Select reference and query sequences
+    if reference_id is None:
+        reference_id = seq_ids[0]
+    if query_id is None:
+        query_id = seq_ids[1] if len(seq_ids) > 1 else seq_ids[0]
+    
+    ref_seq = sequences[reference_id]
+    query_seq = sequences[query_id]
+    
+    # Align sequences using shared alignment function
+    alignment = align_sequences(ref_seq, query_seq, mode=alignment_mode, 
+                               open_gap_score=open_gap_score, extend_gap_score=extend_gap_score)
+    
+    # Get aligned sequences as strings
+    aligned_ref = str(alignment).split('\n')[0]
+    aligned_query = str(alignment).split('\n')[2]
+    
+    mapping_dict = {}
+    
+    # Counters
+    h3_counter = 1 - signal_peptide_length # Starts at -15
+    query_pos = 0  # Track position in ungapped query sequence
+    
+    for i, (ref_res, query_res) in enumerate(zip(aligned_ref, aligned_query)):
+        
+        # Track query position (only increment when query has a residue)
+        if query_res != '-':
+            current_query_pos = query_pos
+            query_pos += 1
+        else:
+            continue  # Skip alignment columns where query has a gap
+        
+        # If the reference has a residue, we increment the H3 number
+        if ref_res != '-':
+            if h3_counter < 1:
+                # We are in the signal peptide
+                label = f"SP{h3_counter}"
+            else:
+                # We are in the mature peptide (Canonical H3 numbering)
+                label = str(h3_counter)
+            
+            mapping_dict[current_query_pos] = label
+            h3_counter += 1
+            
+        # If the reference has a gap (query has an insertion), 
+        # the H3 number stays the same but gets a suffix (e.g., 158A, 158B).
+        else:
+            # Find the last assigned H3 position
+            if mapping_dict:
+                # Get last label and strip any existing letter suffixes
+                last_label = list(mapping_dict.values())[-1]
+                base = last_label.rstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+                
+                # Count how many insertions we've already added after this base position
+                insertion_count = sum(1 for v in mapping_dict.values() 
+                                    if v.startswith(base) and v != base)
+                
+                # Create insertion label (158A, 158B, etc.)
+                suffix = chr(ord('A') + insertion_count)
+                label = f"{base}{suffix}"
+                mapping_dict[current_query_pos] = label
+            else:
+                mapping_dict[current_query_pos] = "Unknown"
+
+    return mapping_dict
