@@ -1106,7 +1106,7 @@ def align_sequences(reference_seq, query_seq, mode='local', open_gap_score=-10, 
     return alignments[0]  # Return best alignment
   
 def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold_score=50, 
-                               coordinate_map=None, background_values=None, title=None):
+                               coordinate_map=None, background_values=None, title=None, canonical_map=None):
     """
     Maps user-defined mutations onto a PDB structure (trimer friendly).
     
@@ -1123,6 +1123,9 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                                            (e.g., dn/ds, surface exposure, entropy). Structure will
                                            be colored by these values using a gradient.
         title (str, optional): Title/label for the visualization and legend (e.g., "PLM Entropy").
+        canonical_map (dict, optional): Mapping from 0-based sequence indices to canonical numbering
+                                       (e.g., H3 numbering: {0: 'SP-15', 16: '1', 173: '158A'}).
+                                       Displays a separate "Canonical Numbering" legend.
     """
     
     # 1. Parse Mutation Indices from the list (e.g. 'A123T' -> 122 (0-based))
@@ -1386,13 +1389,88 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
             legend_html += f"<span style='color: {color}; margin-right: 15px;'>&#9632; {mut}</span>"
         legend_html += "</div>"
     
+    # Add canonical numbering legend if provided
+    if canonical_map is not None and mutation_list:
+        legend_html += "<div style='margin-top: 15px; border-top: 1px solid #ccc; padding-top: 10px;'>"
+        legend_html += "<b>Canonical Numbering:</b><br>"
+        legend_html += "<table style='font-size: 0.9em; border-collapse: collapse;'>"
+        legend_html += "<tr><th style='text-align: left; padding: 2px 10px;'>Mutation</th>"
+        legend_html += "<th style='text-align: left; padding: 2px 10px;'>Seq Position</th>"
+        legend_html += "<th style='text-align: left; padding: 2px 10px;'>Canonical</th></tr>"
+        
+        for mut in mutation_list:
+            # Extract position from mutation (e.g., 'A145K' -> 145)
+            match = re.search(r'\d+', mut)
+            if match:
+                seq_pos_1based = int(match.group())
+                seq_pos_0based = seq_pos_1based - 1
+                
+                # Get canonical label if available
+                canonical_label = canonical_map.get(seq_pos_0based, 'N/A')
+                color = mutation_colors.get(mut, '#000000')
+                
+                legend_html += f"<tr><td style='padding: 2px 10px; color: {color};'>{mut}</td>"
+                legend_html += f"<td style='padding: 2px 10px;'>{seq_pos_1based}</td>"
+                legend_html += f"<td style='padding: 2px 10px;'>{canonical_label}</td></tr>"
+        
+        legend_html += "</table></div>"
+    
     legend_html += "</div>"
     display(HTML(legend_html))
     
     return view
 
+def mutations_to_canonical(mutations, h3_map):
+    """
+    Convert mutation labels from sequence numbering to canonical H3 numbering.
+    
+    Args:
+        mutations (list[str]): List of mutations with sequence numbering (e.g., ['A145K', 'G158E']).
+        h3_map (dict): Mapping from 0-based sequence indices to canonical labels 
+                       (from create_h3_numbering_map).
+    
+    Returns:
+        list[str]: Mutations with canonical numbering (e.g., ['A158AK', 'G171E', 'HA2:A1T']).
+    """
+    canonical_muts = []
+    
+    for mut in mutations:
+        # Extract components: original AA, position, new AA
+        match = re.search(r'([A-Z*-])(\d+)([A-Z*-])', mut)
+        if match:
+            orig_aa = match.group(1)
+            seq_pos_1based = int(match.group(2))
+            new_aa = match.group(3)
+            
+            # Convert to 0-based index
+            seq_pos_0based = seq_pos_1based - 1
+            
+            # Look up canonical label
+            if seq_pos_0based in h3_map:
+                canonical_label = h3_map[seq_pos_0based]
+                
+                # Handle HA2 labels specially
+                if canonical_label.startswith('HA2:'):
+                    # Format: HA2:S49N (not SHA2:49N)
+                    # Extract the number part from HA2:49
+                    position = canonical_label.split(':')[1]
+                    canonical_mut = f"HA2:{orig_aa}{position}{new_aa}"
+                else:
+                    # Regular format: A158AK
+                    canonical_mut = f"{orig_aa}{canonical_label}{new_aa}"
+                
+                canonical_muts.append(canonical_mut)
+            else:
+                # If not in map, keep original
+                canonical_muts.append(mut)
+        else:
+            # If pattern doesn't match, keep original
+            canonical_muts.append(mut)
+    
+    return canonical_muts
+
 def create_h3_numbering_map(query_input, reference_sequence, signal_peptide_length=16, 
-                            open_gap_score=-10, extend_gap_score=-0.5):
+                            open_gap_score=-10, extend_gap_score=-0.5, HA2_start=None):
     """
     Creates a dictionary mapping sequence positions to canonical H3 numbering.
     Accepts Biopython SeqRecord objects or strings as input.
@@ -1404,6 +1482,8 @@ def create_h3_numbering_map(query_input, reference_sequence, signal_peptide_leng
         signal_peptide_length (int): Length of signal peptide to skip (16 for Aichi).
         open_gap_score (float): Gap opening penalty.
         extend_gap_score (float): Gap extension penalty.
+        HA2_start (int, optional): 1-based REFERENCE position where HA2 begins. When h3_counter
+                                   reaches this value, positions will be labeled as 'HA2:1', 'HA2:2', etc.
 
     Returns:
         dict: {query_position (0-based): 'H3_Position_Label'} mapping positions in the 
@@ -1441,7 +1521,8 @@ def create_h3_numbering_map(query_input, reference_sequence, signal_peptide_leng
     # H3 numbering usually starts at 1 after the signal peptide. 
     # Positions in the SP are negative or labelled SP.
     h3_counter = 1 - signal_peptide_length 
-    query_pos = 0  # Track position in ungapped query sequence
+    query_pos = 0  # Track position in ungapped query sequence (0-based)
+    ha2_counter = 1  # Counter for HA2 region
     
     for ref_res, query_res in zip(aligned_ref, aligned_query):
         
@@ -1452,22 +1533,30 @@ def create_h3_numbering_map(query_input, reference_sequence, signal_peptide_leng
                 h3_counter += 1
             continue
 
-        # Save current query index
+        # Save current query index (0-based)
         current_query_pos = query_pos
         query_pos += 1
         
         # Scenario A: Reference has a residue (Match or Mismatch)
         # We assign the current H3 number.
         if ref_res != '-':
-            if h3_counter < 1:
+            # Check if we're entering HA2 region (based on reference position)
+            if HA2_start is not None and h3_counter >= HA2_start:
+                # We're in HA2 region - use HA2 numbering
+                label = f"HA2:{ha2_counter}"
+                mapping_dict[current_query_pos] = label
+                ha2_counter += 1
+                h3_counter += 1
+            elif h3_counter < 1:
                 # Signal peptide region
                 label = f"SP{h3_counter}"
+                mapping_dict[current_query_pos] = label
+                h3_counter += 1
             else:
-                # Mature peptide region
+                # Mature peptide region (HA1)
                 label = str(h3_counter)
-            
-            mapping_dict[current_query_pos] = label
-            h3_counter += 1
+                mapping_dict[current_query_pos] = label
+                h3_counter += 1
             
         # Scenario B: Reference has a gap (Insertion in Query)
         # We must assign an insertion code (e.g., 158A, 158B) based on the *previous* H3 number.
@@ -1476,9 +1565,16 @@ def create_h3_numbering_map(query_input, reference_sequence, signal_peptide_leng
                 # Retrieve the last assigned label
                 last_label = list(mapping_dict.values())[-1]
                 
-                # Strip existing suffixes to get the base number (e.g. 158A -> 158)
-                # We strip any uppercase letters.
-                base = last_label.rstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+                # Handle different label formats
+                if last_label.startswith('HA2:'):
+                    # HA2 insertion: HA2:49 -> HA2:49A, HA2:49B, etc.
+                    base = last_label.rstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+                elif last_label.startswith('SP'):
+                    # Signal peptide insertion: SP-15 -> SP-15A, SP-15B, etc.
+                    base = last_label.rstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+                else:
+                    # Regular HA1 insertion: 158 -> 158A, 158B, etc.
+                    base = last_label.rstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
                 
                 # Calculate how deep into the insertion we are
                 # Count how many times this base has appeared recently
