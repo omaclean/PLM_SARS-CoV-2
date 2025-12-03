@@ -1391,94 +1391,106 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     
     return view
 
-
-def create_h3_numbering_map(fasta_file, reference_id=None, query_id=None, signal_peptide_length=16, 
-                            alignment_mode='global', open_gap_score=-10, extend_gap_score=-0.5):
+def create_h3_numbering_map(query_input, reference_sequence, signal_peptide_length=16, 
+                            open_gap_score=-10, extend_gap_score=-0.5):
     """
     Creates a dictionary mapping sequence positions to canonical H3 numbering.
-    Reads sequences from a FASTA file, aligns them, and creates the numbering map.
-    
+    Accepts Biopython SeqRecord objects or strings as input.
+
     Args:
-        fasta_file (str): Path to FASTA file containing reference and query sequences.
-        reference_id (str, optional): ID of reference sequence (e.g., Aichi/68). 
-                                     If None, uses first sequence in file.
-        query_id (str, optional): ID of query sequence. If None, uses second sequence in file.
+        query_input (SeqRecord or str): The query sequence object from Biopython 
+                                        (e.g., from SeqIO.parse) or a raw sequence string.
+        reference_sequence (str): The reference sequence string (e.g., Aichi/68).
         signal_peptide_length (int): Length of signal peptide to skip (16 for Aichi).
-        alignment_mode (str): 'global' (default) or 'local' alignment.
-        open_gap_score (float): Gap opening penalty (default: -10).
-        extend_gap_score (float): Gap extension penalty (default: -0.5).
-        
+        open_gap_score (float): Gap opening penalty.
+        extend_gap_score (float): Gap extension penalty.
+
     Returns:
         dict: {query_position (0-based): 'H3_Position_Label'} mapping positions in the 
               query sequence to canonical H3 numbering based on the reference.
     """
     
-    # Read sequences from FASTA file
-    sequences = read_sequences_to_dict(fasta_file)
-    seq_ids = list(sequences.keys())
+    # 1. Normalise Inputs
+    # Check if query is a Biopython SeqRecord and extract the string if so
+    if hasattr(query_input, 'seq'):
+        query_seq_str = str(query_input.seq)
+    else:
+        query_seq_str = str(query_input)
+        
+    ref_seq_str = str(reference_sequence)
+
+    # 2. Configure Aligner (Modern Biopython)
+    aligner = Align.PairwiseAligner()
+    aligner.mode = 'global'
+    aligner.open_gap_score = open_gap_score
+    aligner.extend_gap_score = extend_gap_score
     
-    # Select reference and query sequences
-    if reference_id is None:
-        reference_id = seq_ids[0]
-    if query_id is None:
-        query_id = seq_ids[1] if len(seq_ids) > 1 else seq_ids[0]
+    # Perform alignment
+    alignments = aligner.align(ref_seq_str, query_seq_str)
+    best_alignment = alignments[0]
     
-    ref_seq = sequences[reference_id]
-    query_seq = sequences[query_id]
-    
-    # Align sequences using shared alignment function
-    alignment = align_sequences(ref_seq, query_seq, mode=alignment_mode, 
-                               open_gap_score=open_gap_score, extend_gap_score=extend_gap_score)
-    
-    # Get aligned sequences as strings
-    aligned_ref = str(alignment).split('\n')[0]
-    aligned_query = str(alignment).split('\n')[2]
-    
+    # Extract aligned strings (includes dashes)
+    # pattern: [0] is target (ref), [1] is query
+    aligned_ref = best_alignment[0]
+    aligned_query = best_alignment[1]
+
+    # 3. Build the Mapping
     mapping_dict = {}
     
     # Counters
-    h3_counter = 1 - signal_peptide_length # Starts at -15
+    # H3 numbering usually starts at 1 after the signal peptide. 
+    # Positions in the SP are negative or labelled SP.
+    h3_counter = 1 - signal_peptide_length 
     query_pos = 0  # Track position in ungapped query sequence
     
-    for i, (ref_res, query_res) in enumerate(zip(aligned_ref, aligned_query)):
+    for ref_res, query_res in zip(aligned_ref, aligned_query):
         
-        # Track query position (only increment when query has a residue)
-        if query_res != '-':
-            current_query_pos = query_pos
-            query_pos += 1
-        else:
-            continue  # Skip alignment columns where query has a gap
+        # We only care about mapping residues that actually exist in the query
+        if query_res == '-':
+            # If query has a gap, we just advance the reference counter (if ref has no gap)
+            if ref_res != '-':
+                h3_counter += 1
+            continue
+
+        # Save current query index
+        current_query_pos = query_pos
+        query_pos += 1
         
-        # If the reference has a residue, we increment the H3 number
+        # Scenario A: Reference has a residue (Match or Mismatch)
+        # We assign the current H3 number.
         if ref_res != '-':
             if h3_counter < 1:
-                # We are in the signal peptide
+                # Signal peptide region
                 label = f"SP{h3_counter}"
             else:
-                # We are in the mature peptide (Canonical H3 numbering)
+                # Mature peptide region
                 label = str(h3_counter)
             
             mapping_dict[current_query_pos] = label
             h3_counter += 1
             
-        # If the reference has a gap (query has an insertion), 
-        # the H3 number stays the same but gets a suffix (e.g., 158A, 158B).
+        # Scenario B: Reference has a gap (Insertion in Query)
+        # We must assign an insertion code (e.g., 158A, 158B) based on the *previous* H3 number.
         else:
-            # Find the last assigned H3 position
             if mapping_dict:
-                # Get last label and strip any existing letter suffixes
+                # Retrieve the last assigned label
                 last_label = list(mapping_dict.values())[-1]
+                
+                # Strip existing suffixes to get the base number (e.g. 158A -> 158)
+                # We strip any uppercase letters.
                 base = last_label.rstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
                 
-                # Count how many insertions we've already added after this base position
+                # Calculate how deep into the insertion we are
+                # Count how many times this base has appeared recently
                 insertion_count = sum(1 for v in mapping_dict.values() 
                                     if v.startswith(base) and v != base)
                 
-                # Create insertion label (158A, 158B, etc.)
+                # Generate suffix: 0->A, 1->B, etc.
                 suffix = chr(ord('A') + insertion_count)
                 label = f"{base}{suffix}"
                 mapping_dict[current_query_pos] = label
             else:
-                mapping_dict[current_query_pos] = "Unknown"
+                # Edge case: Insertion at the very start of the sequence before any reference alignment
+                mapping_dict[current_query_pos] = "N-term-Insert"
 
     return mapping_dict
