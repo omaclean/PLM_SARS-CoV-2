@@ -151,7 +151,7 @@ def DMS_Table(reference):
             mutated_seq = reference[:i]+mutant_amino_acid+reference[i+1:]
             seq = SeqRecord(Seq(mutated_seq), id=ref_amino_acid+str(i+1)+mutant_amino_acid)
             seq_list.append([ref_amino_acid+str(i+1)+mutant_amino_acid,seq])
-    return pd.concat(seq_list,columns=['Mutations','Sequence'])
+    return pd.DataFrame(seq_list, columns=['Mutations','Sequence'])
 
 #####################################################################################
 ## Translation Functions ############################################################

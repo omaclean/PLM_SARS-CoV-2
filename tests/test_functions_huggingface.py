@@ -91,7 +91,8 @@ def mock_alphabet():
     """Create a mock alphabet object for testing."""
     class MockAlphabet:
         def __init__(self):
-            self.all_toks = ['<cls>', '<pad>', '<eos>', '<unk>'] + list("ARNDCQEGHILKMFPSTWYV")
+            # Need 33 tokens to match sample_logits shape
+            self.all_toks = ['<cls>', '<pad>', '<eos>', '<unk>'] + list("ARNDCQEGHILKMFPSTWYV") + ['X', 'B', 'Z', 'O', 'U', '<mask>', '<sep>', '<pad>', '<null_1>']
             self.padding_idx = 1
             
         def get_idx(self, token):
@@ -227,9 +228,9 @@ class TestMutationFunctions:
         reference = "AR"  # 2 amino acids
         mutants = DMS(reference)
         
-        # Should generate 2 positions * 19 other amino acids = 38 mutants
-        # (excluding the reference amino acid at each position)
-        assert len(mutants) == 38
+        # Should generate 2 positions * 20 amino acids = 40 mutants
+        # (including the reference amino acid at each position)
+        assert len(mutants) == 40
         
         # Verify they are SeqRecord objects
         assert all(isinstance(m, SeqRecord) for m in mutants)
@@ -246,7 +247,7 @@ class TestMutationFunctions:
         assert isinstance(df, pd.DataFrame)
         assert 'Mutations' in df.columns
         assert 'Sequence' in df.columns
-        assert len(df) == 38  # 2 * 19 mutations
+        assert len(df) == 40  # 2 * 20 mutations
 
 
 # ============================================================================
@@ -267,7 +268,7 @@ class TestTranslationFunctions:
         """Test translation handles gap characters."""
         nucleotide = "ATG---GGGTAA"
         protein = iterative_translate(nucleotide)
-        assert protein == "M-G"  # Gap codons become '-'
+        assert protein == "M-G*"  # Gap codons become '-', stop codon included
     
     def test_iterative_translate_truncate_at_stop(self):
         """Test truncation at stop codon."""
@@ -438,14 +439,21 @@ class TestSequenceFunctions:
     
     def test_get_indel_mutations(self):
         """Test detection of insertions and deletions."""
-        aligned_ref = "ARND-CQE"
-        indel_seq = "ARN-KCQE"
+        # Aligned sequences: gap in ref means insertion, gap in indel_seq means deletion
+        aligned_ref = "ARND-CQE"  # Gap at position 5 in reference
+        indel_seq = "ARNKKCQE"    # K at position 4 (D->K), K at position 5 (insertion)
         
         mutations, insertions, deletions = get_indel_mutations(aligned_ref, indel_seq)
         
-        assert "D4K" in mutations  # D->K substitution
-        assert "ins4K" in insertions  # Insertion at position 4
-        assert "del4" in deletions  # Deletion at position 4
+        assert "D4K" in mutations  # D->K substitution at position 4
+        assert "ins5K" in insertions  # Insertion K at position 5
+        assert len(deletions) == 0  # No deletions in this example
+        
+        # Test with deletion
+        aligned_ref2 = "ARNDC"
+        indel_seq2 = "ARN-C"  # Deletion of D at position 4
+        mutations2, insertions2, deletions2 = get_indel_mutations(aligned_ref2, indel_seq2)
+        assert "del4" in deletions2
     
     def test_get_reference_mutations(self):
         """Test getting mutations between aligned sequences."""
@@ -603,8 +611,8 @@ class TestEdgeCases:
     def test_DMS_single_position(self):
         """Test DMS on single amino acid."""
         mutants = DMS("A")
-        # Should generate 19 mutants (all other amino acids)
-        assert len(mutants) == 19
+        # Should generate 20 mutants (all 20 amino acids including identity)
+        assert len(mutants) == 20
     
     def test_semantic_calc_with_arrays(self):
         """Test semantic calculation with numpy arrays."""
