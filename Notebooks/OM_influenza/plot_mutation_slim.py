@@ -2,9 +2,7 @@
 # # plot on structure
 
 # %%
-%load_ext autoreload
-%reload_ext autoreload
-%autoreload 2
+
 import sys
 sys.path.append('../../')
 
@@ -50,10 +48,11 @@ view.show()
 
 # %%
 # import entropy and reference
-
-model_name="ESM2-HA80"
 model_name="ESM2-H3"
+model_name="ESM2-HA80"
+
 outdir="/home3/oml4h/PLM_SARS-CoV-2/Results/test/plot_mutation_stuff/{}".format(model_name)
+os.makedirs(outdir, exist_ok=True)
 probability=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}_probability.csv".format(model_name))
 entropy=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}_entropy.csv".format(model_name))
 
@@ -122,9 +121,10 @@ for i in range(len(entropy_vals)):
 
 plt.xlabel("Entropy")
 plt.ylabel("Reference Probability")
-plt.title("Entropy vs Probability")
+plt.title(f"{model_name} Entropy vs Probability")
 plt.legend()
 plt.tight_layout()
+plt.savefig(os.path.join(outdir, f"{model_name}_entropy_vs_probability.png"), dpi=300)
 plt.show()
 
 # %%
@@ -136,9 +136,11 @@ view = visualise_mutations_on_pdb(
     sequences[ids[len(ids)-1]], 
     K_indexed_muts,
     background_values=probability_dict,
-    title="Reference Probability"
+    title=f"{model_name} Reference Probability"
 )
 view.show()
+with open(os.path.join(outdir, f"{model_name}_reference_probability_structure.html"), 'w') as f:
+    f.write(view._make_html())
 
 
 # %%
@@ -150,7 +152,7 @@ view = visualise_mutations_on_pdb(
     sequences[ids[len(ids)-1]], 
     mutation_list=[], #K_indexed_muts,
     background_values=probability_dict,
-    title="log10 (1-Reference_Probability)"
+    title=f"{model_name} log10 (1-Reference_Probability)"
 )
 view.show()
 # save plot as interactive html
@@ -174,9 +176,11 @@ view = visualise_mutations_on_pdb(
     sequences[ids[len(ids)-1]], 
     K_indexed_muts,
     background_values=entropy_dict,
-    title="Reference entropy"
+    title=f"{model_name} Reference entropy"
 )
 view.show()
+with open(os.path.join(outdir, f"{model_name}_reference_entropy_structure.html"), 'w') as f:
+    f.write(view._make_html())
 
 
 # %%
@@ -188,9 +192,11 @@ view = visualise_mutations_on_pdb(
     sequences[ids[len(ids)-1]], 
     K_indexed_muts,
     background_values=entropy_dict,
-    title="Reference entropy"
+    title=f"{model_name} Reference entropy (log10)"
 )
 view.show()
+with open(os.path.join(outdir, f"{model_name}_reference_log10_entropy_structure.html"), 'w') as f:
+    f.write(view._make_html())
 
 
 # %%
@@ -247,10 +253,12 @@ view = visualise_mutations_on_pdb(
     sequences[ids[len(ids)-1]], 
     K_indexed_muts,
     background_values=entropy_dict,
-    title="Reference entropy",
+    title=f"{model_name} Reference entropy (Canonical)",
     canonical_map=h3_map  # Now displays H3 canonical numbering in separate legend
 )
 view.show()
+with open(os.path.join(outdir, f"{model_name}_reference_entropy_structure_canonical.html"), 'w') as f:
+    f.write(view._make_html())
 
 # %%
 # 1. Setup Input Data
@@ -403,7 +411,7 @@ if reference_backbone in prob_pivot.columns:
     sns.heatmap(top_prob_data, annot=True, fmt='.3f', cmap='RdYlGn', 
                 center=top_prob_data.mean().mean(), cbar_kws={'label': 'Probability'},
                 mask=top_prob_data.isna())  # Mask NaN values
-    plt.title(f'Top {top_n} Epistatic Mutations: Probabilities Across Backbones')
+    plt.title(f'{model_name} Top {top_n} Epistatic Mutations: Probabilities Across Backbones')
     plt.xlabel('Backbone Lineage')
     plt.ylabel('Mutation-canon name')
     plt.tight_layout()
@@ -422,7 +430,7 @@ if reference_backbone in prob_pivot.columns:
     sns.heatmap(shift_data, annot=True, fmt='.4f', cmap='RdBu_r', 
                 center=0, cbar_kws={'label': 'Probability Shift from Reference'},
                 mask=shift_data.isna())  # Mask NaN values
-    plt.title(f'Top {top_n} Epistatic Mutations: Probability Shifts from {reference_backbone}')
+    plt.title(f'{model_name} Top {top_n} Epistatic Mutations: Probability Shifts from {reference_backbone}')
     plt.xlabel('Backbone Lineage')
     plt.ylabel('Mutation -canon name')
     plt.yticks(rotation=0) 
@@ -441,7 +449,7 @@ if reference_backbone in prob_pivot.columns:
     sns.heatmap(gram_data, annot=True, fmt='.4f', cmap='RdBu_r', 
                 center=0, cbar_kws={'label': 'mutation Gramaticality Shift from Reference'},
                 mask=gram_data.isna())  # Mask NaN values
-    plt.title(f'Top {top_n} Epistatic Mutations: log10(probx/prob_root) Shifts from {reference_backbone}')
+    plt.title(f'{model_name} Top {top_n} Epistatic Mutations: log10(probx/prob_root) Shifts from {reference_backbone}')
     plt.xlabel('Backbone Lineage')
     plt.ylabel('Mutation -canon name')
     plt.tight_layout()
@@ -543,24 +551,27 @@ mut_combo_grammar_matrix = mut_combo_grammar_matrix.loc[filtered_order, cols]
 plt.figure(figsize=(12, 8))
 sns.heatmap(mut_combo_probability_matrix, annot=True, fmt='.3f', cmap='Greens', 
             cbar_kws={'label': 'Probability'})
-plt.title('Mutation Probability Matrix')
+plt.title(f'{model_name} Mutation Probability Matrix')
 plt.tight_layout()
+plt.savefig(os.path.join(outdir, f"{model_name}_mutation_probability_matrix.png"), dpi=300)
 plt.show()
 
 # Plot Log10 Probability Matrix
 plt.figure(figsize=(12, 8))
 sns.heatmap(np.log10(mut_combo_probability_matrix), annot=True, fmt='.3f', cmap='Greens', 
             cbar_kws={'label': 'Log10 Probability'})
-plt.title('Log10 Mutation Probability Matrix')
+plt.title(f'{model_name} Log10 Mutation Probability Matrix')
 plt.tight_layout()
+plt.savefig(os.path.join(outdir, f"{model_name}_log10_mutation_probability_matrix.png"), dpi=300)
 plt.show()
 
 # Plot Relative Sequence Grammar Matrix
 plt.figure(figsize=(12, 8))
 sns.heatmap(mut_combo_grammar_matrix, annot=True, fmt='.3f', cmap='RdYlGn', center=0,
             cbar_kws={'label': 'Relative Sequence Grammar'})
-plt.title('Relative Sequence Grammar Matrix')
+plt.title(f'{model_name} Relative Sequence Grammar Matrix')
 plt.tight_layout()
+plt.savefig(os.path.join(outdir, f"{model_name}_relative_sequence_grammar_matrix.png"), dpi=300)
 plt.show()
 
 # %%
@@ -574,8 +585,9 @@ prob_shift_matrix = mut_combo_probability_matrix.subtract(mut_combo_probability_
 plt.figure(figsize=(12, 8))
 sns.heatmap(prob_shift_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
             cbar_kws={'label': 'Probability Shift (vs Reference)'})
-plt.title('Probability Shift Matrix (Relative to Reference)')
+plt.title(f'{model_name} Probability Shift Matrix (Relative to Reference)')
 plt.tight_layout()
+plt.savefig(os.path.join(outdir, f"{model_name}_probability_shift_matrix.png"), dpi=300)
 plt.show()
  
 # 2. log the probability shifts
@@ -589,8 +601,10 @@ log_prob_shift_matrix.iloc[:,0]= np.nan
 plt.figure(figsize=(12, 8))
 sns.heatmap(log_prob_shift_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
             cbar_kws={'label': 'Log10 Probability Shift (vs Reference)'})
-plt.title('Log10 Probability Shift Matrix (Relative to Reference)')
+plt.title(f'{model_name} Log10 Probability Shift Matrix (Relative to Reference)')
 plt.tight_layout()
+plt.savefig(os.path.join(outdir, f"{model_name}_log10_probability_shift_matrix.png"), dpi=300)
+plt.show()
 
 # 3. Relative Sequence Grammar Shift (Grammar - Ref_Grammar)
 grammar_shift_matrix = mut_combo_grammar_matrix.subtract(mut_combo_grammar_matrix['Reference'], axis=0)
@@ -598,8 +612,9 @@ grammar_shift_matrix = mut_combo_grammar_matrix.subtract(mut_combo_grammar_matri
 plt.figure(figsize=(12, 8))
 sns.heatmap(grammar_shift_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
             cbar_kws={'label': 'Grammar Shift (vs Reference)'})
-plt.title('Relative Sequence Grammar Shift Matrix (Relative to Reference)')
+plt.title(f'{model_name} Relative Sequence Grammar Shift Matrix (Relative to Reference)')
 plt.tight_layout()
+plt.savefig(os.path.join(outdir, f"{model_name}_relative_sequence_grammar_shift_matrix.png"), dpi=300)
 plt.show()
 
 
