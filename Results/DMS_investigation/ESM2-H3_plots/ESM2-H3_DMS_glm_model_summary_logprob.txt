@@ -1,0 +1,27 @@
+                             OLS Regression Results                             
+================================================================================
+Dep. Variable:     mutation_probability   R-squared:                       0.036
+Model:                              OLS   Adj. R-squared:                  0.035
+Method:                   Least Squares   F-statistic:                     66.38
+Date:                  Fri, 05 Dec 2025   Prob (F-statistic):           3.82e-42
+Time:                          11:55:30   Log-Likelihood:                -8546.6
+No. Observations:                  5412   AIC:                         1.710e+04
+Df Residuals:                      5408   BIC:                         1.713e+04
+Df Model:                             3                                         
+Covariance Type:              nonrobust                                         
+========================================================================================
+                           coef    std err          t      P>|t|      [0.025      0.975]
+----------------------------------------------------------------------------------------
+const                   -5.0380      0.021   -240.485      0.000      -5.079      -4.997
+MDCKSIAT1 cell entry     0.1158      0.015      7.832      0.000       0.087       0.145
+sera escape              0.6226      0.108      5.774      0.000       0.411       0.834
+pH stability             0.7566      0.109      6.913      0.000       0.542       0.971
+==============================================================================
+Omnibus:                       95.383   Durbin-Watson:                   1.443
+Prob(Omnibus):                  0.000   Jarque-Bera (JB):              100.720
+Skew:                           0.318   Prob(JB):                     1.35e-22
+Kurtosis:                       3.204   Cond. No.                         11.1
+==============================================================================
+
+Notes:
+[1] Standard Errors assume that the covariance matrix of the errors is correctly specified.
