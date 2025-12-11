@@ -459,12 +459,12 @@ else:
     ref_probs = prob_matrix.iloc[0]
     shifts = prob_matrix.sub(ref_probs, axis=1)
 
-abs_shifts = shifts.abs()
+abs_shifts = shifts
 log_abs_shifts = np.log10(abs_shifts.replace(0, np.nan))
 
 # Plot 1: Absolute Shifts
 plt.figure(figsize=(14, 10))
-sns.heatmap(abs_shifts, annot=True, fmt=".2f", cmap='viridis', center=0, annot_kws={"size": 8})
+sns.heatmap(abs_shifts, annot=True, fmt=".2f", cmap='RdBu', center=0, annot_kws={"size": 8})
 plt.title(f'Absolute Probability Shifts vs Reference ({sub_mod})')
 plt.xlabel('Focal Mutation')
 plt.ylabel('Backbone')

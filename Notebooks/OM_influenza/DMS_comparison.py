@@ -14,6 +14,9 @@ import os
 import statsmodels.api as sm
 from scipy import stats
 
+import sys
+sys.path.append('/home3/oml4h/PLM_SARS-CoV-2/')
+from Functions_HuggingFace import *
 
 
 def get_me_some_colours(n_colours,sns_pal=True):
@@ -89,6 +92,34 @@ data_in=pd.read_csv(f"/home3/oml4h/PLM_SARS-CoV-2/Results/DMS_investigation/{mod
 data_in=data_in[data_in["wildtype"]!=data_in["mutant"]]
 data_in.head(20)
 
+
+query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_extra_steps.fas"
+
+reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
+
+sequences = read_sequences_to_dict(query_path)
+
+ids=list(sequences.keys())
+
+
+# 1. Read the reference sequence (Assuming single sequence in file)
+# We use 'next' to get the first item from the iterator
+ref_record = next(SeqIO.parse(reference_path, "fasta"))
+ref_seq_str = str(ref_record.seq)
+
+
+
+# 2. Read the query sequences
+# We parse the file and pick the first one as a test case
+query_iterator = SeqIO.parse(query_path, "fasta")
+first_query_record = next(query_iterator)
+
+h3_map_with_ha2 = create_h3_numbering_map(first_query_record, ref_seq_str, HA2_start=330)
+
+
+K_indexed_muts = [m for m in get_mutations(sequences[ids[0]],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
+# Convert your mutations to canonical numbering
+canonical_mutations = mutations_to_canonical(K_indexed_muts, h3_map_with_ha2)
 # %%
 
 # scale y axis log
@@ -182,7 +213,7 @@ sns.scatterplot(data=data_in, x="mutation_probability", y="semantic_score", alph
 # highlight top 5% escape mutations
 escape_threshold = data_in["sera escape"].quantile(0.95)
 highlight_data = data_in[(data_in["sera escape"] >= escape_threshold) & (data_in["MDCKSIAT1 cell entry"] >= -1)]
-sns.scatterplot(data=highlight_data, x="y", y="semantic_score", color='red', alpha=0.7, edgecolor=None,
+sns.scatterplot(data=highlight_data, x="mutation_probability", y="semantic_score", color='red', alpha=0.7, edgecolor=None,
                 label='Top 5% Escape & not disruptive')  
 plt.xscale('log')
 plt.yscale('log')
@@ -305,4 +336,54 @@ print(f"Number of observations dropped: {len(data_in) - len(data_clean)}")
 
 
 
+# %%
+# make a heatmap (scaling the params or some other kind of plot of all the values in data_in for the mutations listed in canonical_mutations
+
+# Construct mutation string in data_in if needed. 
+# Assuming standard format like "A123T"
+if 'mutation' not in data_in.columns:
+    # This is a guess based on typical DMS data structures. 
+    # If 'site' is numeric and 'wildtype'/'mutant' are single letters:
+    data_in['mutation'] = data_in['wildtype'] + data_in['site'].astype(str) + data_in['mutant']
+
+# Filter for mutations of interest
+# We need to match the format of canonical_mutations.
+# If canonical_mutations are like "A123T", we can filter directly.
+heatmap_data = data_in[data_in['mutation'].isin(canonical_mutations)].copy()
+
+if heatmap_data.empty:
+    print("Warning: No matching mutations found in DMS data for the canonical list.")
+    print("Canonical mutations sample:", canonical_mutations[:5])
+    print("Data mutations sample:", data_in['mutation'].head().tolist())
+else:
+    # Set mutation as index for heatmap
+    heatmap_data.set_index('mutation', inplace=True)
+    
+    # Select columns to plot
+    cols_to_plot = ["MDCKSIAT1 cell entry", "sera escape", "pH stability", 
+                    "log10_mutation_probability", "semantic_score", "relative_grammaticality"]
+    
+    # Ensure all columns exist
+    cols_to_plot = [c for c in cols_to_plot if c in heatmap_data.columns]
+    
+    # Z-score normalization for heatmap visualization
+    # (x - mean) / std
+    heatmap_data_norm = (heatmap_data[cols_to_plot] - heatmap_data[cols_to_plot].mean()) / heatmap_data[cols_to_plot].std()
+    
+    plt.figure(figsize=(10, len(heatmap_data) * 0.5 + 2))
+    sns.heatmap(heatmap_data_norm, cmap="coolwarm", center=0, annot=True, fmt=".2f", 
+                cbar_kws={'label': 'Z-score'})
+    plt.yticks(rotation=0) # Make y-axis labels horizontal
+    plt.title(f"{model_name} Normalized DMS & Model Metrics for Canonical Mutations")
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{model_name}_canonical_mutations_heatmap.png"), dpi=300)
+    plt.show()
+    
+    # Also plot raw values (maybe just for a subset or separate plots if scales are too different)
+    # Or a clustered heatmap
+    g = sns.clustermap(heatmap_data_norm, cmap="coolwarm", center=0, figsize=(10, 10),
+                   cbar_kws={'label': 'Z-score'})
+    plt.setp(g.ax_heatmap.get_yticklabels(), rotation=0) # Make y-axis labels horizontal
+    plt.savefig(os.path.join(outdir, f"{model_name}_canonical_mutations_clustermap.png"), dpi=300)
+    plt.show()
 
