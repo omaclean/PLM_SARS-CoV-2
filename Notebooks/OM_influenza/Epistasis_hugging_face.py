@@ -445,6 +445,7 @@ canon_dict = {k: canonical_mutations[i] for i, k in enumerate(K_indexed_muts)}
 
 mut_shifts = []
 mut_names = []
+all_shift_matrices = []
 
 # Loop through each point mutation
 for i, mut in enumerate(K_indexed_muts):
@@ -460,6 +461,7 @@ for i, mut in enumerate(K_indexed_muts):
     
     mut_shifts.append(total_shifts)
     mut_names.append(canon_dict.get(mut, mut))
+    all_shift_matrices.append(shift_matrix)
 
 # Combined mutation
 combined_seq = mutate_sequence(reference_spike_sequence, K_indexed_muts)
@@ -471,6 +473,7 @@ total_shifts_combined = np.nansum(np.abs(shift_matrix_combined), axis=0)
 
 mut_shifts.append(total_shifts_combined)
 mut_names.append("Combined")
+all_shift_matrices.append(shift_matrix_combined)
 
 
 backbone=backbone_id
@@ -540,6 +543,83 @@ for shifts in masked_shifts_list:
 
 print(f"Max epistatic shift observed (excluding focal sites): {global_max}")
 print("Note: Total absolute shift is the sum of absolute differences across all 20 amino acids, so the maximum possible value per site is 2.0.")
+
+# Print table of mutations
+print("\n=== Mutations Analyzed ===")
+mut_table = pd.DataFrame({
+    'Mutation': K_indexed_muts,
+    'Canonical': [canon_dict.get(m, m) for m in K_indexed_muts]
+})
+print(mut_table.to_string(index=False))
+
+print("\n=== Detailed Epistatic Shift Analysis ===")
+print("For each mutation, showing sites with largest probability shifts.")
+print("Showing sites with total shift > 0.3 (or top 2 if none > 0.3).")
+print("For each site, showing amino acids with largest probability INCREASE.")
+
+for i, name in enumerate(mut_names):
+    print(f"\n--------------------------------------------------")
+    print(f"Mutation: {name}")
+    
+    shifts = masked_shifts_list[i]
+    shift_matrix = all_shift_matrices[i]
+    
+    # Find indices of interest
+    # 1. Sites with shift > 0.3
+    with np.errstate(invalid='ignore'):
+        high_shift_indices = np.where(shifts > 0.3)[0]
+    
+    target_indices = list(high_shift_indices)
+    
+    # 2. If fewer than 2 sites, add top sites until we have at least 2
+    if len(target_indices) < 2:
+        # Get indices sorted by shift value (descending), ignoring NaNs
+        # Replace NaNs with -1 for sorting
+        shifts_clean = np.nan_to_num(shifts, nan=-1.0)
+        sorted_indices = np.argsort(shifts_clean)[::-1]
+        
+        for idx in sorted_indices:
+            if idx not in target_indices and shifts_clean[idx] >= 0: # Ensure we don't pick masked sites
+                target_indices.append(idx)
+                if len(target_indices) >= 2:
+                    break
+    
+    # Sort indices by position for cleaner output
+    target_indices.sort()
+    
+    for idx in target_indices:
+        val = shifts[idx]
+        pos = positions[idx]
+        
+        # Map to canonical numbering
+        if 'h3_map_with_ha2' in locals():
+            canon_label = h3_map_with_ha2.get(idx, str(pos))
+        else:
+            canon_label = str(pos)
+            
+        print(f"\n  Site {canon_label} (Pos {pos}) - Total Shift: {val:.4f}")
+        
+        # Analyze specific amino acid changes at this site
+        # Get the column for this site from the shift matrix (20 rows)
+        site_aa_shifts = shift_matrix[:, idx]
+        
+        # Find amino acids with positive shifts (probability increased)
+        # Sort by shift value descending
+        aa_indices = np.argsort(site_aa_shifts)[::-1]
+        
+        # Print top 3 increasing amino acids
+        print("    Top probability increases:")
+        count = 0
+        for aa_idx in aa_indices:
+            aa_shift = site_aa_shifts[aa_idx]
+            if aa_shift <= 0.01 and count >= 1: # Stop if shift is negligible, but show at least 1
+                break
+            
+            aa = amino_acids[aa_idx]
+            print(f"      {aa}: +{aa_shift:.4f}")
+            count += 1
+            if count >= 3:
+                break
 
 fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 3*rows), sharey=True, sharex=True)
 # Flatten axes for easy iteration if it's a grid
