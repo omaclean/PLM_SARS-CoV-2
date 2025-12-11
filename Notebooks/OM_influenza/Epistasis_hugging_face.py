@@ -21,6 +21,7 @@ import torch
 
 
 
+import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
 from Bio import SeqIO
@@ -394,12 +395,97 @@ plm_probability.append({"Mutation":"reference","Backbone":"reference","probabili
 
 mut_info_combos=pd.DataFrame(mut_info_rows)
 
-
-
-# %%
-
-
 mut_info_combos.to_csv(out+sub_mod+'_mut_info_combos.csv',index=False)   
+
+# %%# plot heatmap of mut_info_combos probability shifts for each focal mutation vs the reference - plot absolute shift and log it too for 2 plots
+
+
+# Pivot the data to get a matrix of probabilities: Backbone vs Mutation
+prob_matrix = mut_info_combos.pivot_table(index='Backbone', columns='Mutation', values='probability')
+
+# 1. Sort Columns (Mutations)
+# Try to use K_indexed_muts order if available
+if 'K_indexed_muts' in locals():
+    ordered_cols = [m for m in K_indexed_muts if m in prob_matrix.columns]
+    # Append any others
+    others = [c for c in prob_matrix.columns if c not in ordered_cols]
+    prob_matrix = prob_matrix[ordered_cols + others]
+else:
+    # Sort by position extracted from name
+    def get_pos(mut):
+        m = re.search(r'(\d+)', mut)
+        return int(m.group(1)) if m else 99999
+    sorted_cols = sorted(prob_matrix.columns, key=get_pos)
+    prob_matrix = prob_matrix[sorted_cols]
+
+# 2. Sort Rows (Backbones)
+# Reference first, then others sorted by position (since they are point mutations)
+if 'Reference' in prob_matrix.index:
+    others = [i for i in prob_matrix.index if i != 'Reference']
+    # Sort others by position
+    def get_pos_backbone(name):
+        m = re.search(r'(\d+)', name)
+        return int(m.group(1)) if m else 99999
+    others.sort(key=get_pos_backbone)
+    new_index = ['Reference'] + others
+    prob_matrix = prob_matrix.reindex(new_index)
+
+# 3. Rename to Canonical
+# Create mapping from mut_info_combos or generate it
+if 'canon' in mut_info_combos.columns:
+    mut_to_canon = dict(zip(mut_info_combos['Mutation'], mut_info_combos['canon']))
+elif 'h3_map_with_ha2' in locals() and 'mutations_to_canonical' in locals():
+    unique_muts = list(mut_info_combos['Mutation'].unique())
+    canon_names = mutations_to_canonical(unique_muts, h3_map_with_ha2)
+    mut_to_canon = dict(zip(unique_muts, canon_names))
+else:
+    mut_to_canon = {m: m for m in mut_info_combos['Mutation'].unique()}
+
+# Rename columns
+new_cols = [mut_to_canon.get(c, c) for c in prob_matrix.columns]
+prob_matrix.columns = new_cols
+
+# Rename rows (Backbones)
+# Backbones are also mutations (except Reference)
+new_index = [mut_to_canon.get(i, i) for i in prob_matrix.index]
+prob_matrix.index = new_index
+
+# Calculate shifts
+if 'Reference' in prob_matrix.index:
+    ref_probs = prob_matrix.loc['Reference']
+    shifts = prob_matrix.sub(ref_probs, axis=1)
+else:
+    print("Warning: 'Reference' backbone not found. Using first row.")
+    ref_probs = prob_matrix.iloc[0]
+    shifts = prob_matrix.sub(ref_probs, axis=1)
+
+abs_shifts = shifts.abs()
+log_abs_shifts = np.log10(abs_shifts.replace(0, np.nan))
+
+# Plot 1: Absolute Shifts
+plt.figure(figsize=(14, 10))
+sns.heatmap(abs_shifts, annot=True, fmt=".2f", cmap='viridis', center=0, annot_kws={"size": 8})
+plt.title(f'Absolute Probability Shifts vs Reference ({sub_mod})')
+plt.xlabel('Focal Mutation')
+plt.ylabel('Backbone')
+plt.tight_layout()
+plt.savefig(out + sub_mod + '_probability_shifts_heatmap_abs.png')
+plt.show()
+
+# Plot 2: Log10 Absolute Shifts
+plt.figure(figsize=(14, 10))
+sns.heatmap(log_abs_shifts, annot=True, fmt=".2f", cmap='viridis', annot_kws={"size": 8})
+plt.title(f'Log10 Absolute Probability Shifts vs Reference ({sub_mod})')
+plt.xlabel('Focal Mutation')
+plt.ylabel('Backbone')
+plt.tight_layout()
+plt.savefig(out + sub_mod + '_probability_shifts_heatmap_log.png')
+plt.show()
+
+# %% Generate wide dataframes for entropy and probability
+
+
+
 def make_wide_dataframe(data_list, value_name="site"):
     """
     Converts list of dicts with a list-column into a wide dataframe.
@@ -634,12 +720,32 @@ for i in range(num_plots):
     # Plot the epistatic shifts (focal sites masked)
     ax.plot(positions, masked_shifts_list[i], linewidth=1)
     
+    # Annotate sites with shift > 0.3
+    shifts = masked_shifts_list[i]
+    with np.errstate(invalid='ignore'):
+        high_shift_indices = np.where(shifts > 0.3)[0]
+        
+    for k, idx in enumerate(high_shift_indices):
+        val = shifts[idx]
+        pos = positions[idx]
+        
+        # Get canonical label
+        if 'h3_map_with_ha2' in locals():
+            label = h3_map_with_ha2.get(idx, str(pos))
+        else:
+            label = str(pos)
+            
+        # Stagger text height to avoid overlap
+        stagger = 0.02 #+ (0.06 * (k % 3))
+        
+        ax.text(pos, val + stagger, label, 
+                rotation=90, fontsize=5, ha='center', va='bottom')
+    
     # Plot vertical lines for focal sites
     for focal_pos in focal_positions_list[i]:
         ax.axvline(x=focal_pos, color='orange', alpha=0.5, linewidth=2)
         
     ax.set_title(mut_names[i])
-    
     # Only set labels on outer edges since we share axes
     if i >= num_plots - cols:
         ax.set_xlabel('Position')
