@@ -77,12 +77,11 @@ def hexbin_plot(data,x_axis,y_axis,log_scale=True,log_constant=1,nbin=10,plot_ty
         
             )
     return g
-    
 
 # %%
 
 model_name = "ESM2-H3"
-#model_name = "ESM2-HA80"
+model_name = "ESM2-HA80"
 outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/DMS_investigation/{model_name}_plots"
 os.makedirs(outdir, exist_ok=True)
 
@@ -114,6 +113,16 @@ g.ax_marg_x.set_title(f"{model_name} sera escape vs log10_mutation_probability")
 plt.savefig(os.path.join(outdir, f"{model_name}_sera_escape_vs_log10_mutation_probability_hexbin.png"), dpi=300)
 plt.show()
 
+# 2.1 Hexbin plot for sera escape
+g = hexbin_plot(data_in,x_axis="semantic_score",
+                y_axis="sera escape",log_scale=False,plot_type="hex",
+                nbin=30)
+g.fig.subplots_adjust(top=0.9)
+g.ax_marg_x.set_title(f"{model_name} sera escape vs semantic_score")
+plt.savefig(os.path.join(outdir, f"{model_name}_sera_escape_vs_semantic_score_hexbin.png"), dpi=300)
+plt.show()
+
+
 # 3. Hexbin plot for pH stability
 g = hexbin_plot(data_in,x_axis="log10_mutation_probability",
                 y_axis="pH stability",log_scale=False,plot_type="hex",
@@ -124,7 +133,7 @@ plt.savefig(os.path.join(outdir, f"{model_name}_pH_stability_vs_log10_mutation_p
 plt.show()
 
 # 4. Pairplot for all variables
-vars_to_plot = ["MDCKSIAT1 cell entry", "sera escape", "pH stability", "log10_mutation_probability"]
+vars_to_plot = ["MDCKSIAT1 cell entry", "sera escape", "pH stability", "log10_mutation_probability","semantic_score","relative_grammaticality"]
 g = sns.PairGrid(data_in[vars_to_plot].dropna())
 g.map_diag(sns.histplot)
 g.map_offdiag(plt.hexbin, gridsize=30, cmap='viridis', mincnt=1)
@@ -143,6 +152,49 @@ plt.savefig(os.path.join(outdir, f"{model_name}_DMS_variables_pairplot_scatter.p
 plt.show()
 
 # %%
+
+# create a plot of semantic change vs mutation probability for the DMS data
+# highlight the top 5% escape mutations which don't disrupt binding
+
+plt.figure(figsize=(8,6))
+sns.scatterplot(data=data_in, x="relative_grammaticality", y="semantic_score", alpha=0.3, edgecolor=None)
+# highlight top 5% escape mutations
+escape_threshold = data_in["sera escape"].quantile(0.95)
+highlight_data = data_in[(data_in["sera escape"] >= escape_threshold) & (data_in["MDCKSIAT1 cell entry"] >= -1)]
+sns.scatterplot(data=highlight_data, x="relative_grammaticality", y="semantic_score", color='red', alpha=0.7, edgecolor=None,
+                label='Top 5% Escape & not disruptive')  
+
+plt.yscale('log')
+plt.xlabel("log10 Relative Grammaticality")
+plt.ylabel("Semantic Score")
+plt.title("{} Semantic Score vs Relative Grammaticality\n(Highlighting Top 5% Escape Mutations that are not Disruptive)".format(model_name))
+plt.legend()
+plt.savefig(os.path.join(outdir, 
+                         f"{model_name}_semantic_score_vs_mutation_grammaticality_highlight_escape.png"), dpi=300)
+
+# %%
+
+# create a plot of semantic change vs mutation probability for the DMS data
+# highlight the top 5% escape mutations which don't disrupt binding
+
+plt.figure(figsize=(8,6))
+sns.scatterplot(data=data_in, x="mutation_probability", y="semantic_score", alpha=0.3, edgecolor=None)
+# highlight top 5% escape mutations
+escape_threshold = data_in["sera escape"].quantile(0.95)
+highlight_data = data_in[(data_in["sera escape"] >= escape_threshold) & (data_in["MDCKSIAT1 cell entry"] >= -1)]
+sns.scatterplot(data=highlight_data, x="y", y="semantic_score", color='red', alpha=0.7, edgecolor=None,
+                label='Top 5% Escape & not disruptive')  
+plt.xscale('log')
+plt.yscale('log')
+plt.xlabel("Mutation Probability (log scale)")
+plt.ylabel("Semantic Score")
+plt.title("{} Semantic Score vs Mutation Probability\n(Highlighting Top 5% Escape Mutations that are not Disruptive)".format(model_name))
+plt.legend()
+plt.savefig(os.path.join(outdir, 
+                         f"{model_name}_semantic_score_vs_mutation_probability_highlight_escape.png"), dpi=300)
+
+
+# %%
 # do stats and see if log (mutation proabbility ) correlates with glm of the three variables:
 
 
@@ -157,9 +209,6 @@ X = data_clean[["MDCKSIAT1 cell entry", "sera escape", "pH stability"]]
 # X = data_clean[["absolute_stability"]]
 #X = data_clean[["pH stability"]]
 y = np.log10(data_clean["mutation_probability"])
-
-
-
 
 X = sm.add_constant(X)  # Adds a constant term to the predictors
 model = sm.OLS(y, X).fit()
@@ -176,7 +225,40 @@ model_summary = model.summary().as_text()
 with open(os.path.join(outdir, f"{model_name}_DMS_glm_model_summary_logprob.txt"), "w") as f:
     f.write(model_summary)
     
-    
+
+# %%
+# now with semantic score
+
+
+# Select the columns and remove rows with NaN or inf values
+data_clean = data_in[["MDCKSIAT1 cell entry", "sera escape", "pH stability", "mutation_probability","semantic_score"]].copy()
+data_clean = data_clean.replace([np.inf, -np.inf], np.nan)  # Replace inf with NaN
+data_clean = data_clean.dropna()  # Drop rows with any NaN values
+data_clean["absolute_stability"] = np.abs(data_clean["pH stability"])
+
+X = data_clean[["MDCKSIAT1 cell entry", "sera escape", "pH stability"]]
+
+# X = data_clean[["absolute_stability"]]
+#X = data_clean[["pH stability"]]
+y = data_clean["semantic_score"]
+
+X = sm.add_constant(X)  # Adds a constant term to the predictors
+model = sm.OLS(y, X).fit()
+
+predictions = model.predict(X)
+
+
+# Print the summary
+print(model.summary())
+print(f"\nNumber of observations used: {len(data_clean)}")
+print(f"Number of observations dropped: {len(data_in) - len(data_clean)}")
+
+model_summary = model.summary().as_text()
+with open(os.path.join(outdir, f"{model_name}_DMS_glm_model_summary_semantic_score.txt"), "w") as f:
+    f.write(model_summary)
+        
+
+# now with absolute stability
 X = data_clean[["MDCKSIAT1 cell entry", "sera escape", "absolute_stability"]]
 X = sm.add_constant(X)
 
@@ -196,7 +278,7 @@ with open(os.path.join(outdir, f"{model_name}_DMS_glm_model_summary_abs_ph_logpr
     f.write(model_summary)
     
 # %%
-# do stats and see if log (mutation proabbility ) correlates with glm of the three variables:
+# now with semantic score
 
 X = data_clean[["MDCKSIAT1 cell entry", "sera escape", "pH stability"]]
 # y is already defined as np.log10(data_clean["mutation_probability"])

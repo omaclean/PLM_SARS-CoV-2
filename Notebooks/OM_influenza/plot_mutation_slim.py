@@ -43,8 +43,6 @@ K_indexed_muts = [m for m in get_mutations(sequences[reference],sequences[ids[le
 
 print(K_indexed_muts)
 
-view = visualise_mutations_on_pdb(pdb_path, sequences[ids[len(ids)-1]], K_indexed_muts)
-view.show()
 
 # %%
 # import entropy and reference
@@ -126,6 +124,19 @@ plt.legend()
 plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{model_name}_entropy_vs_probability.png"), dpi=300)
 plt.show()
+
+# %%
+# plot mutations on structure
+view = visualise_mutations_on_pdb(pdb_path, sequences[ids[len(ids)-1]], K_indexed_muts)
+#view.show()
+# save to file
+print(outdir)
+output_path = os.path.join(outdir, "{}_{}_mutations_structure.html".format(model_name, reference_lineage))
+print(output_path)
+# Generate HTML and save it
+html_content = view._make_html()
+with open(output_path, 'w') as f:
+    f.write(html_content)
 
 # %%
 # Create background_values as a dict with 1-based positions

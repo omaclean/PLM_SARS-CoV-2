@@ -1,0 +1,27 @@
+                            OLS Regression Results                            
+==============================================================================
+Dep. Variable:         semantic_score   R-squared:                       0.014
+Model:                            OLS   Adj. R-squared:                  0.014
+Method:                 Least Squares   F-statistic:                     26.12
+Date:                Thu, 11 Dec 2025   Prob (F-statistic):           9.08e-17
+Time:                        10:34:41   Log-Likelihood:                -12444.
+No. Observations:                5412   AIC:                         2.490e+04
+Df Residuals:                    5408   BIC:                         2.492e+04
+Df Model:                           3                                         
+Covariance Type:            nonrobust                                         
+========================================================================================
+                           coef    std err          t      P>|t|      [0.025      0.975]
+----------------------------------------------------------------------------------------
+const                    3.3791      0.043     78.494      0.000       3.295       3.463
+MDCKSIAT1 cell entry     0.1752      0.030      5.765      0.000       0.116       0.235
+sera escape              1.2283      0.222      5.543      0.000       0.794       1.663
+pH stability             0.4310      0.225      1.917      0.055      -0.010       0.872
+==============================================================================
+Omnibus:                     3185.628   Durbin-Watson:                   1.064
+Prob(Omnibus):                  0.000   Jarque-Bera (JB):            33447.028
+Skew:                           2.674   Prob(JB):                         0.00
+Kurtosis:                      13.942   Cond. No.                         11.1
+==============================================================================
+
+Notes:
+[1] Standard Errors assume that the covariance matrix of the errors is correctly specified.

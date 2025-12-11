@@ -1418,6 +1418,16 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     legend_html += "</div>"
     display(HTML(legend_html))
     
+    # Monkey-patch the view object to include the legend in its HTML output
+    # This ensures that when view._make_html() is called (e.g. when saving),
+    # the legend is included.
+    original_make_html = view._make_html
+    
+    def make_html_with_legend(*args, **kwargs):
+        return original_make_html(*args, **kwargs) + legend_html
+        
+    view._make_html = make_html_with_legend
+    
     return view
 
 def mutations_to_canonical(mutations, h3_map):
