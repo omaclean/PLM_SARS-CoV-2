@@ -428,6 +428,56 @@ probability_wide.to_csv(out+sub_mod+'_probability.csv',index=False)
 
 
 
+# %% 
+# see probability shifts for each mutation on each backbone
+backbone=backbone_id
+reference_spike_sequence = sequences[backbone]
+result = get_mutation_prob_matrix(reference_spike_sequence, model, model_layers, device, batch_converter, alphabet)
+mutation_prob_matrix = result['mutation_matrix']
+amino_acids = result['amino_acids']
+positions = result['positions']
+
+#create dict of point mutation backbones for all of the mutations in  K_indexed_muts, with names as keys
+point_mutations={}
+for mut in K_indexed_muts:
+    point_mutations[mut]=mutate_sequence(reference_spike_sequence,[mut])
+
+
+mut_shifts=[]
+
+
+#loop through each point mutation
+for backbone_i in range(len(K_indexed_muts)):
+    
+    
+    sequence_i = mutate_sequence(backbone,[mut])
+    result = get_mutation_prob_matrix(sequence_i, model, model_layers, device, batch_converter, alphabet)
+    
+    # calculate shifts for 19xL matrix
+    mutation_prob_matrix_i = result['mutation_matrix']
+    shift_matrix = mutation_prob_matrix_i - mutation_prob_matrix
+    # sum absolute shifts for each position along L amino acids
+    total_shifts = np.nansum(np.abs(shift_matrix), axis=0)
+    mut_shifts.append(total_shifts)
+
+combined=mutate_sequence(reference_spike_sequence,[mut for mut in K_indexed_muts])
+result = get_mutation_prob_matrix(combined, model, model_layers, device, batch_converter, alphabet)
+mutation_prob_matrix_combined = result['mutation_matrix']
+shift_matrix_combined = mutation_prob_matrix_combined - mutation_prob_matrix
+# sum absolute shifts for each position along L amino acids
+total_shifts_combined = np.nansum(np.abs(shift_matrix_combined), axis=0)
+
+#create a panel plot of shifts for each mutation and the combined
+plt.figure(figsize=(12, 8))
+for backbone_i in range(len(K_indexed_muts)):
+    plt.plot(positions, total_shifts, label=K_indexed_muts[backbone_i], alpha=0.6)
+plt.plot(positions, total_shifts_combined, label='Combined', color='black', linewidth=2)
+plt.xlabel('Position')
+plt.ylabel('Total Absolute Shift in Mutation Probabilities')
+plt.title(f'Mutation Probability Shifts on Backbone {backbone_id}')
+plt.legend()
+plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_shifts_{backbone_id}.png"), dpi=300)
+
 # %%
 backbone=backbone_id
 reference_spike_sequence = sequences[backbone]
