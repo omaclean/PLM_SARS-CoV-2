@@ -61,6 +61,8 @@ if torch.cuda.is_available():
 else:
     print("CUDA is not available. Using CPU instead.")
     device = torch.device("cpu")
+    # set max threads for cpu
+    torch.set_num_threads(16)
 model =  model.to(device)
 
 
@@ -437,20 +439,17 @@ mutation_prob_matrix = result['mutation_matrix']
 amino_acids = result['amino_acids']
 positions = result['positions']
 
-#create dict of point mutation backbones for all of the mutations in  K_indexed_muts, with names as keys
-point_mutations={}
-for mut in K_indexed_muts:
-    point_mutations[mut]=mutate_sequence(reference_spike_sequence,[mut])
+# Get canonical names for mutations
+canonical_mutations = mutations_to_canonical(K_indexed_muts, h3_map_with_ha2)
+canon_dict = {k: canonical_mutations[i] for i, k in enumerate(K_indexed_muts)}
 
+mut_shifts = []
+mut_names = []
 
-mut_shifts=[]
-
-
-#loop through each point mutation
-for backbone_i in range(len(K_indexed_muts)):
-    
-    
-    sequence_i = mutate_sequence(backbone,[mut])
+# Loop through each point mutation
+for i, mut in enumerate(K_indexed_muts):
+    # Use reference_spike_sequence, not backbone ID
+    sequence_i = mutate_sequence(reference_spike_sequence, [mut])
     result = get_mutation_prob_matrix(sequence_i, model, model_layers, device, batch_converter, alphabet)
     
     # calculate shifts for 19xL matrix
@@ -458,25 +457,122 @@ for backbone_i in range(len(K_indexed_muts)):
     shift_matrix = mutation_prob_matrix_i - mutation_prob_matrix
     # sum absolute shifts for each position along L amino acids
     total_shifts = np.nansum(np.abs(shift_matrix), axis=0)
+    
     mut_shifts.append(total_shifts)
+    mut_names.append(canon_dict.get(mut, mut))
 
-combined=mutate_sequence(reference_spike_sequence,[mut for mut in K_indexed_muts])
-result = get_mutation_prob_matrix(combined, model, model_layers, device, batch_converter, alphabet)
+# Combined mutation
+combined_seq = mutate_sequence(reference_spike_sequence, K_indexed_muts)
+result = get_mutation_prob_matrix(combined_seq, model, model_layers, device, batch_converter, alphabet)
 mutation_prob_matrix_combined = result['mutation_matrix']
 shift_matrix_combined = mutation_prob_matrix_combined - mutation_prob_matrix
 # sum absolute shifts for each position along L amino acids
 total_shifts_combined = np.nansum(np.abs(shift_matrix_combined), axis=0)
 
-#create a panel plot of shifts for each mutation and the combined
-plt.figure(figsize=(12, 8))
-for backbone_i in range(len(K_indexed_muts)):
-    plt.plot(positions, total_shifts, label=K_indexed_muts[backbone_i], alpha=0.6)
-plt.plot(positions, total_shifts_combined, label='Combined', color='black', linewidth=2)
-plt.xlabel('Position')
-plt.ylabel('Total Absolute Shift in Mutation Probabilities')
-plt.title(f'Mutation Probability Shifts on Backbone {backbone_id}')
-plt.legend()
-plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_shifts_{backbone_id}.png"), dpi=300)
+mut_shifts.append(total_shifts_combined)
+mut_names.append("Combined")
+
+
+backbone=backbone_id
+backbone_lineage=backbone_id.split("|")[-1]
+# Save the lists properly (as CSV)
+df_shifts = pd.DataFrame(np.array(mut_shifts).T, columns=mut_names)
+df_shifts['Position'] = positions
+# Reorder to put Position first
+cols = ['Position'] + [c for c in df_shifts.columns if c != 'Position']
+df_shifts = df_shifts[cols]
+df_shifts.to_csv(os.path.join(out, f"{sub_mod}_mutation_probability_shifts_{backbone_lineage}.csv"), index=False)
+
+# %% 
+# plot above stuff
+
+# Create a panel plot of shifts
+num_plots = len(mut_shifts)
+cols = int(np.ceil(np.sqrt(num_plots)))
+rows = int(np.ceil(num_plots / cols))
+
+# Prepare data for plotting (masking focal sites)
+masked_shifts_list = []
+focal_positions_list = []
+
+# Helper to find index of position in positions list
+def get_pos_index(pos_num, positions_list):
+    # Try to match integer or string representation
+    for idx, p in enumerate(positions_list):
+        if str(p) == str(pos_num):
+            return idx
+    return None
+
+for i in range(num_plots):
+    current_shifts = mut_shifts[i].copy()
+    current_focal_indices = []
+    
+    if i < len(K_indexed_muts):
+        # Single mutation
+        mut = K_indexed_muts[i]
+        match = re.search(r'(\d+)', mut)
+        if match:
+            pos_num = int(match.group(1))
+            idx = get_pos_index(pos_num, positions)
+            if idx is not None:
+                current_shifts[idx] = np.nan # Mask the focal site
+                current_focal_indices.append(positions[idx])
+    else:
+        # Combined - mask all
+        for mut in K_indexed_muts:
+            match = re.search(r'(\d+)', mut)
+            if match:
+                pos_num = int(match.group(1))
+                idx = get_pos_index(pos_num, positions)
+                if idx is not None:
+                    current_shifts[idx] = np.nan
+                    current_focal_indices.append(positions[idx])
+    
+    masked_shifts_list.append(current_shifts)
+    focal_positions_list.append(current_focal_indices)
+
+# Calculate global max for shared y-axis (ignoring NaNs)
+global_max = 0
+for shifts in masked_shifts_list:
+    m = np.nanmax(shifts)
+    if m > global_max:
+        global_max = m
+
+print(f"Max epistatic shift observed (excluding focal sites): {global_max}")
+print("Note: Total absolute shift is the sum of absolute differences across all 20 amino acids, so the maximum possible value per site is 2.0.")
+
+fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 3*rows), sharey=True, sharex=True)
+# Flatten axes for easy iteration if it's a grid
+if num_plots > 1:
+    axes_flat = axes.flatten()
+else:
+    axes_flat = [axes]
+
+for i in range(num_plots):
+    ax = axes_flat[i]
+    
+    # Plot the epistatic shifts (focal sites masked)
+    ax.plot(positions, masked_shifts_list[i], linewidth=1)
+    
+    # Plot vertical lines for focal sites
+    for focal_pos in focal_positions_list[i]:
+        ax.axvline(x=focal_pos, color='orange', alpha=0.5, linewidth=2)
+        
+    ax.set_title(mut_names[i])
+    
+    # Only set labels on outer edges since we share axes
+    if i >= num_plots - cols:
+        ax.set_xlabel('Position')
+    if i % cols == 0:
+        ax.set_ylabel('Total Absolute Shift')
+
+# Hide empty subplots
+for i in range(num_plots, len(axes_flat)):
+    axes_flat[i].axis('off')
+
+plt.suptitle(f'Mutation Probability Shifts on Backbone {backbone_id}\n(Focal mutation sites marked with vertical lines)')
+plt.tight_layout()
+plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_shifts_{backbone_lineage}.png"), dpi=300)
 
 # %%
 backbone=backbone_id
