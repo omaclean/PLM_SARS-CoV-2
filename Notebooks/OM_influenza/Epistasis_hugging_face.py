@@ -45,7 +45,7 @@ batch_converter = alphabet.get_batch_converter()
 
 
 sub_mod='ESM2-H3'
-sub_mod='ESM2-HA80'ƒ
+sub_mod='ESM2-HA80'
 # sub_mod="ESM_C_600M" <- doesn't work with old esm libs
 
 modnam="/home3/oml4h/hugging_face_downloads/model_weights_topublish/{}".format(sub_mod)
@@ -312,7 +312,7 @@ print(backbone_grammar_df)
 #
 mut_info["lineage_backbone"]=mut_info["Backbone"].str.split("|").str[-1]
 mut_info
-mut_info.to_csv(out+"H3_epistasis_mutation_info_spyros_model_{}.csv".format(sub_mod)
+mut_info.to_csv(out+"H3_epistasis_mutation_info_spyros_model_{}_rel_{}.csv".format(sub_mod,first_lineage_name)
 ,index=False)
 print(mut_info.loc[mut_info['Mutation']=='I176K'])
 
@@ -1033,12 +1033,22 @@ print(obs_df[['mutation', 'canon', 'rank', 'log10_prob']])
 
 # seaborn heatmap of mutation_prob_flat
 plt.figure(figsize=(20, 8))
+print( mutation_prob_matrix.shape)
+mutation_prob_matrix2=mutation_prob_matrix.copy()
+# make every reference amino acid probability Na then 0
+for i, pos in enumerate(positions):
+    ref_aa = reference_spike_sequence[i]
+    if ref_aa in amino_acids:
+        ref_idx = amino_acids.index(ref_aa)
+        mutation_prob_matrix2[ref_idx, i] = np.nan
 #only label every tenth x axis tick
-mutation_prob_matrix2 = np.nan_to_num(mutation_prob_matrix, nan=0.0)
+mutation_prob_matrix2 = np.nan_to_num(mutation_prob_matrix2, nan=0.0)
 # replace np.nan with zero for visualization
 
 seaborn.heatmap(mutation_prob_matrix2, xticklabels=positions, yticklabels=amino_acids)
 plt.xticks(ticks=np.arange(0, len(positions), 10), labels=np.array(positions)[::10])
+plt.title(f"{sub_mod} Mutation Probabilities (Reference masked)")
+plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_heatmap.png"), dpi=300)
 
 # %%
 # seaborn histogram of mutation_prob_flat panel side by side
@@ -1055,6 +1065,7 @@ plt.subplot(1, 2, 2)
 plt.title("Histogram of mutation probabilities (log y-axis)")
 sns.histplot(mutation_prob_matrix.flatten(), bins=100)
 plt.yscale('log')
+plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_histogram.png"), dpi=300)
 
 
 # %%
