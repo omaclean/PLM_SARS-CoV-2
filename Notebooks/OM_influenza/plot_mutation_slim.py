@@ -41,7 +41,7 @@ ids=list(sequences.keys())
 # import entropy and reference
 model_name="ESM2-H3"
 model_name="ESM2-HA80"
-lineage_base="J.2.4"
+lineage_base="J"
 
 #find first id in list with lineage base in 
 lineages=[str(x).split("|")[-1] for x in ids]

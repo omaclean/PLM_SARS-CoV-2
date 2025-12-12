@@ -1406,9 +1406,14 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                     if match:
                         seq_pos_1based = int(match.group())
                         seq_pos_0based = seq_pos_1based - 1 # Assuming map is 0-based
+                        
+                        canon_pos = None
                         if seq_pos_0based in canonical_map:
-                            # If map returns just the position label (e.g. '144'), reconstruct mutation
                             canon_pos = canonical_map[seq_pos_0based]
+                        elif seq_pos_1based in canonical_map:
+                            canon_pos = canonical_map[seq_pos_1based]
+                            
+                        if canon_pos is not None:
                             # If the map value looks like a full mutation (e.g. 'K2N'), use it directly
                             if re.search(r'[A-Z]\d+[A-Z]', str(canon_pos)) or 'HA2' in str(canon_pos):
                                 display_name = str(canon_pos)
@@ -1418,6 +1423,8 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                                 parts = re.match(r'([A-Z])(\d+)([A-Z])', mut)
                                 if parts:
                                     display_name = f"{parts.group(1)}{canon_pos}{parts.group(3)}"
+                                else:
+                                    display_name = str(canon_pos)
             
             legend_html += f"<span style='color: {color}; margin-right: 15px;'>&#9632; {display_name}</span>"
         legend_html += "</div>"
@@ -1427,9 +1434,9 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
         legend_html += "<div style='margin-top: 15px; border-top: 1px solid #ccc; padding-top: 10px;'>"
         legend_html += "<b>Canonical Numbering:</b><br>"
         legend_html += "<table style='font-size: 0.9em; border-collapse: collapse;'>"
-        legend_html += "<tr><th style='text-align: left; padding: 2px 10px;'>OG Coordinates</th>"
+        legend_html += "<tr><th style='text-align: left; padding: 2px 10px;'>Canonical</th>"
         legend_html += "<th style='text-align: left; padding: 2px 10px;'>Seq Position</th>"
-        legend_html += "<th style='text-align: left; padding: 2px 10px;'>Canonical</th></tr>"
+        legend_html += "<th style='text-align: left; padding: 2px 10px;'>OG Coordinates</th></tr>"
         
         for mut in mutation_list:
             # Extract position from mutation (e.g., 'A145K' -> 145)
@@ -1439,23 +1446,33 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                 seq_pos_0based = seq_pos_1based - 1
                 
                 # Get canonical label if available
+                canonical_label = 'N/A'
+                
                 # Try direct mutation lookup first (e.g. 'A145K')
                 if mut in canonical_map:
                     canonical_label = canonical_map[mut]
                 # Then try 0-based index
                 elif seq_pos_0based in canonical_map:
-                    canonical_label = canonical_map[seq_pos_0based]
+                    canon_pos = canonical_map[seq_pos_0based]
+                    # If the map value looks like a full mutation (e.g. 'K2N'), use it directly
+                    if re.search(r'[A-Z]\d+[A-Z]', str(canon_pos)) or 'HA2' in str(canon_pos):
+                        canonical_label = str(canon_pos)
+                    else:
+                        # Reconstruct: Ref + CanonPos + Alt
+                        parts = re.match(r'([A-Z])(\d+)([A-Z])', mut)
+                        if parts:
+                            canonical_label = f"{parts.group(1)}{canon_pos}{parts.group(3)}"
+                        else:
+                            canonical_label = str(canon_pos)
                 # Then try 1-based index (just in case)
                 elif seq_pos_1based in canonical_map:
                     canonical_label = canonical_map[seq_pos_1based]
-                else:
-                    canonical_label = 'N/A'
                 
                 color = mutation_colors.get(mut, '#000000')
                 
-                legend_html += f"<tr><td style='padding: 2px 10px; color: {color};'>{mut}</td>"
+                legend_html += f"<tr><td style='padding: 2px 10px; color: {color};'>{canonical_label}</td>"
                 legend_html += f"<td style='padding: 2px 10px;'>{seq_pos_1based}</td>"
-                legend_html += f"<td style='padding: 2px 10px;'>{canonical_label}</td></tr>"
+                legend_html += f"<td style='padding: 2px 10px; color: black;'>{mut}</td></tr>"
         
         legend_html += "</table></div>"
     

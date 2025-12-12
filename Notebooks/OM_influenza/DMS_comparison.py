@@ -377,6 +377,48 @@ else:
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"{model_name}_canonical_mutations_heatmap.png"), dpi=300)
     plt.show()
+    print(heatmap_data[cols_to_plot])
+
+# %%
+# Spearman rank correlations (R-squared)
+print("Calculating Spearman rank correlations...")
+
+data_in["absolute_stability"] = np.abs(data_in["pH stability"])
+# Define columns of interest
+corr_cols = [
+    "mutation_probability", 
+    "semantic_score", 
+    "MDCKSIAT1 cell entry", 
+    "sera escape", 
+    "pH stability",
+    "absolute_stability",
+]
+
+# Filter data to ensure we have all columns and drop NaNs for correlation calculation
+# We use the full data_in for this analysis
+corr_data = data_in[corr_cols].dropna()
+
+# Calculate Spearman correlation matrix
+spearman_corr = corr_data.corr(method='spearman')
+
+# Calculate R-squared (coefficient of determination)
+r_squared_matrix = spearman_corr ** 2
+
+# Set diagonal to NaN
+np.fill_diagonal(r_squared_matrix.values, np.nan)
+
+# Save R-squared matrix as CSV
+r_squared_csv_path = os.path.join(outdir, f"{model_name}_spearman_r_squared_matrix.csv")
+r_squared_matrix.to_csv(r_squared_csv_path)
+print(f"Saved Spearman R-squared matrix to {r_squared_csv_path}")
+
+# Plot heatmap of R-squared values
+plt.figure(figsize=(10, 8))
+sns.heatmap(r_squared_matrix, annot=True, cmap="viridis", fmt=".2f", vmin=0, vmax=r_squared_matrix.max().max())
+plt.title(f"{model_name} Spearman R-squared Correlation Matrix")
+plt.tight_layout()
+plt.savefig(os.path.join(outdir, f"{model_name}_spearman_r_squared_heatmap.png"), dpi=300)
+plt.show()
     
 
 
