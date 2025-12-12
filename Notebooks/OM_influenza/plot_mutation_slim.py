@@ -39,7 +39,7 @@ reference=ids[4]
 reference_lineage=lineage[4].split("|")[-1]
 print(lineage)
 print(ids[2:(len(ids)-1)])
-K_indexed_muts = [m for m in get_mutations(sequences[reference],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
+K_indexed_muts = [m for m in get_mutations(sequences[reference],sequences[ids[len(ids)-3]]) if "del" not in m and '-' not in m  ] 
 
 print(K_indexed_muts)
 
@@ -49,7 +49,7 @@ print(K_indexed_muts)
 model_name="ESM2-H3"
 model_name="ESM2-HA80"
 
-outdir="/home3/oml4h/PLM_SARS-CoV-2/Results/test/plot_mutation_stuff/{}".format(model_name)
+outdir="/home3/oml4h/PLM_SARS-CoV-2/Results/test/plot_mutation_stuff/more_muts{}".format(model_name)
 os.makedirs(outdir, exist_ok=True)
 probability=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}_probability.csv".format(model_name))
 entropy=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}_entropy.csv".format(model_name))
@@ -80,11 +80,12 @@ for _, row in backbone_mut_probs.iterrows():
         # Store all canonical names for this position (in case of multiple)
         if pos not in position_to_canon:
             position_to_canon[pos] = []
-        position_to_canon[pos].append(row['canon'])
-        
+        position_to_canon[pos]=row['canon']
+                
 # Create a mapping dictionary from Mutation to canon using backbone_mut_probs
 mutation_to_canon_init = dict(zip(backbone_mut_probs['Mutation'], backbone_mut_probs['canon']))
 mutation_to_canon = defaultdict(lambda: "Reference", mutation_to_canon_init)
+
 # Map the canonical names to mut_combos
 mut_combos["Focal_canon"] = mut_combos["Mutation"].map(mutation_to_canon)
 
@@ -93,7 +94,7 @@ mut_combos["Backbone_canon"] = mut_combos["Backbone"] .map(mutation_to_canon)
 # Get unique positions that have mutations
 mutated_positions = set(position_to_canon.keys())
 print(f"Found {len(mutated_positions)} positions with mutations in backbone_mut_probs")
-
+# %%
 # Create color array: red if position is in mutated_positions, blue otherwise
 # Positions in entropy/probability arrays are 1-indexed
 colors = ['red' if (i+1) in mutated_positions else 'blue' for i in range(len(entropy_vals))]
@@ -107,11 +108,12 @@ for color in ['blue', 'red']:
                 c=color, alpha=0.6, label=label)
 
 # Add labels for mutated positions
+
 for i in range(len(entropy_vals)):
     pos = i + 1  # 1-indexed
     if pos in position_to_canon:
         # Join multiple canonical names if there are any
-        canon_names = ', '.join(set(position_to_canon[pos]))
+        canon_names = position_to_canon[pos]
         plt.annotate(canon_names, 
                     (entropy_vals[i], probability_vals[i]),
                     fontsize=7, alpha=0.7,
@@ -127,7 +129,12 @@ plt.show()
 
 # %%
 # plot mutations on structure
-view = visualise_mutations_on_pdb(pdb_path, sequences[ids[len(ids)-1]], K_indexed_muts)
+print(position_to_canon)
+print(mutation_to_canon)
+view = visualise_mutations_on_pdb(pdb_path, sequences[ids[len(ids)-1]], 
+                                  K_indexed_muts,
+                                  canonical_map=position_to_canon, 
+                                  title="{} {} mutations".format(model_name, reference_lineage))
 #view.show()
 # save to file
 print(outdir)
@@ -147,6 +154,7 @@ view = visualise_mutations_on_pdb(
     sequences[ids[len(ids)-1]], 
     K_indexed_muts,
     background_values=probability_dict,
+    canonical_map=mutation_to_canon,
     title=f"{model_name} Reference Probability"
 )
 view.show()

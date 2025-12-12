@@ -42,9 +42,10 @@ model_layers = 36
 model_raw, alphabet = esm.pretrained.load_model_and_alphabet('esm2_t36_3B_UR50D')
 model_raw.eval()
 batch_converter = alphabet.get_batch_converter()
-out='/home3/oml4h/PLM_SARS-CoV-2/Results/test/'
+
+
 sub_mod='ESM2-H3'
-sub_mod='ESM2-HA80'
+sub_mod='ESM2-HA80'ƒ
 # sub_mod="ESM_C_600M" <- doesn't work with old esm libs
 
 modnam="/home3/oml4h/hugging_face_downloads/model_weights_topublish/{}".format(sub_mod)
@@ -76,8 +77,13 @@ sequences = read_sequences_to_dict(query_path)
 
 sequences
 
+seq_keys=list(sequences.keys())
+base_lineage_index=3
+base_sequence_name=seq_keys[base_lineage_index]
+base_lineage=base_sequence_name.split("|")[-1]
+out='/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/'.format(base_lineage)
 
-
+os.makedirs(out, exist_ok=True)
 # 1. Read the reference sequence (Assuming single sequence in file)
 # We use 'next' to get the first item from the iterator
 ref_record = next(SeqIO.parse(reference_path, "fasta"))
@@ -102,8 +108,8 @@ ids=list(sequences.keys())
 
 
 # %%
-J_indexed_muts = [m for m in get_reference_mutations(ref = sequences[ids[0]],mut = sequences[ids[len(ids)-1]]) if "-" not in m  ] 
-K_indexed_muts = [m for m in get_mutations(sequences[ids[0]],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
+J_indexed_muts = [m for m in get_reference_mutations(ref = sequences[base_sequence_name],mut = sequences[ids[len(ids)-1]]) if "-" not in m  ] 
+K_indexed_muts = [m for m in get_mutations(sequences[base_sequence_name],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
 # Convert your mutations to canonical numbering
 canonical_mutations = mutations_to_canonical(K_indexed_muts, h3_map_with_ha2)
 print("K->J mutations")
@@ -130,13 +136,13 @@ for backbone_i in range(len(ids)-1):
     reference_spike_sequence = sequences[backbone]
     #calculate mutation differences between node and K lineage
     J_indexed_muts = [m for m in get_reference_mutations(ref = sequences[backbone],mut = sequences[ids[len(ids)-1]]) if "-" not in m  ] 
-    K_indexed_muts = [m for m in get_mutations(sequences[backbone],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
+    Ki_indexed_muts = [m for m in get_mutations(sequences[backbone],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
     # Convert your mutations to canonical numbering
-    canonical_mutations = mutations_to_canonical(K_indexed_muts, h3_map_with_ha2)
-    mutation_dictionary  = {k:J_indexed_muts[i] for i,k in enumerate(K_indexed_muts)}
-    canon_dict={k:canonical_mutations[i] for i,k in enumerate(K_indexed_muts)}
+    canonical_mutations = mutations_to_canonical(Ki_indexed_muts, h3_map_with_ha2)
+    mutation_dictionary  = {k:J_indexed_muts[i] for i,k in enumerate(Ki_indexed_muts)}
+    canon_dict={k:canonical_mutations[i] for i,k in enumerate(Ki_indexed_muts)}
     print("K->J mutations")
-    print(K_indexed_muts)
+    print(Ki_indexed_muts)
     #loop through each mutation and calculate the scores on the focal node
     for mut in mutation_dictionary.keys():
         if backbone ==  ids[len(ids)-1]:
@@ -314,11 +320,7 @@ print(mut_info.loc[mut_info['Mutation']=='I176K'])
 # %% [markdown]
 # # do each mutation by itself and then do each pairwise comparison 
 
-# %%
-backbone_id=ids[4]
-K_indexed_muts = [m for m in get_mutations(sequences[backbone_id],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
-print("K->J mutations")
-print(K_indexed_muts)
+
 
 
 
@@ -947,7 +949,7 @@ print(f"Std: {one_minus_ref_probs.std():.4f}")
 # Rank analysis of all possible non-reference mutations for J.2.4 (ids[4])
 
 # 1. Identify the backbone sequence (J.2.4)
-target_seq_id = ids[4]
+target_seq_id = ids[base_lineage_index]
 target_sequence = sequences[target_seq_id]
 print(f"Calculating mutation probabilities for {target_seq_id}")
 

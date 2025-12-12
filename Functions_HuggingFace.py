@@ -1274,6 +1274,9 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     
     # Apply background coloring if provided
     if background_values is not None:
+        # Set base style for everything to grey cartoon first
+        view.setStyle({'cartoon': {'color': '#eeeeee'}})
+        
         # Normalize values to [0, 1] for color mapping
         vals = list(background_values.values())
         min_val = min(vals)
@@ -1314,6 +1317,11 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
         # Base style: Grey Cartoon (only if no background coloring)
         view.setStyle({'cartoon': {'color': '#eeeeee'}})
     
+    # Add style for non-protein atoms (e.g. glycans) - make them visible but neutral
+    # 'hetflag': True selects heteroatoms (ligands, water, etc.)
+    # We exclude water usually, but let's just style hetatoms.
+    view.addStyle({'hetflag': True}, {'stick': {'color': '#cccccc', 'radius': 0.15}})
+    
     # Loop through our mapped hits and colour them
     count = 0
     matched_chains = set()
@@ -1350,7 +1358,7 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
             )
             view.addStyle(
                 selector,
-                {'stick': {'colorscheme': 'grayCarbon', 'color': color}} 
+                {'stick': {'color': color, 'radius': 0.4}} 
             )
             view.addStyle(
                  selector,
@@ -1386,7 +1394,32 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     if mutation_list:
         legend_html += "<div style='margin-top: 10px;'><b>Mutation Legend:</b><br>"
         for mut, color in mutation_colors.items():
-            legend_html += f"<span style='color: {color}; margin-right: 15px;'>&#9632; {mut}</span>"
+            # Try to get canonical name if available
+            display_name = mut
+            if canonical_map is not None:
+                # Check if canonical_map is keyed by mutation string (e.g. 'A123T')
+                if mut in canonical_map:
+                    display_name = canonical_map[mut]
+                else:
+                    # Check if canonical_map is keyed by position (e.g. 122)
+                    match = re.search(r'\d+', mut)
+                    if match:
+                        seq_pos_1based = int(match.group())
+                        seq_pos_0based = seq_pos_1based - 1 # Assuming map is 0-based
+                        if seq_pos_0based in canonical_map:
+                            # If map returns just the position label (e.g. '144'), reconstruct mutation
+                            canon_pos = canonical_map[seq_pos_0based]
+                            # If the map value looks like a full mutation (e.g. 'K2N'), use it directly
+                            if re.search(r'[A-Z]\d+[A-Z]', str(canon_pos)) or 'HA2' in str(canon_pos):
+                                display_name = str(canon_pos)
+                            else:
+                                # Reconstruct: Ref + CanonPos + Alt
+                                # We need original ref/alt from 'mut' string
+                                parts = re.match(r'([A-Z])(\d+)([A-Z])', mut)
+                                if parts:
+                                    display_name = f"{parts.group(1)}{canon_pos}{parts.group(3)}"
+            
+            legend_html += f"<span style='color: {color}; margin-right: 15px;'>&#9632; {display_name}</span>"
         legend_html += "</div>"
     
     # Add canonical numbering legend if provided
@@ -1394,7 +1427,7 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
         legend_html += "<div style='margin-top: 15px; border-top: 1px solid #ccc; padding-top: 10px;'>"
         legend_html += "<b>Canonical Numbering:</b><br>"
         legend_html += "<table style='font-size: 0.9em; border-collapse: collapse;'>"
-        legend_html += "<tr><th style='text-align: left; padding: 2px 10px;'>Mutation</th>"
+        legend_html += "<tr><th style='text-align: left; padding: 2px 10px;'>OG Coordinates</th>"
         legend_html += "<th style='text-align: left; padding: 2px 10px;'>Seq Position</th>"
         legend_html += "<th style='text-align: left; padding: 2px 10px;'>Canonical</th></tr>"
         
@@ -1406,7 +1439,18 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                 seq_pos_0based = seq_pos_1based - 1
                 
                 # Get canonical label if available
-                canonical_label = canonical_map.get(seq_pos_0based, 'N/A')
+                # Try direct mutation lookup first (e.g. 'A145K')
+                if mut in canonical_map:
+                    canonical_label = canonical_map[mut]
+                # Then try 0-based index
+                elif seq_pos_0based in canonical_map:
+                    canonical_label = canonical_map[seq_pos_0based]
+                # Then try 1-based index (just in case)
+                elif seq_pos_1based in canonical_map:
+                    canonical_label = canonical_map[seq_pos_1based]
+                else:
+                    canonical_label = 'N/A'
+                
                 color = mutation_colors.get(mut, '#000000')
                 
                 legend_html += f"<tr><td style='padding: 2px 10px; color: {color};'>{mut}</td>"
