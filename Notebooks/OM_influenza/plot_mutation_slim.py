@@ -7,10 +7,10 @@ import sys
 sys.path.append('../../')
 
 import sys, importlib
-module_name = "Functions"
-if module_name in sys.modules:
-    del sys.modules[module_name]
-Functions = importlib.import_module(module_name)
+# module_name = "Functions"
+# if module_name in sys.modules:
+#     del sys.modules[module_name]
+# Functions = importlib.import_module(module_name)
 
 from Functions_HuggingFace import *
 
@@ -34,29 +34,35 @@ pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE4_assembly.pdb"
 # view.show()
 sequences = read_sequences_to_dict('/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated.fas')
 ids=list(sequences.keys())
-lineage=[str(x).split("|")[-1] for x in ids]
-reference=ids[4]
-reference_lineage=lineage[4].split("|")[-1]
-print(lineage)
-print(ids[2:(len(ids)-1)])
-K_indexed_muts = [m for m in get_mutations(sequences[reference],sequences[ids[len(ids)-3]]) if "del" not in m and '-' not in m  ] 
 
-print(K_indexed_muts)
 
 
 # %%
 # import entropy and reference
 model_name="ESM2-H3"
 model_name="ESM2-HA80"
+lineage_base="J.2.4"
 
-outdir="/home3/oml4h/PLM_SARS-CoV-2/Results/test/plot_mutation_stuff/more_muts{}".format(model_name)
+#find first id in list with lineage base in 
+lineages=[str(x).split("|")[-1] for x in ids]
+reference = next(id for id, lin in zip(ids, lineages) if lin == lineage_base)
+
+reference_lineage=lineage_base
+
+print(ids[2:(len(ids)-1)])
+K_indexed_muts = [m for m in get_mutations(sequences[reference],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
+
+
+
+outdir="/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/plot_mutation_stuff{}".format(lineage_base,model_name)
 os.makedirs(outdir, exist_ok=True)
-probability=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}_probability.csv".format(model_name))
-entropy=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}_entropy.csv".format(model_name))
+probability=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/{}_probability.csv".format(lineage_base,model_name))
+entropy=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/{}_entropy.csv".format(lineage_base,model_name))
 
-backbone_mut_probs=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/H3_epistasis_mutation_info_spyros_model_{}.csv".format(model_name))
-mut_combos=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}_mut_info_combos.csv".format(model_name))
+backbone_mut_probs=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/H3_epistasis_mutation_info_spyros_model_{}_rel_J.csv".format(lineage_base,model_name))
+mut_combos=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/{}_mut_info_combos.csv".format(lineage_base,model_name))
 
+os.makedirs(outdir, exist_ok=True)
 # Take the final row and extract columns from position 2 onwards as numpy arrays
 entropy_vals = entropy.iloc[-1, 2:].values
 probability_vals = probability.iloc[-1, 2:].values
@@ -131,6 +137,8 @@ plt.show()
 # plot mutations on structure
 print(position_to_canon)
 print(mutation_to_canon)
+print( K_indexed_muts)
+
 view = visualise_mutations_on_pdb(pdb_path, sequences[ids[len(ids)-1]], 
                                   K_indexed_muts,
                                   canonical_map=position_to_canon, 
@@ -145,6 +153,7 @@ html_content = view._make_html()
 with open(output_path, 'w') as f:
     f.write(html_content)
 
+view.show()
 # %%
 # Create background_values as a dict with 1-based positions
 probability_dict = {i+1: val for i, val in enumerate(probability.iloc[-1, 2:].values)}

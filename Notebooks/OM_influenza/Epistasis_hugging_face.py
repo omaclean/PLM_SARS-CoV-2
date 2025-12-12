@@ -18,7 +18,7 @@ from Bio.Seq import Seq
 import pandas as pd 
 import numpy as np
 import torch
-
+from adjustText import adjust_text
 
 
 import seaborn as sns
@@ -48,6 +48,12 @@ sub_mod='ESM2-H3'
 sub_mod='ESM2-HA80'
 # sub_mod="ESM_C_600M" <- doesn't work with old esm libs
 
+query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
+
+reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
+
+base_lineage_index=4
+
 modnam="/home3/oml4h/hugging_face_downloads/model_weights_topublish/{}".format(sub_mod)
 
 # if(sub_mod=='ESM_C_600M'):
@@ -69,18 +75,18 @@ model =  model.to(device)
 
 
 # %%
-query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_extra_steps.fas"
 
-reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 
 sequences = read_sequences_to_dict(query_path)
 
 sequences
 
 seq_keys=list(sequences.keys())
-base_lineage_index=3
+
 base_sequence_name=seq_keys[base_lineage_index]
+backbone_id=base_sequence_name
 base_lineage=base_sequence_name.split("|")[-1]
+print("Base lineage:",base_lineage)
 out='/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/'.format(base_lineage)
 
 os.makedirs(out, exist_ok=True)
@@ -263,12 +269,12 @@ reference_result = process_protein_sequence(
 print(f"Processing all backbone sequences relative to {first_lineage_name}...\n")
 
 # Loop through all sequences
-for backbone_i, backbone_id in enumerate(ids):
-    lineage_name = backbone_id.split("|")[-1]
+for backbone_i, backbone_id_i in enumerate(ids):
+    lineage_name = backbone_id_i.split("|")[-1]
     print(f"Processing {lineage_name} ({backbone_i+1}/{len(ids)})")
     
     # Get current sequence
-    current_sequence = sequences[backbone_id]
+    current_sequence = sequences[backbone_id_i]
     
     # Process current sequence
     current_result = process_protein_sequence(
@@ -292,7 +298,7 @@ for backbone_i, backbone_id in enumerate(ids):
     # Add row to results
     new_row = {
         "Lineage": lineage_name,
-        "Full_ID": backbone_id,
+        "Full_ID": backbone_id_i,
         "sequence_grammar": current_result["sequence_grammaticality"],
         "semantic_change_from_first": semantic_change,
         "order": backbone_i
@@ -467,7 +473,7 @@ log_abs_shifts = np.log10(abs_shifts.replace(0, np.nan))
 # Plot 1: Absolute Shifts
 plt.figure(figsize=(14, 10))
 sns.heatmap(abs_shifts, annot=True, fmt=".2f", cmap='RdBu', center=0, annot_kws={"size": 8})
-plt.title(f'Absolute Probability Shifts vs Reference ({sub_mod})')
+plt.title(f'Absolute Probability Shifts vs Reference {base_lineage} ({sub_mod})')
 plt.xlabel('Focal Mutation')
 plt.ylabel('Backbone')
 plt.tight_layout()
@@ -477,7 +483,7 @@ plt.show()
 # Plot 2: Log10 Absolute Shifts
 plt.figure(figsize=(14, 10))
 sns.heatmap(log_abs_shifts, annot=True, fmt=".2f", cmap='viridis', annot_kws={"size": 8})
-plt.title(f'Log10 Absolute Probability Shifts vs Reference ({sub_mod})')
+plt.title(f'Log10 Absolute Probability Shifts vs Reference {base_lineage} ({sub_mod})')
 plt.xlabel('Focal Mutation')
 plt.ylabel('Backbone')
 plt.tight_layout()
@@ -897,6 +903,7 @@ sorted_one_minus_array = np.array(sorted_one_minus, dtype=float)
 plt.plot(ranks, np.log10(sorted_one_minus_array), linewidth=0.8, color='blue', alpha=0.5)
 
 # Add scatter points and text labels for focal mutations
+texts = []
 for mut in K_indexed_muts:
     # Extract position from mutation
     pos = int(re.search(r'\d+', mut).group())
@@ -916,12 +923,14 @@ for mut in K_indexed_muts:
         canon_name = canon_dict[mut]
         
         # Plot scatter point
-        plt.scatter(rank, np.log10(one_minus_prob), color='red', s=50, zorder=5)
+        plt.scatter(rank, np.log10(one_minus_prob), color='red', s=50, zorder=5, alpha=0.6)
         
         # Add text label
-        plt.text(rank, np.log10(one_minus_prob), f'  {canon_name}', 
-                fontsize=8, ha='left', va='center', 
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor='none'))
+        texts.append(plt.text(rank, np.log10(one_minus_prob), f'{canon_name}', 
+                fontsize=8, ha='center', va='center'))
+
+
+adjust_text(texts, arrowprops=dict(arrowstyle='-', color='black', lw=0.5))
 
 plt.xlabel('Rank (1 = lowest reference probability)')
 plt.ylabel('log10(1 - Reference Probability)')
@@ -1009,11 +1018,14 @@ plt.figure(figsize=(12, 8))
 plt.plot(all_muts_df['rank'], all_muts_df['log10_prob'], color='blue', linewidth=0.8, alpha=0.5, label='All possible mutations')
 
 # Plot observed mutations as scatter points
+texts = []
 for item in observed_data:
-    plt.scatter(item['rank'], item['log10_prob'], color='red', s=50, zorder=5)
-    plt.text(item['rank'], item['log10_prob'], f"  {item['canon']}", 
-             fontsize=9, ha='left', va='center', weight='bold',
-             bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor='none'))
+    plt.scatter(item['rank'], item['log10_prob'], color='red', s=50, zorder=5, alpha=0.6)
+    texts.append(plt.text(item['rank'], item['log10_prob'], f"{item['canon']}", 
+             fontsize=9, ha='center', va='center', weight='bold'))
+
+from adjustText import adjust_text
+adjust_text(texts, arrowprops=dict(arrowstyle='-', color='black', lw=0.5))
 
 plt.xlabel('Rank (1 = Highest Probability)')
 plt.ylabel('log10(Probability)')
@@ -1034,18 +1046,18 @@ print(obs_df[['mutation', 'canon', 'rank', 'log10_prob']])
 # seaborn heatmap of mutation_prob_flat
 plt.figure(figsize=(20, 8))
 print( mutation_prob_matrix.shape)
-mutation_prob_matrix2=mutation_prob_matrix.copy()
+mutation_prob_matrix=mutation_prob_matrix.copy()
 # make every reference amino acid probability Na then 0
 for i, pos in enumerate(positions):
     ref_aa = reference_spike_sequence[i]
     if ref_aa in amino_acids:
         ref_idx = amino_acids.index(ref_aa)
-        mutation_prob_matrix2[ref_idx, i] = np.nan
+        mutation_prob_matrix[ref_idx, i] = np.nan
 #only label every tenth x axis tick
-mutation_prob_matrix2 = np.nan_to_num(mutation_prob_matrix2, nan=0.0)
+mutation_prob_matrix = np.nan_to_num(mutation_prob_matrix, nan=0.0)
 # replace np.nan with zero for visualization
 
-seaborn.heatmap(mutation_prob_matrix2, xticklabels=positions, yticklabels=amino_acids)
+seaborn.heatmap(mutation_prob_matrix, xticklabels=positions, yticklabels=amino_acids)
 plt.xticks(ticks=np.arange(0, len(positions), 10), labels=np.array(positions)[::10])
 plt.title(f"{sub_mod} Mutation Probabilities (Reference masked)")
 plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_heatmap.png"), dpi=300)
@@ -1053,10 +1065,12 @@ plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_heatmap.png"), dp
 # %%
 # seaborn histogram of mutation_prob_flat panel side by side
 
+
+
 plt.figure(figsize=(16, 8))
 plt.subplot(1, 2, 1)
 # log x axis before plotting
-mutation_prob_matrix_log=np.log10(mutation_prob_matrix + 1e-10)  # add small constant to avoid log(0)
+mutation_prob_matrix_log=np.log10(mutation_prob_matrix )  # add small constant to avoid log(0)
 plt.title("Histogram of log10 mutation probabilities (log x axis)")
 sns.histplot(mutation_prob_matrix_log.flatten(), bins=100)
 #plot again with log y axis
@@ -1071,7 +1085,9 @@ plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_histogram.png"), 
 # %%
 # Find top 10 non-reference mutations with highest probabilities in mutation_prob_matrix
 # Flatten the matrix and get indices of top values
-mutation_prob_matrix2 = np.nan_to_num(mutation_prob_matrix, nan=-np.inf)  # Replace NaN with -inf to ignore reference sites
+#mutation_prob_matrix2 = np.nan_to_num(mutation_prob_matrix, nan=-np.inf) 
+
+mutation_prob_matrix2=mutation_prob_matrix# Replace NaN with -inf to ignore reference sites
 top_10_indices = np.argsort(mutation_prob_matrix2.flatten())[-10:][::-1]  # Get top 10, descending
 
 # Convert flat indices back to 2D coordinates

@@ -371,19 +371,14 @@ else:
     heatmap_data_norm = (heatmap_data[cols_to_plot] - heatmap_data[cols_to_plot].mean()) / heatmap_data[cols_to_plot].std()
     
     plt.figure(figsize=(10, len(heatmap_data) * 0.5 + 2))
-    sns.heatmap(heatmap_data_norm, cmap="coolwarm", center=0, annot=True, fmt=".2f", 
-                cbar_kws={'label': 'Z-score'})
+    sns.heatmap(heatmap_data_norm, cmap="coolwarm", center=0, annot=heatmap_data[cols_to_plot], fmt=".2f", cbar=False)
     plt.yticks(rotation=0) # Make y-axis labels horizontal
     plt.title(f"{model_name} Normalized DMS & Model Metrics for Canonical Mutations")
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, f"{model_name}_canonical_mutations_heatmap.png"), dpi=300)
     plt.show()
     
-    # Also plot raw values (maybe just for a subset or separate plots if scales are too different)
-    # Or a clustered heatmap
-    g = sns.clustermap(heatmap_data_norm, cmap="coolwarm", center=0, figsize=(10, 10),
-                   cbar_kws={'label': 'Z-score'})
-    plt.setp(g.ax_heatmap.get_yticklabels(), rotation=0) # Make y-axis labels horizontal
-    plt.savefig(os.path.join(outdir, f"{model_name}_canonical_mutations_clustermap.png"), dpi=300)
-    plt.show()
 
+
+
+# %%
