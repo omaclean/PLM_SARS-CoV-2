@@ -32,7 +32,7 @@ pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE4_assembly.pdb"
 
 # view = visualize_mutations_on_pdb(pdb_path, user_k_seq, mutations)
 # view.show()
-sequences = read_sequences_to_dict('/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated.fas')
+sequences = read_sequences_to_dict('/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas')
 ids=list(sequences.keys())
 
 
@@ -41,7 +41,7 @@ ids=list(sequences.keys())
 # import entropy and reference
 model_name="ESM2-H3"
 model_name="ESM2-HA80"
-lineage_base="J"
+lineage_base="J.2_int"
 
 #find first id in list with lineage base in 
 lineages=[str(x).split("|")[-1] for x in ids]
@@ -127,10 +127,10 @@ for i in range(len(entropy_vals)):
 
 plt.xlabel("Entropy")
 plt.ylabel("Reference Probability")
-plt.title(f"{model_name} Entropy vs Probability")
+plt.title(f"{model_name} Entropy vs Probability on {lineage_base} (muts vs K lin)")
 plt.legend()
 plt.tight_layout()
-plt.savefig(os.path.join(outdir, f"{model_name}_entropy_vs_probability.png"), dpi=300)
+plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_entropy_vs_probability.png"), dpi=300)
 plt.show()
 
 # %%
@@ -146,7 +146,7 @@ view = visualise_mutations_on_pdb(pdb_path, sequences[ids[len(ids)-1]],
 #view.show()
 # save to file
 print(outdir)
-output_path = os.path.join(outdir, "{}_{}_mutations_structure.html".format(model_name, reference_lineage))
+output_path = os.path.join(outdir, "{}_{}_{}_mutations_structure.html".format(lineage_base, model_name, reference_lineage))
 print(output_path)
 # Generate HTML and save it
 html_content = view._make_html()
@@ -167,7 +167,7 @@ view = visualise_mutations_on_pdb(
     title=f"{model_name} Reference Probability"
 )
 view.show()
-with open(os.path.join(outdir, f"{model_name}_reference_probability_structure.html"), 'w') as f:
+with open(os.path.join(outdir, f"{lineage_base}_{model_name}_reference_probability_structure.html"), 'w') as f:
     f.write(view._make_html())
 
 
@@ -185,7 +185,7 @@ view = visualise_mutations_on_pdb(
 view.show()
 # save plot as interactive html
 # Save plot as interactive html
-output_path = "{}{}_{}_lin_mutations_probability.html".format(outdir,model_name, reference_lineage)
+output_path = "{}{}_{}_{}_lin_mutations_probability.html".format(outdir, lineage_base, model_name, reference_lineage)
 print(output_path)
 
 # Generate HTML and save it
@@ -207,7 +207,7 @@ view = visualise_mutations_on_pdb(
     title=f"{model_name} Reference entropy"
 )
 view.show()
-with open(os.path.join(outdir, f"{model_name}_reference_entropy_structure.html"), 'w') as f:
+with open(os.path.join(outdir, f"{lineage_base}_{model_name}_reference_entropy_structure.html"), 'w') as f:
     f.write(view._make_html())
 
 
@@ -223,7 +223,7 @@ view = visualise_mutations_on_pdb(
     title=f"{model_name} Reference entropy (log10)"
 )
 view.show()
-with open(os.path.join(outdir, f"{model_name}_reference_log10_entropy_structure.html"), 'w') as f:
+with open(os.path.join(outdir, f"{lineage_base}_{model_name}_reference_log10_entropy_structure.html"), 'w') as f:
     f.write(view._make_html())
 
 
@@ -285,7 +285,7 @@ view = visualise_mutations_on_pdb(
     canonical_map=h3_map  # Now displays H3 canonical numbering in separate legend
 )
 view.show()
-with open(os.path.join(outdir, f"{model_name}_reference_entropy_structure_canonical.html"), 'w') as f:
+with open(os.path.join(outdir, f"{lineage_base}_{model_name}_reference_entropy_structure_canonical.html"), 'w') as f:
     f.write(view._make_html())
 
 # %%
@@ -444,7 +444,7 @@ if reference_backbone in prob_pivot.columns:
     plt.ylabel('Mutation-canon name')
     plt.tight_layout()
     plt.yticks(rotation=0) 
-    plt.savefig(os.path.join(outdir,f"{model_name}_epistatic_heatmap.png"), dpi=300)
+    plt.savefig(os.path.join(outdir,f"{lineage_base}_{model_name}_epistatic_heatmap.png"), dpi=300)
     plt.show()
     
     # 6. Create shift heatmap (with reference lineage showing zeros)
@@ -463,7 +463,7 @@ if reference_backbone in prob_pivot.columns:
     plt.ylabel('Mutation -canon name')
     plt.yticks(rotation=0) 
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir,f"{model_name}_epistatic_shifts.png"), dpi=300)
+    plt.savefig(os.path.join(outdir,f"{lineage_base}_{model_name}_epistatic_shifts.png"), dpi=300)
     plt.show()
 
     # 7. Create grammar heatmap (with reference lineage showing zeros)
@@ -482,7 +482,7 @@ if reference_backbone in prob_pivot.columns:
     plt.ylabel('Mutation -canon name')
     plt.tight_layout()
     plt.yticks(rotation=0) 
-    plt.savefig(os.path.join(outdir,f"{model_name}_epistatic_shifts_gram.png"), dpi=300)
+    plt.savefig(os.path.join(outdir,f"{lineage_base}_{model_name}_epistatic_shifts_gram.png"), dpi=300)
     plt.show()
     
     # 8. Identify specific epistatic pairs (which backbone causes biggest shift for each mutation)
@@ -517,10 +517,10 @@ if reference_backbone in prob_pivot.columns:
     
     # Save results
     epistatic_ranking.to_csv(os.path.join(outdir,
-        f"{model_name}_epistatic_ranking.csv")
+        f"{lineage_base}_{model_name}_epistatic_ranking.csv")
     )
     epistatic_pairs_df.to_csv(os.path.join(outdir,
-        f"{model_name}_epistatic_pairs.csv"),
+        f"{lineage_base}_{model_name}_epistatic_pairs.csv"),
         index=False
     )
     
@@ -581,7 +581,7 @@ sns.heatmap(mut_combo_probability_matrix, annot=True, fmt='.3f', cmap='Greens',
             cbar_kws={'label': 'Probability'})
 plt.title(f'{model_name} Mutation Probability Matrix')
 plt.tight_layout()
-plt.savefig(os.path.join(outdir, f"{model_name}_mutation_probability_matrix.png"), dpi=300)
+plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_mutation_probability_matrix.png"), dpi=300)
 plt.show()
 
 # Plot Log10 Probability Matrix
@@ -590,7 +590,7 @@ sns.heatmap(np.log10(mut_combo_probability_matrix), annot=True, fmt='.3f', cmap=
             cbar_kws={'label': 'Log10 Probability'})
 plt.title(f'{model_name} Log10 Mutation Probability Matrix')
 plt.tight_layout()
-plt.savefig(os.path.join(outdir, f"{model_name}_log10_mutation_probability_matrix.png"), dpi=300)
+plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_log10_mutation_probability_matrix.png"), dpi=300)
 plt.show()
 
 # Plot Relative Sequence Grammar Matrix
@@ -599,7 +599,7 @@ sns.heatmap(mut_combo_grammar_matrix, annot=True, fmt='.3f', cmap='RdYlGn', cent
             cbar_kws={'label': 'Relative Sequence Grammar'})
 plt.title(f'{model_name} Relative Sequence Grammar Matrix')
 plt.tight_layout()
-plt.savefig(os.path.join(outdir, f"{model_name}_relative_sequence_grammar_matrix.png"), dpi=300)
+plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_relative_sequence_grammar_matrix.png"), dpi=300)
 plt.show()
 
 # %%
@@ -615,7 +615,7 @@ sns.heatmap(prob_shift_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
             cbar_kws={'label': 'Probability Shift (vs Reference)'})
 plt.title(f'{model_name} Probability Shift Matrix (Relative to Reference)')
 plt.tight_layout()
-plt.savefig(os.path.join(outdir, f"{model_name}_probability_shift_matrix.png"), dpi=300)
+plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_probability_shift_matrix.png"), dpi=300)
 plt.show()
  
 # 2. log the probability shifts
@@ -631,7 +631,7 @@ sns.heatmap(log_prob_shift_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=
             cbar_kws={'label': 'Log10 Probability Shift (vs Reference)'})
 plt.title(f'{model_name} Log10 Probability Shift Matrix (Relative to Reference)')
 plt.tight_layout()
-plt.savefig(os.path.join(outdir, f"{model_name}_log10_probability_shift_matrix.png"), dpi=300)
+plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_log10_probability_shift_matrix.png"), dpi=300)
 plt.show()
 
 # 3. Relative Sequence Grammar Shift (Grammar - Ref_Grammar)
@@ -642,7 +642,7 @@ sns.heatmap(grammar_shift_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=0
             cbar_kws={'label': 'Grammar Shift (vs Reference)'})
 plt.title(f'{model_name} Relative Sequence Grammar Shift Matrix (Relative to Reference)')
 plt.tight_layout()
-plt.savefig(os.path.join(outdir, f"{model_name}_relative_sequence_grammar_shift_matrix.png"), dpi=300)
+plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_relative_sequence_grammar_shift_matrix.png"), dpi=300)
 plt.show()
 
 
