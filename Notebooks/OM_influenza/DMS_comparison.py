@@ -121,6 +121,30 @@ K_indexed_muts = [m for m in get_mutations(sequences[ids[0]],sequences[ids[len(i
 # Convert your mutations to canonical numbering
 canonical_mutations = mutations_to_canonical(K_indexed_muts, h3_map_with_ha2)
 # %%
+# make histograms for each of the three DMS variables to see their distributions
+
+# three panel plot
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+# 1. Histogram for MDCKSIAT1 cell entry
+sns.histplot(data=data_in, x="MDCKSIAT1 cell entry", ax=axes[0], kde=True)
+axes[0].set_title(f"{model_name} MDCKSIAT1 cell entry Distribution")
+
+# 2. Histogram for sera escape
+sns.histplot(data=data_in, x="sera escape", ax=axes[1], kde=True)
+axes[1].set_title(f"{model_name} Sera Escape Distribution")
+
+# 3. Histogram for pH stability
+sns.histplot(data=data_in, x="pH stability", ax=axes[2], kde=True)
+axes[2].set_title(f"{model_name} pH Stability Distribution")
+
+plt.tight_layout()
+plt.savefig(os.path.join(outdir, f"{model_name}_DMS_variables_histograms.png"), dpi=300)
+plt.show()
+# save plot
+plt.savefig(os.path.join(outdir, f"{model_name}_DMS_variables_histograms.png"), dpi=300)
+
+# %%
 
 # scale y axis log
 
