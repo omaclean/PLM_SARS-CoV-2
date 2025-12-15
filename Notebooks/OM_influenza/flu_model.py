@@ -322,5 +322,5 @@ print(f"\nRecommended Beta: {best_beta:.2f}")
 # Both use beta=0.55 - this is actually correct if you're modeling fitness through susceptibility alone, but the comment at line 115 clarifies this intentional choice
 # Calibration Check is Post-Hoc (model.test.py)
 
-# Great that you added it! B
 # %%
+
