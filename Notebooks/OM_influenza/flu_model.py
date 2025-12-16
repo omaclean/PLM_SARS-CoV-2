@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 # Global Simulation Parameters
 SEASONAL_AMPLITUDE = 0.2
-PEAK_DAY = 20  # Jan 20th approx
+PEAK_DAY = 204  # Jan 20th approx (relative to July 1st start)
 INFECTIOUS_PERIOD = 3.0
 LATENT_PERIOD = 2.0
 
@@ -21,7 +21,7 @@ class AntigenicSeirModel:
     - PLANT Paper Fig 4G: ~1.47% fitness advantage per antigenic unit (used for calibration checks).
     """
     
-    def __init__(self, historical_strains, population_size=67_000_000, current_year=2025.9):
+    def __init__(self, historical_strains, population_size=67_000_000, current_year=2025.5):
         """
         Args:
             historical_strains (dict): Key=Year (int/float), Value=tuple (x, y, z)
@@ -154,7 +154,7 @@ class AntigenicSeirModel:
     
     def run(self, strain_coord, vaccine_coord, pop_distribution, 
             beta=0.6, latent_period=LATENT_PERIOD, infectious_period=INFECTIOUS_PERIOD, 
-            seed_infections=100, days=180):
+            seed_infections=100, days=365):
         """
         Run simulation.
         pop_distribution: list [Naive, Hist_1..., Vacc] (Must match history + 2)
@@ -221,7 +221,7 @@ pop_dist = [
     15_000_000   # Current Season Vaccinated
 ]
 
-model = AntigenicSeirModel(history, population_size=67_000_000, current_year=2025.9)
+model = AntigenicSeirModel(history, population_size=67_000_000, current_year=2025.5)
 
 # ==========================================
 # 2. SCENARIO RUNS
@@ -300,8 +300,8 @@ def calculate_Rt_over_time(df, beta, infectious_period, sigma_vector, pop_size,
     return np.array(R0_vals)
 
 # Helper function to convert day to date string
-def day_to_date(day, start_month=11, start_day=1):
-    """Convert simulation day to calendar date (assuming start Nov 1)"""
+def day_to_date(day, start_month=7, start_day=1):
+    """Convert simulation day to calendar date (assuming start July 1)"""
     from datetime import datetime, timedelta
     start = datetime(2025, start_month, start_day)
     current = start + timedelta(days=int(day))
@@ -350,27 +350,31 @@ seasonal_forcing = 1 + SEASONAL_AMPLITUDE * np.cos(2 * np.pi * (times - PEAK_DAY
 
 R0_t = beta * INFECTIOUS_PERIOD * seasonal_forcing  # R0(t) - same for both scenarios!
 
-ax3_2 = ax3.twinx()
+
 # Seasonality forcing on secondary axis - shows multiplicative factor
-ax3_2.fill_between(times, 1.0, seasonal_forcing, where=(seasonal_forcing > 1.0), 
-                    alpha=0.15, color='skyblue', label='Winter boost (>1.0)')
-ax3_2.fill_between(times, seasonal_forcing, 1.0, where=(seasonal_forcing <= 1.0), 
-                    alpha=0.15, color='orange', label='Summer reduction (<1.0)')
-ax3_2.plot(times, seasonal_forcing, 'k:', alpha=0.3, lw=1, label='Seasonal Forcing')
-ax3_2.axhline(y=1.0, color='gray', linestyle='-', lw=0.5, alpha=0.3)
-ax3_2.set_ylabel('Seasonal Multiplier (Right Axis)', fontsize=10, color='gray')
-ax3_2.tick_params(axis='y', labelcolor='gray')
-ax3_2.set_ylim([0.7, 1.3]) # Give it some space
-ax3_2.legend(loc='upper right', fontsize=8)
+
 
 # Plot R0(t) (same for both) and Rt (different for both)
 ax3.plot(times, R0_t, 'k--', lw=1.5, alpha=0.5, label='R₀(t) (Potential)', zorder=5)
+
+ax3.fill_between(times, 0,R0_t, where=(seasonal_forcing > 1.0), 
+                    alpha=0.15, color='skyblue', label='Winter boost (>1.0)')
+ax3.fill_between(times,0, R0_t, where=(seasonal_forcing <= 1.0), 
+                    alpha=0.15, color='orange', label='Summer reduction (<1.0)')
+
 ax3.plot(times, Rt_k, label='Rₜ (K lineage)', color='#d62728', lw=2.5)
 ax3.plot(times, Rt_cf, label='Rₜ (Counterfactual)', color='#1f77b4', lw=2.5, ls='--')
 
 ax3.set_title('R₀(t) vs Rₜ: Seasonality vs Susceptibility Depletion', fontsize=11, fontweight='bold')
 ax3.set_xlabel('Days')
 ax3.set_ylabel('Reproduction Number (Left Axis)', fontsize=10)
+
+ax3.plot(times, seasonal_forcing, 'k:', alpha=0.3, lw=1, label='Seasonal Forcing')
+ax3.axhline(y=1.0, color='gray', linestyle='-', lw=0.5, alpha=0.3)
+ax3.set_ylabel('Seasonal Multiplier (Right Axis)', fontsize=10, color='gray')
+ax3.tick_params(axis='y', labelcolor='gray')
+
+
 ax3.legend(loc='upper left', fontsize=8)
 ax3.grid(alpha=0.3)
 # Don't set ylim minimum - let it drop below 1 naturally
@@ -401,33 +405,33 @@ ax4.text(0.02, 0.98, 'Key: R₀(t) identical for both.\nRₜ differs due to immu
 ax5 = plt.subplot(4, 2, 5)
 # Convert days to dates
 dates = [day_to_date(d) for d in times]
-julian_days = [(d - datetime(d.year, 1, 1).replace(tzinfo=None)).days + 1 for d in dates]
+# julian_days = [(d - datetime(d.year, 1, 1).replace(tzinfo=None)).days + 1 for d in dates]
 
 # Define flu season regions (Northern Hemisphere)
-# Typical flu season: October (day 274) to May (day 151 next year)
-ax5.axvspan(274, 365, alpha=0.15, color='blue', label='Typical Flu Season (Oct-Dec)')
-ax5.axvspan(1, 151, alpha=0.15, color='blue')  # Jan-May continuation
-ax5.axvline(x=20, color='purple', linestyle='--', alpha=0.5, label='Peak Seasonality (Jan 20)')
+# Typical flu season: October (day 92 from July 1) to May (day 334 from July 1)
+ax5.axvspan(92, 334, alpha=0.15, color='blue', label='Typical Flu Season (Oct-May)')
+ax5.axvline(x=PEAK_DAY, color='purple', linestyle='--', alpha=0.5, label='Peak Seasonality (Jan 20)')
 
 # Plot infections
-ax5.plot(julian_days, res_k['I'] / 1e6, label='K Lineage Infections', 
+ax5.plot(times, res_k['I'] / 1e6, label='K Lineage Infections', 
          color='#d62728', lw=2.5)
-ax5.plot(julian_days, res_cf['I'] / 1e6, label='Counterfactual Infections', 
+ax5.plot(times, res_cf['I'] / 1e6, label='Counterfactual Infections', 
          color='#1f77b4', lw=2.5, ls='--')
 
-ax5.set_title('Epidemic Curve on Julian Calendar', fontsize=12, fontweight='bold')
-ax5.set_xlabel('Julian Day')
+ax5.set_title('Epidemic Curve on Calendar', fontsize=12, fontweight='bold')
+ax5.set_xlabel('Days from July 1st')
 ax5.set_ylabel('Infected (Millions)')
 ax5.legend(loc='best', fontsize=8)
 ax5.grid(alpha=0.3)
-ax5.set_xlim([min(julian_days), max(julian_days)])
+ax5.set_xlim([min(times), max(times)])
 
 # Add month labels
-month_starts = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
-month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+# Month starts relative to July 1st (approx)
+month_starts = [0, 31, 62, 92, 123, 153, 184, 215, 243, 274, 304, 335]
+month_names = ['Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun']
 ax5_top = ax5.twiny()
 ax5_top.set_xlim(ax5.get_xlim())
-visible_months = [i for i, day in enumerate(month_starts) if min(julian_days) <= day <= max(julian_days)]
+visible_months = [i for i, day in enumerate(month_starts) if min(times) <= day <= max(times)]
 ax5_top.set_xticks([month_starts[i] for i in visible_months])
 ax5_top.set_xticklabels([month_names[i] for i in visible_months])
 
