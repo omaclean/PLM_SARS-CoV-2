@@ -35,13 +35,13 @@ pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE4_assembly.pdb"
 sequences = read_sequences_to_dict('/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas')
 ids=list(sequences.keys())
 
-
-
+print(get_mutations(sequences[ids[0]],sequences[ids[3]]))
+    
 # %%
 # import entropy and reference
 model_name="ESM2-H3"
 model_name="ESM2-HA80"
-lineage_base="J.2_int"
+lineage_base="J"
 
 #find first id in list with lineage base in 
 lineages=[str(x).split("|")[-1] for x in ids]

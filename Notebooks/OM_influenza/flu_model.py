@@ -2,6 +2,13 @@ import numpy as np
 import pandas as pd
 from scipy.integrate import odeint
 import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+
+# Global Simulation Parameters
+SEASONAL_AMPLITUDE = 0.2
+PEAK_DAY = 20  # Jan 20th approx
+INFECTIOUS_PERIOD = 3.0
+LATENT_PERIOD = 2.0
 
 class AntigenicSeirModel:
     """
@@ -110,41 +117,43 @@ class AntigenicSeirModel:
 
         return np.array(sigmas)
 
-    def deriv(self, y, t, beta, sigma_vector, latent_period=2.0, infectious_period=3.0):
+    def deriv(self, y, t, base_beta, sigma_vector, latent_period, infectious_period, 
+              seasonal_amplitude=SEASONAL_AMPLITUDE, peak_day=PEAK_DAY):
         """
-        SEIR System.
-        State y: [S_naive, S_hist1...S_histN, S_vacc, E, I, R_total]
-        """
-        num_compartments = len(sigma_vector)
+        Updated with SEASONAL FORCING.
         
-        # Unpack
+        Args:
+            seasonal_amplitude (0.2): Variance in R0 due to weather (20% swing).
+            peak_day (20): The day of peak transmissibility (e.g., Jan 15th).
+                           If simulation starts Nov 1, Jan 15 is ~Day 75.
+                           Adjust this relative to your start date.
+        """
+        # 1. Calculate Seasonal Beta
+        # Cosine wave: +20% in winter, -20% in summer
+        # Assuming t is days. Period is 365.
+        forcing = 1 + seasonal_amplitude * np.cos(2 * np.pi * (t - peak_day) / 365.0)
+        
+        beta_t = base_beta * forcing
+        
+        # ... rest of SEIR logic is identical ...
+        num_compartments = len(sigma_vector)
         S_cohorts = y[:num_compartments]
         E = y[num_compartments]
         I = y[num_compartments + 1]
-        R = y[num_compartments + 2]
         
-        # Parameters
-        delta = 1.0 / latent_period
-        gamma = 1.0 / infectious_period
+        lam = beta_t * I / self.pop_size
         
-        # Force of Infection
-        # Note: beta is constant. The fitness advantage is mechanistic via 'sigma_vector'.
-        lam = beta * I / self.pop_size
-        
-        # Derivatives
         dS_dt = -lam * sigma_vector * S_cohorts
-        
-        # New exposed = sum of flows from all S compartments
         new_infections = np.sum(lam * sigma_vector * S_cohorts)
         
-        dE_dt = new_infections - delta * E
-        dI_dt = delta * E - gamma * I
-        dR_dt = gamma * I
+        dE_dt = new_infections - (1/latent_period) * E
+        dI_dt = (1/latent_period) * E - (1/infectious_period) * I
+        dR_dt = (1/infectious_period) * I
         
         return np.concatenate([dS_dt, [dE_dt, dI_dt, dR_dt]])
-
+    
     def run(self, strain_coord, vaccine_coord, pop_distribution, 
-            beta=0.6, latent_period=2.0, infectious_period=3.0, 
+            beta=0.6, latent_period=LATENT_PERIOD, infectious_period=INFECTIOUS_PERIOD, 
             seed_infections=100, days=180):
         """
         Run simulation.
@@ -265,33 +274,251 @@ print("Note: If Implied > Target, increase sigmoid midpoint or decrease steepnes
 # ==========================================
 # 4. PLOTTING
 # ==========================================
-plt.figure(figsize=(12, 5))
 
-# Plot 1: Curves
-plt.subplot(1, 2, 1)
-plt.plot(res_k['time'], res_k['I'], label='Actual (K Lineage)', color='#d62728', lw=2)
-plt.plot(res_cf['time'], res_cf['I'], label='Counterfactual (No Mutation)', color='#1f77b4', ls='--')
-plt.title('Epidemic Curve Comparison')
-plt.xlabel('Days')
-plt.ylabel('Infected (I)')
-plt.legend()
-plt.grid(alpha=0.3)
+# Helper function to calculate Rt (effective reproduction number) over time
+def calculate_Rt_over_time(df, beta, infectious_period, sigma_vector, pop_size, 
+                           seasonal_amplitude=SEASONAL_AMPLITUDE, peak_day=PEAK_DAY):
+    """Calculate Rt (time-varying reproduction number) at each timepoint accounting for seasonality and susceptibility depletion"""
+    times = df['time'].values
+    R0_vals = []
+    
+    for t in times:
+        # Calculate seasonal forcing
+        forcing = 1 + seasonal_amplitude * np.cos(2 * np.pi * (t - peak_day) / 365.0)
+        beta_t = beta * forcing
+        
+        # Calculate average susceptibility weighted by susceptible population
+        S_cohorts = df.iloc[int(t*4) if int(t*4) < len(df) else -1][
+            [c for c in df.columns if c.startswith('S_')]
+        ].values
+        avg_susceptibility = np.sum(S_cohorts * sigma_vector) / np.sum(S_cohorts)
+        
+        # Rt = beta(t) * infectious_period * avg_susceptibility
+        Rt = beta_t * infectious_period * avg_susceptibility
+        R0_vals.append(Rt)
+    
+    return np.array(R0_vals)
 
-# Plot 2: Susceptibility Profile
-plt.subplot(1, 2, 2)
+# Helper function to convert day to date string
+def day_to_date(day, start_month=11, start_day=1):
+    """Convert simulation day to calendar date (assuming start Nov 1)"""
+    from datetime import datetime, timedelta
+    start = datetime(2025, start_month, start_day)
+    current = start + timedelta(days=int(day))
+    return current
+
+# Calculate Rt (time-varying reproduction number) for both scenarios
+Rt_k = calculate_Rt_over_time(res_k, beta, infectious_period=INFECTIOUS_PERIOD, 
+                               sigma_vector=sigmas_k, pop_size=model.pop_size)
+Rt_cf = calculate_Rt_over_time(res_cf, beta, infectious_period=INFECTIOUS_PERIOD, 
+                                sigma_vector=sigmas_cf, pop_size=model.pop_size)
+
+# Create comprehensive figure
+fig = plt.figure(figsize=(18, 14))
+
+# ============ Plot 1: Full SEIR Dynamics over Time ============
+ax1 = plt.subplot(4, 2, 1)
+ax1.plot(res_k['time'], res_k[['S_' + c for c in ['Naive'] + [str(y) for y in model.epochs] + ['Vacc']]].sum(axis=1) / 1e6, 
+         label='Susceptible', color='#1f77b4', lw=2)
+ax1.plot(res_k['time'], res_k['E'] / 1e6, label='Exposed', color='#ff7f0e', lw=2)
+ax1.plot(res_k['time'], res_k['I'] / 1e6, label='Infected', color='#d62728', lw=2)
+ax1.plot(res_k['time'], res_k['R'] / 1e6, label='Recovered', color='#2ca02c', lw=2)
+ax1.set_title('SEIR Dynamics - Actual K Lineage', fontsize=12, fontweight='bold')
+ax1.set_xlabel('Days')
+ax1.set_ylabel('Population (Millions)')
+ax1.legend(loc='right')
+ax1.grid(alpha=0.3)
+
+# ============ Plot 2: SEIR Counterfactual ============
+ax2 = plt.subplot(4, 2, 2)
+ax2.plot(res_cf['time'], res_cf[['S_' + c for c in ['Naive'] + [str(y) for y in model.epochs] + ['Vacc']]].sum(axis=1) / 1e6, 
+         label='Susceptible', color='#1f77b4', lw=2, alpha=0.7)
+ax2.plot(res_cf['time'], res_cf['E'] / 1e6, label='Exposed', color='#ff7f0e', lw=2, alpha=0.7)
+ax2.plot(res_cf['time'], res_cf['I'] / 1e6, label='Infected', color='#d62728', lw=2, alpha=0.7)
+ax2.plot(res_cf['time'], res_cf['R'] / 1e6, label='Recovered', color='#2ca02c', lw=2, alpha=0.7)
+ax2.set_title('SEIR Dynamics - Counterfactual (No Mutation)', fontsize=12, fontweight='bold')
+ax2.set_xlabel('Days')
+ax2.set_ylabel('Population (Millions)')
+ax2.legend(loc='right')
+ax2.grid(alpha=0.3)
+
+# ============ Plot 3: Rt with Seasonality Overlay ============
+ax3 = plt.subplot(4, 2, 3)
+# Calculate baseline seasonality (no depletion)
+times = res_k['time'].values
+seasonal_forcing = 1 + SEASONAL_AMPLITUDE * np.cos(2 * np.pi * (times - PEAK_DAY) / 365.0)
+
+R0_t = beta * INFECTIOUS_PERIOD * seasonal_forcing  # R0(t) - same for both scenarios!
+
+ax3_2 = ax3.twinx()
+# Seasonality forcing on secondary axis - shows multiplicative factor
+ax3_2.fill_between(times, 1.0, seasonal_forcing, where=(seasonal_forcing > 1.0), 
+                    alpha=0.15, color='skyblue', label='Winter boost (>1.0)')
+ax3_2.fill_between(times, seasonal_forcing, 1.0, where=(seasonal_forcing <= 1.0), 
+                    alpha=0.15, color='orange', label='Summer reduction (<1.0)')
+ax3_2.plot(times, seasonal_forcing, 'k:', alpha=0.3, lw=1, label='Seasonal Forcing')
+ax3_2.axhline(y=1.0, color='gray', linestyle='-', lw=0.5, alpha=0.3)
+ax3_2.set_ylabel('Seasonal Multiplier (Right Axis)', fontsize=10, color='gray')
+ax3_2.tick_params(axis='y', labelcolor='gray')
+ax3_2.set_ylim([0.7, 1.3]) # Give it some space
+ax3_2.legend(loc='upper right', fontsize=8)
+
+# Plot R0(t) (same for both) and Rt (different for both)
+ax3.plot(times, R0_t, 'k--', lw=1.5, alpha=0.5, label='R₀(t) (Potential)', zorder=5)
+ax3.plot(times, Rt_k, label='Rₜ (K lineage)', color='#d62728', lw=2.5)
+ax3.plot(times, Rt_cf, label='Rₜ (Counterfactual)', color='#1f77b4', lw=2.5, ls='--')
+
+ax3.set_title('R₀(t) vs Rₜ: Seasonality vs Susceptibility Depletion', fontsize=11, fontweight='bold')
+ax3.set_xlabel('Days')
+ax3.set_ylabel('Reproduction Number (Left Axis)', fontsize=10)
+ax3.legend(loc='upper left', fontsize=8)
+ax3.grid(alpha=0.3)
+# Don't set ylim minimum - let it drop below 1 naturally
+ax3.set_ylim([0, max(Rt_k.max(), Rt_cf.max(), R0_t.max()) * 1.15])
+
+# ============ Plot 4: R₀ → R₀(t) → Rₜ Decomposition ============
+ax4 = plt.subplot(4, 2, 4)
+# Base R₀ (intrinsic, no seasonality) - same for both scenarios
+base_R0_line = np.ones_like(times) * beta * INFECTIOUS_PERIOD
+# R₀(t) with seasonality - SAME for both scenarios  
+R0_t_line = base_R0_line * seasonal_forcing
+
+ax4.fill_between(times, 0, base_R0_line, alpha=0.1, color='gray', label='Base R₀ (β×D)')
+ax4.fill_between(times, 0, R0_t_line, alpha=0.15, color='purple', label='R₀(t) (Seasonality)')
+ax4.plot(times, Rt_k, color='#d62728', lw=2.5, label='Rₜ (K lineage)', zorder=10)
+ax4.plot(times, Rt_cf, color='#1f77b4', lw=2.5, ls='--', label='Rₜ (Counterfactual)', zorder=10)
+
+ax4.set_title('From R₀ to Rₜ: Decomposition', fontsize=11, fontweight='bold')
+ax4.set_xlabel('Days')
+ax4.set_ylabel('Reproduction Number')
+ax4.legend(loc='best', fontsize=8)
+ax4.grid(alpha=0.3)
+ax4.text(0.02, 0.98, 'Key: R₀(t) identical for both.\nRₜ differs due to immune escape.', 
+         transform=ax4.transAxes, fontsize=8, va='top',
+         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+# ============ Plot 5: Julian Calendar View ============
+ax5 = plt.subplot(4, 2, 5)
+# Convert days to dates
+dates = [day_to_date(d) for d in times]
+julian_days = [(d - datetime(d.year, 1, 1).replace(tzinfo=None)).days + 1 for d in dates]
+
+# Define flu season regions (Northern Hemisphere)
+# Typical flu season: October (day 274) to May (day 151 next year)
+ax5.axvspan(274, 365, alpha=0.15, color='blue', label='Typical Flu Season (Oct-Dec)')
+ax5.axvspan(1, 151, alpha=0.15, color='blue')  # Jan-May continuation
+ax5.axvline(x=20, color='purple', linestyle='--', alpha=0.5, label='Peak Seasonality (Jan 20)')
+
+# Plot infections
+ax5.plot(julian_days, res_k['I'] / 1e6, label='K Lineage Infections', 
+         color='#d62728', lw=2.5)
+ax5.plot(julian_days, res_cf['I'] / 1e6, label='Counterfactual Infections', 
+         color='#1f77b4', lw=2.5, ls='--')
+
+ax5.set_title('Epidemic Curve on Julian Calendar', fontsize=12, fontweight='bold')
+ax5.set_xlabel('Julian Day')
+ax5.set_ylabel('Infected (Millions)')
+ax5.legend(loc='best', fontsize=8)
+ax5.grid(alpha=0.3)
+ax5.set_xlim([min(julian_days), max(julian_days)])
+
+# Add month labels
+month_starts = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
+month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+ax5_top = ax5.twiny()
+ax5_top.set_xlim(ax5.get_xlim())
+visible_months = [i for i, day in enumerate(month_starts) if min(julian_days) <= day <= max(julian_days)]
+ax5_top.set_xticks([month_starts[i] for i in visible_months])
+ax5_top.set_xticklabels([month_names[i] for i in visible_months])
+
+# ============ Plot 6: Susceptibility Profile ============
+ax6 = plt.subplot(4, 2, 6)
 cohort_labels = ['Naive'] + [str(y) for y in model.epochs] + ['Vacc']
 x = np.arange(len(cohort_labels))
 width = 0.35
 
-plt.bar(x - width/2, sigmas_k, width, label='Actual Susc.', color='#d62728', alpha=0.7)
-plt.bar(x + width/2, sigmas_cf, width, label='Counterfactual Susc.', color='#1f77b4', alpha=0.7)
-plt.xticks(x, cohort_labels, rotation=45)
-plt.title('Susceptibility by Cohort')
-plt.ylabel('Probability of Infection (sigma)')
-plt.legend()
+ax6.bar(x - width/2, sigmas_k, width, label='Actual K', color='#d62728', alpha=0.7)
+ax6.bar(x + width/2, sigmas_cf, width, label='Counterfactual', color='#1f77b4', alpha=0.7)
+ax6.set_xticks(x)
+ax6.set_xticklabels(cohort_labels, rotation=45)
+ax6.set_title('Susceptibility by Immunity Cohort', fontsize=12, fontweight='bold')
+ax6.set_ylabel('Susceptibility (σ)')
+ax6.legend()
+ax6.grid(alpha=0.3, axis='y')
+
+# ============ Plot 7: Epidemic Curve Comparison ============
+ax7 = plt.subplot(4, 2, 7)
+ax7.fill_between(res_k['time'], res_k['I'] / 1e6, alpha=0.3, color='#d62728', 
+                 label='K Lineage (Actual)')
+ax7.fill_between(res_cf['time'], res_cf['I'] / 1e6, alpha=0.3, color='#1f77b4',
+                 label='No Mutation (CF)')
+ax7.plot(res_k['time'], res_k['I'] / 1e6, color='#d62728', lw=2)
+ax7.plot(res_cf['time'], res_cf['I'] / 1e6, color='#1f77b4', lw=2, ls='--')
+ax7.set_title('Infection Prevalence Comparison', fontsize=12, fontweight='bold')
+ax7.set_xlabel('Days')
+ax7.set_ylabel('Infected (Millions)')
+ax7.legend()
+ax7.grid(alpha=0.3)
+
+# Add annotations for key metrics - position away from title
+peak_k_idx = res_k['I'].argmax()
+peak_cf_idx = res_cf['I'].argmax()
+peak_k_time = res_k.iloc[peak_k_idx]['time']
+peak_k_val = peak_k/1e6
+
+# Position annotation in middle-right area to avoid title
+ax7.annotate(f'K Peak:\n{peak_k_val:.2f}M\n(Day {peak_k_time:.0f})', 
+            xy=(peak_k_time, peak_k_val),
+            xytext=(peak_k_time + 30, peak_k_val * 0.7),
+            bbox=dict(boxstyle='round,pad=0.5', fc='#d62728', alpha=0.5, ec='#d62728'),
+            arrowprops=dict(arrowstyle='->', color='#d62728', lw=1.5),
+            fontsize=9, fontweight='bold')
+
+# ============ Plot 8: Effective Susceptible Population Over Time ============
+ax8 = plt.subplot(4, 2, 8)
+# Calculate effective susceptible population
+S_cols = [c for c in res_k.columns if c.startswith('S_')]
+S_eff_k = []
+S_eff_cf = []
+for idx in range(len(res_k)):
+    S_cohorts_k = res_k.iloc[idx][S_cols].values
+    S_cohorts_cf = res_cf.iloc[idx][S_cols].values
+    S_eff_k.append(np.sum(S_cohorts_k * sigmas_k) / 1e6)
+    S_eff_cf.append(np.sum(S_cohorts_cf * sigmas_cf) / 1e6)
+
+ax8.fill_between(res_k['time'], S_eff_k, alpha=0.3, color='#d62728', label='K Lineage')
+ax8.fill_between(res_cf['time'], S_eff_cf, alpha=0.3, color='#1f77b4', label='Counterfactual')
+ax8.plot(res_k['time'], S_eff_k, color='#d62728', lw=2)
+ax8.plot(res_cf['time'], S_eff_cf, color='#1f77b4', lw=2, ls='--')
+ax8.set_title('Effective Susceptible Population (Why Rₜ Differs)', fontsize=12, fontweight='bold')
+ax8.set_xlabel('Days')
+ax8.set_ylabel('Effective Susceptibles (Millions)')
+ax8.legend()
+ax8.grid(alpha=0.3)
+ax8.text(0.02, 0.98, f'Initial S_eff:\nK: {S_eff_k[0]:.1f}M\nCF: {S_eff_cf[0]:.1f}M\nRatio: {S_eff_k[0]/S_eff_cf[0]:.2f}x', 
+         transform=ax8.transAxes, fontsize=9, va='top',
+         bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
 
 plt.tight_layout()
+plt.savefig('flu_model_comprehensive_analysis.png', dpi=300, bbox_inches='tight')
 plt.show()
+
+print("\n" + "="*60)
+print("COMPREHENSIVE PLOTS GENERATED")
+print("="*60)
+print(f"Figure saved as: flu_model_comprehensive_analysis.png")
+print(f"\nPlot 1-2: Full SEIR dynamics for both scenarios")
+print(f"Plot 3: R₀(t) [SAME] vs Rₜ [DIFFERENT] over time")
+print(f"         R₀(t) varies with seasonality (both scenarios identical)")
+print(f"         Rₜ differs due to immune escape affecting susceptibility")
+print(f"Plot 4: R₀ → R₀(t) → Rₜ decomposition")
+print(f"         (Clarifies: intrinsic transmission SAME, outcome differs)")
+print(f"Plot 5: Epidemic curve on Julian calendar with flu season shading")
+print(f"Plot 6: Susceptibility profiles by cohort")
+print(f"Plot 7: Direct infection comparison with peak annotations")
+print(f"Plot 8: Effective susceptible population over time")
+print(f"         (K has {S_eff_k[0]/S_eff_cf[0]:.2f}x more susceptibles → higher Rₜ)")
+print("="*60)
 
 # %% 
 
