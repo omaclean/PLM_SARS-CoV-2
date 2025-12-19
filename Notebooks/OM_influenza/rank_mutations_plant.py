@@ -7,6 +7,10 @@ import torch
 import joblib
 import glob
 from transformers import AutoTokenizer, EsmConfig
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import seaborn as sns
+from Bio import SeqIO
 
 # Add PLANT to path
 sys.path.append("/home3/oml4h/hugging_face_downloads/PLANT_model/code/src")
@@ -20,6 +24,9 @@ except ImportError:
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
+# Test Mode Toggle
+TEST_MODE = False # True # Set to False to run on all sites
+
 # PLANT Model Config
 REPO_DIR = "/home3/oml4h/hugging_face_downloads/PLANT_model"
 CKPT_DIR = os.path.join(REPO_DIR, "variants/PLANT_fixed")
@@ -30,6 +37,7 @@ SCALE_FACTOR = 8
 # QUERY_PATH removed - we get sequence from matrix header
 PROB_MATRIX_PATH = "/home3/oml4h/PLM_SARS-CoV-2/Results/test/J.2.4/J.2.4_probability_matrix.csv"
 BASE_LINEAGE_NAME = "J.2.4" # Hardcoded for output naming since we aren't parsing it
+SEQ_FILE_PATH = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
 
 # Output
 OUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Results/PLANT_Rankings"
@@ -64,8 +72,8 @@ POP_DIST = [
 VACCINE_COORD = (3.011719, 3.59375, -0.34155) 
 
 # Target Sites (1-based indices in the TRIMMED sequence / HA1)
-# User requested key sites like 158, 159, 160
-TARGET_SITES = [158, 159, 160] 
+# If TEST_MODE is True, use restricted sites. Else, will be set in main()
+TEST_SITES = [158, 159, 160] 
 
 # Reference Sequence for Trimming (from Plant.run.py)
 REFERENCE_SEQ = "QKIPGNDNSTATLCLGHHAVPNGTIVKTITNDRIEVTNATELVQNSSIGEICGSPHQILDGGNCTLIDALLGDPQCDGFQNKEWDLFVERSRANSNCYPYDVPGYASLRSLVASSGTLEFKNESFNWTGVKQNGTSSACIRGSSSSFFSRLNWLTSINNIYPAQNVTMPNKEQFDKLYIWGVHHPDTDKNQISLFAQSSGRITVSTKRSQQAVIPNIGSRPRIRDIPSRISIYWTIVKPGDILLINSTGNLIAPRGYFKIRNGKSSIMRSDAPIGRCKSECITPNGSIPNDKPFQNVNRITYGACPRYVKQSTLKLATGMRNVPEKQTR"
@@ -147,6 +155,55 @@ class WeightedDistanceModel:
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
+
+def get_observed_mutations(seq_file, parent_id="J.2.4", child_id="J.2.4.1"):
+    """
+    Find mutations between parent and child lineages.
+    Returns a list of mutation strings (e.g., "N159Y").
+    """
+    print(f"Searching for mutations between {parent_id} and {child_id} in {seq_file}...")
+    parent_seq = None
+    child_seq = None
+    
+    for record in SeqIO.parse(seq_file, "fasta"):
+        header = record.description
+        if header.endswith(f"|{parent_id}"):
+            parent_seq = str(record.seq)
+        elif header.endswith(f"|{child_id}"):
+            child_seq = str(record.seq)
+            
+    if parent_seq is None or child_seq is None:
+        print(f"Warning: Could not find both sequences. Parent found: {parent_seq is not None}, Child found: {child_seq is not None}")
+        return []
+        
+    # Trim both sequences (remove first 16 AA signal peptide)
+    # Assuming they are full length and aligned
+    # We use the same logic as trim_to_target_length but hardcoded for now based on user request
+    # "crops out the first 16 regions"
+    
+    # Check if we need to align or just trim
+    # If they are from the same file and aligned, we can just compare index by index
+    
+    mutations = []
+    
+    # Trim first 16
+    p_trim = parent_seq[16:]
+    c_trim = child_seq[16:]
+    
+    # Compare up to the length of the shorter one (or target length)
+    length = min(len(p_trim), len(c_trim), TARGET_LENGTH)
+    
+    for i in range(length):
+        ref_aa = p_trim[i]
+        mut_aa = c_trim[i]
+        if ref_aa != mut_aa:
+            # 1-based index
+            pos = i + 1
+            mut_str = f"{ref_aa}{pos}{mut_aa}"
+            mutations.append(mut_str)
+            
+    print(f"Found {len(mutations)} observed mutations: {mutations}")
+    return mutations
 
 def load_plant_model(device):
     print("Loading PLANT model...")
@@ -232,14 +289,14 @@ def generate_mutants(trimmed_sequence, start_pos_in_full, prob_matrix, aa_labels
     mutant_names.append("Original")
     probs.append(1.0)
     
-    print(f"Generating mutants for sites: {target_sites}")
+    print(f"Generating mutants for {len(target_sites)} sites...")
     
-    for site in target_sites:
+    for site in tqdm(target_sites, desc="Generating Mutants"):
         # 1-based index in trimmed sequence -> 0-based index
         idx_trimmed = site - 1
         
         if idx_trimmed < 0 or idx_trimmed >= len(trimmed_sequence):
-            print(f"Warning: Site {site} out of bounds for trimmed sequence length {len(trimmed_sequence)}")
+            # print(f"Warning: Site {site} out of bounds for trimmed sequence length {len(trimmed_sequence)}")
             continue
             
         ref_aa = trimmed_sequence[idx_trimmed]
@@ -248,7 +305,7 @@ def generate_mutants(trimmed_sequence, start_pos_in_full, prob_matrix, aa_labels
         idx_full = start_pos_in_full + idx_trimmed
         
         if idx_full >= prob_matrix.shape[1]:
-            print(f"Warning: Mapped index {idx_full} out of bounds for probability matrix length {prob_matrix.shape[1]}")
+            # print(f"Warning: Mapped index {idx_full} out of bounds for probability matrix length {prob_matrix.shape[1]}")
             continue
             
         # Get probabilities for this position
@@ -308,13 +365,21 @@ def main():
     print(f"Trimmed sequence length: {len(trimmed_seq)}")
     print(f"Start position in full sequence: {start_pos}")
     
+    # Determine Target Sites
+    if TEST_MODE:
+        print(f"TEST MODE ON: Using restricted sites {TEST_SITES}")
+        target_sites = TEST_SITES
+    else:
+        print("TEST MODE OFF: Scanning all sites in trimmed sequence.")
+        target_sites = list(range(1, len(trimmed_seq) + 1))
+    
     # 3. Generate Mutants
     mutant_seqs, mutant_names, probs = generate_mutants(
         trimmed_seq, 
         start_pos, 
         prob_matrix, 
         aa_labels, 
-        TARGET_SITES
+        target_sites
     )
     print(f"Generated {len(mutant_seqs)} sequences (including original).")
     
@@ -369,8 +434,6 @@ def main():
             log_prob = -10 # Floor
             
         # Composite: Escape Impact + log10(prob)
-        # Since escape_impact is small (distance), and log_prob is negative (-1 to -4),
-        # we might want to weight them. For now, simple sum.
         composite = escape_impact + log_prob 
         
         results.append({
@@ -393,10 +456,63 @@ def main():
     # Sort by Composite
     df = df.sort_values("Composite_Score", ascending=False)
     
+    # Add Rank
+    df['Rank'] = range(1, len(df) + 1)
+    
     out_path = os.path.join(OUT_DIR, f"{BASE_LINEAGE_NAME}_PLANT_rankings_subset.csv")
     df.to_csv(out_path, index=False)
     print(f"Saved rankings to {out_path}")
     print(df.head(20))
+    
+    # 7. Plotting
+    print("Generating plot...")
+    observed_muts = get_observed_mutations(SEQ_FILE_PATH)
+    
+    # Identify observed mutations in the results
+    # We match by Mutation name (e.g. N159Y)
+    observed_data = df[df['Mutation'].isin(observed_muts)].copy()
+    
+    if len(observed_data) == 0:
+        print("Warning: No observed mutations found in the generated mutants list.")
+        if TEST_MODE:
+            print("This is expected in TEST_MODE if the observed mutations are not in the test sites.")
+    else:
+        print(f"Found {len(observed_data)} observed mutations in the results.")
+        
+    # Plot
+    plt.figure(figsize=(12, 8))
+    
+    # Plot all mutations as a line (Rank vs Composite Score)
+    # Since df is sorted by Composite Score, Rank is X, Score is Y
+    plt.plot(df['Rank'], df['Composite_Score'], color='blue', linewidth=0.8, alpha=0.5, label='All possible mutations')
+    
+    # Plot observed mutations
+    if len(observed_data) > 0:
+        plt.scatter(observed_data['Rank'], observed_data['Composite_Score'], color='red', s=50, zorder=5, alpha=0.8, label='Observed (J.2.4 -> J.2.4.1)')
+        
+        # Add labels
+        texts = []
+        for _, row in observed_data.iterrows():
+            texts.append(plt.text(row['Rank'], row['Composite_Score'], row['Mutation'], fontsize=9, ha='right', va='bottom', weight='bold'))
+            
+        # Try to adjust text if library available, else just leave them
+        try:
+            from adjustText import adjust_text
+            adjust_text(texts, arrowprops=dict(arrowstyle='-', color='black', lw=0.5))
+        except ImportError:
+            pass
+            
+    plt.xlabel('Rank (1 = Highest Composite Score)')
+    plt.ylabel('Composite Score (Distance + log10(Prob))')
+    plt.title(f'Rank vs Composite Score of non-reference mutations\nBase: {BASE_LINEAGE_NAME}')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    
+    plot_path = os.path.join(OUT_DIR, f"{BASE_LINEAGE_NAME}_rank_analysis.png")
+    plt.savefig(plot_path, dpi=300)
+    print(f"Saved plot to {plot_path}")
+    # plt.show() # No display in terminal
 
 if __name__ == "__main__":
     main()
