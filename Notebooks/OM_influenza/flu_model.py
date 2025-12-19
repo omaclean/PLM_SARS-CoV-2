@@ -1,8 +1,11 @@
+#%% 
 import numpy as np
 import pandas as pd
 from scipy.integrate import odeint
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
+import os
+import math
 
 # Global Simulation Parameters
 SEASONAL_AMPLITUDE = 0.2
@@ -198,16 +201,28 @@ class AntigenicSeirModel:
 # 1. CONFIGURATION & DATA
 # ==========================================
 
+# Output directory
+outdir = "/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results"
+os.makedirs(outdir, exist_ok=True)
+# %% 
 # Historic Centroids (Mock PLANT output)
 history = {
-    2019: (0.5, 0.5, 0.0),
-    2020: (1.2, 0.8, 0.1),
-    2021: (1.5, 1.0, 0.2),
-    2022: (2.5, 1.5, 0.5),
-    2023: (3.0, 2.0, 0.8),
-    2024: (3.2, 2.2, 0.9) 
+    2019: (2.49067, -2.0354, -1.3839),
+    2020: (2.91758, -1.31161, -1.46984),
+    2021: (3.42502, 2.18306, -2.05458),
+    2022: (3.47224, 2.19141, -1.61720),
+    2023: (3.29408, 2.84147, -0.84808),
+    2024: (3.19627, 3.24367, -0.61533) 
+    
 }
 
+#go through each year and print the distances
+for year in sorted(history.keys()):
+    if year == sorted(history.keys())[0]:
+        continue
+    dist = np.linalg.norm(np.array(history[year]) - np.array(history[year-1]))
+    print(f"Distance from {year-1} to {year}: {dist:.2f} units")
+# %% 
 # Population Distribution [Naive, 2019...2024, Vacc]
 # Sum = 67M. Added a 5M "Naive" pool (young children/never infected).
 pop_dist = [
@@ -227,11 +242,23 @@ model = AntigenicSeirModel(history, population_size=67_000_000, current_year=202
 # 2. SCENARIO RUNS
 # ==========================================
 # %% 
-
+output_path = os.path.join(outdir, 'flu_model_comprehensive_analysis.png')
 # A. Actual Scenario: K Lineage (High Drift)
 # [cite_start]Distance from 2024 (3.2, 2.2) is ~2.2 units -> Crosses the 2.0 threshold [cite: 147]
-k_coord = (5.0, 3.5, 1.5) 
-vacc_coord = (3.5, 2.5, 1.0) # Vaccine mismatched
+k_coord = (3.498047, 3.57003, 0.4946) 
+
+vacc_coord = (3.011719, 3.59375, -0.34155) 
+
+#print distance from vaccine to K
+v_dist = np.linalg.norm(np.array(k_coord) - np.array(vacc_coord))
+print(f"Distance from Vaccine to K Lineage: {v_dist:.2f} units")
+
+for year in sorted(history.keys()):
+
+    dist = np.linalg.norm(np.array(history[year]) - np.array(k_coord ))
+    print(f"Distance from K lineage to {year}: {dist:.2f} units")
+# %% 
+# Vaccine mismatched
 
 beta=1.16 # Calibrated to match observed growth rates
 
@@ -239,7 +266,7 @@ res_k, sigmas_k = model.run(k_coord, vacc_coord, pop_dist, beta=beta)
 
 # B. Counterfactual: No Mutation I160K
 # Distance from 2024 is ~1.0 unit -> Within 2.0 threshold (protected)
-cf_coord = (3.8, 2.8, 1.2) 
+cf_coord = (3.011719, 3.59375, -0.34155) # (3.693,3.424,-0.073) # Approx PLANT coord on just first branch with I160K only
 
 res_cf, sigmas_cf = model.run(cf_coord, vacc_coord, pop_dist, beta=beta)
 
@@ -504,13 +531,14 @@ ax8.text(0.02, 0.98, f'Initial S_eff:\nK: {S_eff_k[0]:.1f}M\nCF: {S_eff_cf[0]:.1
          bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
 
 plt.tight_layout()
-plt.savefig('flu_model_comprehensive_analysis.png', dpi=300, bbox_inches='tight')
+
+plt.savefig(output_path, dpi=300, bbox_inches='tight')
 plt.show()
 
 print("\n" + "="*60)
 print("COMPREHENSIVE PLOTS GENERATED")
 print("="*60)
-print(f"Figure saved as: flu_model_comprehensive_analysis.png")
+print(f"Figure saved as: {output_path}")
 print(f"\nPlot 1-2: Full SEIR dynamics for both scenarios")
 print(f"Plot 3: R₀(t) [SAME] vs Rₜ [DIFFERENT] over time")
 print(f"         R₀(t) varies with seasonality (both scenarios identical)")

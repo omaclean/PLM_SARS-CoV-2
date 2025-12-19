@@ -463,7 +463,36 @@ fig.update_layout(
 #fig.show()
 #writefig (as HTML to avoid needing Chrome)
 fig.write_html(os.path.join(outdir, "PLANT_embedding_background_year.html"))
+
+
 # %%
+# go through each year of background_df and take centroid coordinates
+print("Background DataFrame columns:", background_df.columns.tolist())
+
+# Calculate centroid for each year
+yearly_centroids = background_df.groupby('year')[['X', 'Y', 'Z']].mean().reset_index()
+yearly_centroids.columns = ['year', 'centroid_X', 'centroid_Y', 'centroid_Z']
+
+# Also add count of sequences per year
+yearly_counts = background_df.groupby('year').size().reset_index(name='n_sequences')
+yearly_centroids = yearly_centroids.merge(yearly_counts, on='year')
+
+# Sort by year
+yearly_centroids = yearly_centroids.sort_values('year')
+
+print("\nYearly centroids for circulating strains:")
+print(yearly_centroids.to_string(index=False))
+
+# Save to CSV
+yearly_centroids.to_csv(os.path.join(outdir, "yearly_centroids.csv"), index=False)
+
+# Get recent years (last 5 years)
+recent_years = yearly_centroids.nlargest(6, 'year')
+print("\n\nRecent years centroids:")
+print(recent_years.to_string(index=False))
+
+# %%
+#irrelevant stuff
 # read in this and print all the difference from the last two sequence to the top sequence (ignore Xs)
 #/home3/oml4h/PLM_SARS-CoV-2/Sequences/plus_extraHA_huH3N2_HA_CDS.translated_OM_synth_extra_steps (Copy).fas
 
