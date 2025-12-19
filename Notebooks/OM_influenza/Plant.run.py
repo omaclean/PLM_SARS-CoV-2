@@ -18,22 +18,17 @@ import plotly.express as px
 import plotly.colors as pc
 import joblib
 import pandas as pd
+import numpy as np
 
 from transformers import AutoTokenizer, EsmConfig
 from torch.utils.data import DataLoader
 
 import plotly.express as px
-import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
-import plotly.colors as pc
-import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
+
 import nbformat
 
 import torch
-from transformers import EsmConfig
 
 repo_dir = "/home3/oml4h/hugging_face_downloads/PLANT_model/code"
 
@@ -134,7 +129,7 @@ seq_lengths = df["seq"].str.len()
 print(f"Sequence length distribution:\n{seq_lengths.value_counts().sort_index()}")
 
 # Use a reference sequence (329 aa) for alignment
-REFERENCE_SEQ = "QKIPGNDNSTATLCLGHHAVPNGTIVKTITNDRIEVTNATELVQNSSIGEICGSPHQILDGGNCTLIDALLGDPQCDGFQNKEWDLFVERSRANSNCYPYDVPGYASLRSLVASSGTLEFKNESFNWTGVKQNGTSSACIRGSSSSFFSRLNWLTSINNIYPAQNVTMPNKEQFDKLYIWGVHHPDTDKNQISLFAQSSGRITVSTKRSQQAVIPNIGSRPRIRDIPSRISIYWTIVKPGDILLINSTGNLIAPRGYFKIRNGKSSIMRSDAPIGRCKSECITPNGSIPNDKPFQNVNRITYGACPRYVKQSTLKLATGMRNVPEKQTR"
+REFERENCE_SEQ = "MKAIIALSNILCLVFAQKIPGNDNSTATLCLGHHAVPNGTIVKTITNDRIEVTNATELVQNSSIGKICNSPHQILDGGNCTLIDALLGDPQCDGFQNKEWDLFVERSRANSSCYPYDVPDYASLRSLVASSGTLEFKDESFNWTGVKQNGTSSACKRGSSNSFFSRLNWLTSLNNIYPAQNVTMPNKEQFDKLYIWGVHHPDTDKNQFSLFAQSSGRITVSTKRSQQAVIPNIGSRPRVRDIPSRISIYWTIVKPGDILLINSTGNLIAPRGYFKIRSGKSSIMRSDAPIGECKSECITPNGSIPNDKPFQNVNRITYGACPRYVKQSTLKLATGMRNVPEKQTRGIFGAIAGFIENGWEGMVDGWYGFRHQNSEGRGQAADLKSTQAAIDQISGKLNRLIGKTNEKFHQIEKEFSEVEGRVQDLEKYVEDTKIDLWSYNAELLVALENQHTIDLTDSEMNKLFEKTKKQLRENAEDMGNGCFKIYHKCDNACIGSIRNETYDHNVYRDEALNNRFQIKGVELKSGYKDWILWISFAMSCFLLCIALLGFIMWACQKGNIRCNICIX"
 TARGET_LENGTH = 329
 
 def trim_to_target_length(seq, reference=REFERENCE_SEQ, target_len=TARGET_LENGTH):
@@ -244,6 +239,36 @@ df["X"], df["Y"], df["Z"] = (
 )
 
 df.head()
+
+# %%
+# Calculate distance to reference
+REF_NAME = "EPI2981619|HA|A/Croatia/10136RV/2023|EPI_ISL_18856647|J.2"
+
+print(f"Calculating distances to reference: {REF_NAME}")
+ref_row = df[df["name"] == REF_NAME]
+
+if len(ref_row) == 0:
+    print(f"Warning: Reference sequence '{REF_NAME}' not found in the dataframe.")
+else:
+    ref_x = ref_row.iloc[0]["X"]
+    ref_y = ref_row.iloc[0]["Y"]
+    ref_z = ref_row.iloc[0]["Z"]
+    
+    # Euclidean distance
+    df["Distance_to_Ref"] = np.sqrt(
+        (df["X"] - ref_x)**2 + 
+        (df["Y"] - ref_y)**2 + 
+        (df["Z"] - ref_z)**2
+    )
+    
+    # Export CSV without sequences
+    cols_to_export = [c for c in df.columns if c != "seq"]
+    export_df = df[cols_to_export]
+    
+    export_path = os.path.join(outdir, "PLANT_embeddings_with_distance.csv")
+    export_df.to_csv(export_path, index=False)
+    print(f"Saved embeddings and distances to {export_path}")
+    print(export_df.head())
 
 """Visualization, only data of interest"""
 
@@ -565,3 +590,4 @@ for i in range(min_length):
 if not differences_last:
     print("No differences found (ignoring X's)")
 print(f"\nTotal differences: {len(differences_last)}")
+

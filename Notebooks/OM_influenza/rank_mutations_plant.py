@@ -12,6 +12,15 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from Bio import SeqIO
 
+# Add PLM_SARS-CoV-2 to path for Functions_HuggingFace
+sys.path.append("/home3/oml4h/PLM_SARS-CoV-2")
+try:
+    from Functions_HuggingFace import create_h3_numbering_map, mutations_to_canonical, get_mutations
+    print("Imported Functions_HuggingFace OK.")
+except ImportError:
+    print("Could not import Functions_HuggingFace. Check path.")
+    sys.exit(1)
+
 # Add PLANT to path
 sys.path.append("/home3/oml4h/hugging_face_downloads/PLANT_model/code/src")
 try:
@@ -25,7 +34,7 @@ except ImportError:
 # 1. CONFIGURATION
 # ==========================================
 # Test Mode Toggle
-TEST_MODE = False # True # Set to False to run on all sites
+TEST_MODE = False #True # Set to False to run on all sites
 
 # PLANT Model Config
 REPO_DIR = "/home3/oml4h/hugging_face_downloads/PLANT_model"
@@ -38,9 +47,12 @@ SCALE_FACTOR = 8
 PROB_MATRIX_PATH = "/home3/oml4h/PLM_SARS-CoV-2/Results/test/J.2.4/J.2.4_probability_matrix.csv"
 BASE_LINEAGE_NAME = "J.2.4" # Hardcoded for output naming since we aren't parsing it
 SEQ_FILE_PATH = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
+CANONICAL_REF_PATH = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 
 # Output
 OUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Results/PLANT_Rankings"
+if TEST_MODE:
+    OUT_DIR = os.path.join(OUT_DIR, "test_mode")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Immunity Model Config
@@ -125,6 +137,7 @@ class WeightedDistanceModel:
         # Normalize
         self.normalized_weights = {k: v / total_weight_score for k, v in self.weights.items()}
         
+    def print_weights(self):
         print("Calculated Weights for Distance Metric:")
         for k, v in sorted(self.normalized_weights.items(), key=lambda x: str(x[0])):
             print(f"  {k}: {v:.3f}")
@@ -156,10 +169,13 @@ class WeightedDistanceModel:
 # 3. HELPER FUNCTIONS
 # ==========================================
 
-def get_observed_mutations(seq_file, parent_id="J.2.4", child_id="J.2.4.1"):
+def get_observed_mutations(seq_file, h3_map, parent_id="J.2.4", child_id="J.2.4.1", trim_signal=True, limit_length=None):
     """
     Find mutations between parent and child lineages.
     Returns a list of mutation strings (e.g., "N159Y").
+    
+    trim_signal: If True, removes first 16 AA (Signal Peptide).
+    limit_length: If set, limits the comparison to this length (e.g. 329 for HA1).
     """
     print(f"Searching for mutations between {parent_id} and {child_id} in {seq_file}...")
     parent_seq = None
@@ -176,34 +192,116 @@ def get_observed_mutations(seq_file, parent_id="J.2.4", child_id="J.2.4.1"):
         print(f"Warning: Could not find both sequences. Parent found: {parent_seq is not None}, Child found: {child_seq is not None}")
         return []
         
-    # Trim both sequences (remove first 16 AA signal peptide)
-    # Assuming they are full length and aligned
-    # We use the same logic as trim_to_target_length but hardcoded for now based on user request
-    # "crops out the first 16 regions"
+    # Use get_mutations from Functions_HuggingFace
+    # It expects aligned sequences. Assuming they are aligned or same length.
+    # If lengths differ, we might need to align or trim.
+    # For now, let's assume they are aligned as they come from the same alignment file.
     
-    # Check if we need to align or just trim
-    # If they are from the same file and aligned, we can just compare index by index
+    # However, get_mutations returns 1-based index based on the input string.
+    # If we pass the full sequence, it returns 1-based index on full sequence.
+    # We can then map this to canonical using h3_map.
     
-    mutations = []
+    # Note: h3_map maps 0-based index of the QUERY (Parent) to Canonical Label.
     
-    # Trim first 16
-    p_trim = parent_seq[16:]
-    c_trim = child_seq[16:]
+    raw_mutations = get_mutations(parent_seq, child_seq)
+    print(f"Raw mutations (Full Seq): {raw_mutations}")
     
-    # Compare up to the length of the shorter one (or target length)
-    length = min(len(p_trim), len(c_trim), TARGET_LENGTH)
+    # Convert to Canonical
+    # raw_mutations are like 'A16T' (1-based).
+    # We need to convert to 0-based index to lookup in h3_map.
     
-    for i in range(length):
-        ref_aa = p_trim[i]
-        mut_aa = c_trim[i]
-        if ref_aa != mut_aa:
-            # 1-based index
-            pos = i + 1
-            mut_str = f"{ref_aa}{pos}{mut_aa}"
-            mutations.append(mut_str)
+    canonical_muts = mutations_to_canonical(raw_mutations, h3_map)
+    
+    # Filter based on trim_signal and limit_length if needed
+    # But since we are using canonical names, maybe we just return them all?
+    # The user asked for "highlighting the mutations between J.2.4.1 and J.2.4".
+    # If we are plotting HA1 only, we should filter for HA1 mutations.
+    
+    filtered_muts = []
+    for mut in canonical_muts:
+        # Check if it's in HA1 range or HA2
+        # HA1 canonical usually numbers 1 to ~329.
+        # HA2 starts with HA2:
+        # SP starts with SP
+        
+        if mut.startswith("SP") and trim_signal:
+            continue
             
-    print(f"Found {len(mutations)} observed mutations: {mutations}")
-    return mutations
+        if mut.startswith("HA2:") and limit_length:
+            # If limit_length is set (implying HA1 only), skip HA2
+            continue
+            
+        filtered_muts.append(mut)
+            
+    print(f"Canonical mutations: {filtered_muts}")
+    return filtered_muts
+
+def get_all_mutations_from_matrix(prob_matrix, aa_labels, sequence, h3_map, start_offset=0):
+    """
+    Generate a DataFrame of all possible mutations and their probabilities from the matrix.
+    prob_matrix: (20, L)
+    sequence: String of length L
+    start_offset: Number to add to 0-based index to get canonical position (e.g. 0 if sequence starts at 1)
+    """
+    # Use aa_labels from the matrix instead of hardcoding
+    amino_acids = aa_labels
+    all_muts = []
+    
+    L = prob_matrix.shape[1]
+    if len(sequence) != L:
+        print(f"Warning: Sequence length {len(sequence)} does not match matrix width {L}")
+        return pd.DataFrame()
+        
+    for j in range(L):
+        ref_aa = sequence[j]
+        # pos = j + 1 + start_offset # Canonical Position (Old logic)
+        
+        # New Logic: Use h3_map
+        # h3_map maps 0-based index of the full sequence to canonical label.
+        # We need to know the 0-based index in the full sequence corresponding to j.
+        # If start_offset is 0, then j is the index.
+        # If start_offset is 16 (trimmed), then j+16 is the index.
+        
+        full_idx = j + start_offset
+        
+        if full_idx in h3_map:
+            canon_pos = h3_map[full_idx]
+        else:
+            canon_pos = f"idx{full_idx}"
+            
+        # Get probabilities for this position
+        probs = prob_matrix[:, j]
+        
+        for i, mut_aa in enumerate(aa_labels):
+            if mut_aa not in amino_acids: continue
+            if mut_aa == ref_aa: continue
+            
+            p = probs[i]
+            if p > 0:
+                log_p = np.log10(p)
+            else:
+                log_p = -10
+                
+            # Construct Canonical Name
+            if str(canon_pos).startswith("HA2:"):
+                # HA2:49 -> HA2:A49T
+                # Extract number
+                parts = str(canon_pos).split(':')
+                mut_str = f"HA2:{ref_aa}{parts[1]}{mut_aa}"
+            else:
+                mut_str = f"{ref_aa}{canon_pos}{mut_aa}"
+            
+            all_muts.append({
+                "Mutation": mut_str,
+                "Probability": p,
+                "Log10_Prob": log_p,
+                "Position": canon_pos
+            })
+            
+    df = pd.DataFrame(all_muts)
+    df = df.sort_values("Probability", ascending=False)
+    df['Rank'] = range(1, len(df) + 1)
+    return df
 
 def load_plant_model(device):
     print("Loading PLANT model...")
@@ -273,13 +371,14 @@ def trim_to_target_length(seq, reference=REFERENCE_SEQ, target_len=TARGET_LENGTH
         
         return seq[best_start:best_start + target_len], best_start
 
-def generate_mutants(trimmed_sequence, start_pos_in_full, prob_matrix, aa_labels, target_sites):
+def generate_mutants(trimmed_sequence, start_pos_in_full, prob_matrix, aa_labels, target_sites, h3_map):
     """
     Generate mutants for the trimmed sequence at specified sites.
     prob_matrix: (20, Full_Length)
     target_sites: 1-based indices in trimmed sequence
     """
-    amino_acids = ["A","R","N","D","C","Q","E","G","H","I","L","K","M","F","P","S","T","W","Y","V"]
+    # Use aa_labels from the matrix instead of hardcoding
+    amino_acids = aa_labels 
     mutants = []
     mutant_names = []
     probs = []
@@ -308,6 +407,12 @@ def generate_mutants(trimmed_sequence, start_pos_in_full, prob_matrix, aa_labels
             # print(f"Warning: Mapped index {idx_full} out of bounds for probability matrix length {prob_matrix.shape[1]}")
             continue
             
+        # Get Canonical Position
+        if idx_full in h3_map:
+            canon_pos = h3_map[idx_full]
+        else:
+            canon_pos = f"idx{idx_full}"
+            
         # Get probabilities for this position
         # prob_matrix is (20, L)
         pos_probs = prob_matrix[:, idx_full]
@@ -318,7 +423,14 @@ def generate_mutants(trimmed_sequence, start_pos_in_full, prob_matrix, aa_labels
             
             # Create mutant
             mut_seq = trimmed_sequence[:idx_trimmed] + mut_aa + trimmed_sequence[idx_trimmed+1:]
-            mut_name = f"{ref_aa}{site}{mut_aa}"
+            
+            # Construct Canonical Name
+            if str(canon_pos).startswith("HA2:"):
+                # HA2:49 -> HA2:A49T
+                parts = str(canon_pos).split(':')
+                mut_name = f"HA2:{ref_aa}{parts[1]}{mut_aa}"
+            else:
+                mut_name = f"{ref_aa}{canon_pos}{mut_aa}"
             
             mutants.append(mut_seq)
             mutant_names.append(mut_name)
@@ -333,6 +445,248 @@ def generate_mutants(trimmed_sequence, start_pos_in_full, prob_matrix, aa_labels
 # ==========================================
 # 4. MAIN EXECUTION
 # ==========================================
+
+def run_analysis_mode(mode, X, Y, Z_coord, mutant_names, probs, obs_muts_full, obs_muts_ha1, prob_matrix, aa_labels, base_sequence, h3_map):
+    print(f"\n--- Running Analysis Mode: {mode} ---")
+    
+    # Output directory for this mode
+    mode_out_dir = os.path.join(OUT_DIR, mode)
+    os.makedirs(mode_out_dir, exist_ok=True)
+    
+    # Get Original Coordinates
+    orig_idx = mutant_names.index("Original")
+    orig_coord = (X[orig_idx], Y[orig_idx], Z_coord[orig_idx])
+    
+    distance_model = None
+    orig_dist = 0.0
+    
+    if mode == "weighted":
+        # Use WeightedDistanceModel instead of AntigenicSeirModel
+        # Waning rate of 0.2 means ~18% decay per year (exp(-0.2))
+        distance_model = WeightedDistanceModel(HISTORY, POP_DIST, VACCINE_COORD if INCLUDE_VACCINE else None, current_year=CURRENT_YEAR, waning_rate=0.2)
+        orig_dist = distance_model.calculate_weighted_distance(orig_coord)
+        print(f"Original Weighted Distance: {orig_dist:.4f}")
+    elif mode == "reference":
+        print("Using distance from Original strain as metric.")
+        orig_dist = 0.0
+        
+    results = []
+    for i, name in enumerate(mutant_names):
+        coord = (X[i], Y[i], Z_coord[i])
+        curr_arr = np.array(coord)
+        
+        if mode == "weighted":
+            w_dist = distance_model.calculate_weighted_distance(coord)
+        else: # reference
+            w_dist = np.linalg.norm(curr_arr - np.array(orig_coord))
+            
+        # Relative Escape (Difference from Original)
+        escape_impact = w_dist - orig_dist
+        
+        # Probability
+        prob = probs[i]
+        
+        # Composite Score
+        if prob > 0:
+            log_prob = np.log10(prob)
+        else:
+            log_prob = -10 # Floor
+            
+        # Composite: Escape Impact + log10(prob)
+        composite = escape_impact + log_prob 
+        
+        # Individual Distances
+        dists = {}
+        for year, hist_coord in HISTORY.items():
+             dists[f"Dist_{year}"] = np.linalg.norm(curr_arr - np.array(hist_coord))
+             
+        if INCLUDE_VACCINE and VACCINE_COORD is not None:
+             dists["Dist_Vaccine"] = np.linalg.norm(curr_arr - np.array(VACCINE_COORD))
+
+        row = {
+            "Mutation": name,
+            "Probability": prob,
+            "Log10_Prob": log_prob,
+            "Weighted_Distance": w_dist,
+            "Escape_Impact": escape_impact,
+            "Composite_Score": composite,
+            "X": X[i],
+            "Y": Y[i],
+            "Z": Z_coord[i]
+        }
+        row.update(dists)
+        results.append(row)
+        
+    # 6. Export
+    df_all = pd.DataFrame(results)
+    
+    # Separate Original and Mutants
+    df_original = df_all[df_all["Mutation"] == "Original"].copy()
+    df = df_all[df_all["Mutation"] != "Original"].copy()
+    
+    # Calculate Experimental Metrics for Mutants
+    # Metric 1: Standard (Composite) - Already done
+    
+    # Metric 2: Expected Drift (Escape * Prob)
+    df['Metric_Expected_Drift'] = df['Escape_Impact'] * df['Probability']
+    
+    # Metric 4: Risk-Taking (Escape + 0.5 * log10(Prob))
+    df['Metric_Risk_Taking'] = df['Escape_Impact'] + (0.5 * df['Log10_Prob'])
+    
+    # Sort by Composite
+    df = df.sort_values("Composite_Score", ascending=False)
+    
+    # Add Rank
+    df['Rank'] = range(1, len(df) + 1)
+    
+    # Save Standard Subset (No Original)
+    out_path = os.path.join(mode_out_dir, f"{BASE_LINEAGE_NAME}_PLANT_rankings_subset.csv")
+    df.to_csv(out_path, index=False)
+    print(f"Saved rankings to {out_path}")
+    
+    # Save Subset with Reference (Original at Top)
+    # Add missing columns to Original for consistency (Metrics will be NaN or 0)
+    for col in ['Metric_Expected_Drift', 'Metric_Risk_Taking', 'Rank']:
+        if col not in df_original.columns:
+            df_original[col] = 0 if col == 'Rank' else np.nan
+            
+    df_plus_ref = pd.concat([df_original, df], ignore_index=True)
+    out_path_ref = os.path.join(mode_out_dir, f"{BASE_LINEAGE_NAME}_PLANT_rankings_subset_plus_reference.csv")
+    df_plus_ref.to_csv(out_path_ref, index=False)
+    print(f"Saved rankings with reference to {out_path_ref}")
+    
+    # 7. Plotting
+    print("Generating plots...")
+    
+    # --- Figure 1: Main Panel (3 Subplots) ---
+    fig1, axes1 = plt.subplots(1, 3, figsize=(20, 6))
+    
+    # Subplot 1: Most Probable Mutations (Full Sequence)
+    # We need the full probability ranking
+    # prob_matrix is (20, 567). base_sequence is 567.
+    # We trim the first 16 to match "Canonical Flu Coordinates" (Signal Peptide removal)
+    full_prob_matrix = prob_matrix[:, 16:]
+    full_seq_trimmed = base_sequence[16:]
+    
+    df_all_probs = get_all_mutations_from_matrix(full_prob_matrix, aa_labels, full_seq_trimmed, h3_map, start_offset=16)
+    
+    # Plot
+    axes1[0].plot(df_all_probs['Rank'], df_all_probs['Log10_Prob'], color='blue', linewidth=0.8, alpha=0.5)
+    axes1[0].set_title("Most Probable Mutations (Full HA)")
+    axes1[0].set_xlabel("Rank")
+    axes1[0].set_ylabel("log10(Probability)")
+    
+    # Highlight Observed (Full)
+    obs_data_full = df_all_probs[df_all_probs['Mutation'].isin(obs_muts_full)]
+    if len(obs_data_full) > 0:
+        axes1[0].scatter(obs_data_full['Rank'], obs_data_full['Log10_Prob'], color='red', s=50, zorder=5)
+        texts = [axes1[0].text(r['Rank'], r['Log10_Prob'], r['Mutation'], fontsize=8) for _, r in obs_data_full.iterrows()]
+        try:
+            from adjustText import adjust_text
+            adjust_text(texts, ax=axes1[0], arrowprops=dict(arrowstyle='-', color='black', lw=0.5))
+        except ImportError: pass
+        
+    # Subplot 2: Ranked Escape (HA1 Only)
+    # Sort by Weighted_Distance descending
+    df_escape = df.sort_values("Weighted_Distance", ascending=False).reset_index(drop=True)
+    df_escape['Rank_Escape'] = df_escape.index + 1
+    
+    axes1[1].plot(df_escape['Rank_Escape'], df_escape['Weighted_Distance'], color='green', linewidth=0.8, alpha=0.5)
+    axes1[1].set_title("Ranked Escape (HA1 Only)")
+    axes1[1].set_xlabel("Rank")
+    axes1[1].set_ylabel("Weighted Distance")
+    
+    # Highlight Observed (HA1)
+    obs_data_esc = df_escape[df_escape['Mutation'].isin(obs_muts_ha1)]
+    if len(obs_data_esc) > 0:
+        axes1[1].scatter(obs_data_esc['Rank_Escape'], obs_data_esc['Weighted_Distance'], color='red', s=50, zorder=5)
+        texts = [axes1[1].text(r['Rank_Escape'], r['Weighted_Distance'], r['Mutation'], fontsize=8) for _, r in obs_data_esc.iterrows()]
+        try:
+            from adjustText import adjust_text
+            adjust_text(texts, ax=axes1[1], arrowprops=dict(arrowstyle='-', color='black', lw=0.5))
+        except ImportError: pass
+
+    # Subplot 3: Composite Score (HA1 Only) - Current
+    # df is already sorted by Composite
+    axes1[2].plot(df['Rank'], df['Composite_Score'], color='purple', linewidth=0.8, alpha=0.5)
+    axes1[2].set_title("Composite Score (HA1 Only)")
+    axes1[2].set_xlabel("Rank")
+    axes1[2].set_ylabel("Score (Escape + log10(Prob))")
+    
+    # Highlight Observed (HA1)
+    obs_data_comp = df[df['Mutation'].isin(obs_muts_ha1)]
+    if len(obs_data_comp) > 0:
+        axes1[2].scatter(obs_data_comp['Rank'], obs_data_comp['Composite_Score'], color='red', s=50, zorder=5)
+        texts = [axes1[2].text(r['Rank'], r['Composite_Score'], r['Mutation'], fontsize=8) for _, r in obs_data_comp.iterrows()]
+        try:
+            from adjustText import adjust_text
+            adjust_text(texts, ax=axes1[2], arrowprops=dict(arrowstyle='-', color='black', lw=0.5))
+        except ImportError: pass
+        
+    plt.tight_layout()
+    fig1.savefig(os.path.join(mode_out_dir, f"{BASE_LINEAGE_NAME}_panel_analysis.png"), dpi=300)
+    print(f"Saved panel analysis to {os.path.join(mode_out_dir, f'{BASE_LINEAGE_NAME}_panel_analysis.png')}")
+    
+    # --- Figure 2: Experimental Combinations (4 Subplots) ---
+    fig2, axes2 = plt.subplots(2, 2, figsize=(16, 12))
+    
+    # 1. Standard (Composite)
+    axes2[0,0].plot(df['Rank'], df['Composite_Score'], color='purple', alpha=0.5)
+    axes2[0,0].set_title("Standard: Escape + log10(Prob)")
+    if len(obs_data_comp) > 0:
+        axes2[0,0].scatter(obs_data_comp['Rank'], obs_data_comp['Composite_Score'], color='red', s=50)
+        
+    # 2. Expected Drift (Escape * Prob)
+    df_drift = df.sort_values("Metric_Expected_Drift", ascending=False).reset_index(drop=True)
+    df_drift['Rank_Drift'] = df_drift.index + 1
+    axes2[0,1].plot(df_drift['Rank_Drift'], df_drift['Metric_Expected_Drift'], color='orange', alpha=0.5)
+    axes2[0,1].set_title("Expected Drift: Escape * Prob")
+    
+    obs_data_drift = df_drift[df_drift['Mutation'].isin(obs_muts_ha1)]
+    if len(obs_data_drift) > 0:
+        axes2[0,1].scatter(obs_data_drift['Rank_Drift'], obs_data_drift['Metric_Expected_Drift'], color='red', s=50)
+        texts = [axes2[0,1].text(r['Rank_Drift'], r['Metric_Expected_Drift'], r['Mutation'], fontsize=8) for _, r in obs_data_drift.iterrows()]
+        try:
+            from adjustText import adjust_text
+            adjust_text(texts, ax=axes2[0,1], arrowprops=dict(arrowstyle='-', color='black', lw=0.5))
+        except ImportError: pass
+
+    # 3. Scatter: Escape vs Log10(Prob)
+    axes2[1,0].scatter(df['Log10_Prob'], df['Escape_Impact'], alpha=0.3, color='gray')
+    axes2[1,0].set_title("Scatter: Escape vs Probability")
+    axes2[1,0].set_xlabel("log10(Probability)")
+    axes2[1,0].set_ylabel("Escape Impact")
+    
+    if len(obs_data_comp) > 0:
+        axes2[1,0].scatter(obs_data_comp['Log10_Prob'], obs_data_comp['Escape_Impact'], color='red', s=50)
+        texts = [axes2[1,0].text(r['Log10_Prob'], r['Escape_Impact'], r['Mutation'], fontsize=8) for _, r in obs_data_comp.iterrows()]
+        try:
+            from adjustText import adjust_text
+            adjust_text(texts, ax=axes2[1,0], arrowprops=dict(arrowstyle='-', color='black', lw=0.5))
+        except ImportError: pass
+
+    # 4. Risk Taking (Escape + 0.5 * log10(Prob))
+    df_risk = df.sort_values("Metric_Risk_Taking", ascending=False).reset_index(drop=True)
+    df_risk['Rank_Risk'] = df_risk.index + 1
+    axes2[1,1].plot(df_risk['Rank_Risk'], df_risk['Metric_Risk_Taking'], color='magenta', alpha=0.5)
+    axes2[1,1].set_title("Risk Taking: Escape + 0.5 * log10(Prob)")
+    
+    obs_data_risk = df_risk[df_risk['Mutation'].isin(obs_muts_ha1)]
+    if len(obs_data_risk) > 0:
+        axes2[1,1].scatter(obs_data_risk['Rank_Risk'], obs_data_risk['Metric_Risk_Taking'], color='red', s=50)
+        texts = [axes2[1,1].text(r['Rank_Risk'], r['Metric_Risk_Taking'], r['Mutation'], fontsize=8) for _, r in obs_data_risk.iterrows()]
+        try:
+            from adjustText import adjust_text
+            adjust_text(texts, ax=axes2[1,1], arrowprops=dict(arrowstyle='-', color='black', lw=0.5))
+        except ImportError: pass
+        
+    plt.tight_layout()
+    fig2.savefig(os.path.join(mode_out_dir, f"{BASE_LINEAGE_NAME}_experimental_metrics.png"), dpi=300)
+    print(f"Saved experimental metrics to {os.path.join(mode_out_dir, f'{BASE_LINEAGE_NAME}_experimental_metrics.png')}")
+    
+    if mode == "weighted":
+        print("\nWeights used for Weighted Distance:")
+        distance_model.print_weights()
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -373,13 +727,27 @@ def main():
         print("TEST MODE OFF: Scanning all sites in trimmed sequence.")
         target_sites = list(range(1, len(trimmed_seq) + 1))
     
+    # --- Create H3 Numbering Map ---
+    print(f"Loading canonical reference from {CANONICAL_REF_PATH}")
+    try:
+        canonical_ref_seq = str(SeqIO.read(CANONICAL_REF_PATH, "fasta").seq)
+        print("Creating H3 numbering map...")
+        # Map 0-based index of base_sequence to Canonical Label
+        # HA2 starts at 330 (after 329 AA of HA1)
+        h3_map = create_h3_numbering_map(base_sequence, canonical_ref_seq, HA2_start=330)
+    except Exception as e:
+        print(f"Error creating H3 map: {e}")
+        print("Falling back to index-based numbering.")
+        h3_map = {}
+
     # 3. Generate Mutants
     mutant_seqs, mutant_names, probs = generate_mutants(
         trimmed_seq, 
         start_pos, 
         prob_matrix, 
         aa_labels, 
-        target_sites
+        target_sites,
+        h3_map
     )
     print(f"Generated {len(mutant_seqs)} sequences (including original).")
     
@@ -394,7 +762,15 @@ def main():
     dataset = TextDataset(enc_seqs)
     loader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
     
-    Z = embed_sequences(plant_model, loader, use_fp16=True)
+    # Add progress bar to embedding loop
+    # embed_sequences in plant/inference.py doesn't have a progress bar, so we wrap the loader or modify the function call if possible.
+    # Since we can't easily modify the imported function, we'll just print progress if we were iterating manually.
+    # But embed_sequences takes the loader.
+    # Let's check if we can wrap the loader with tqdm.
+    # embed_sequences iterates over the loader. If we wrap it, it should show progress.
+    
+    loader_with_progress = tqdm(loader, desc="Embedding Batches")
+    Z = embed_sequences(plant_model, loader_with_progress, use_fp16=True)
     
     # Scale
     X = Z[:, 0] * SCALE_FACTOR
@@ -403,116 +779,19 @@ def main():
     
     # 5. Calculate Escape
     print("Calculating escape scores...")
-    # Use WeightedDistanceModel instead of AntigenicSeirModel
-    # Waning rate of 0.2 means ~18% decay per year (exp(-0.2))
-    distance_model = WeightedDistanceModel(HISTORY, POP_DIST, VACCINE_COORD if INCLUDE_VACCINE else None, current_year=CURRENT_YEAR, waning_rate=0.2)
     
-    # Calculate for Original first
-    orig_idx = mutant_names.index("Original")
-    orig_coord = (X[orig_idx], Y[orig_idx], Z_coord[orig_idx])
+    # Get Observed Mutations
+    # 1. Full Sequence (for Probability Plot) - Trim signal (16), No length limit
+    obs_muts_full = get_observed_mutations(SEQ_FILE_PATH, h3_map, trim_signal=True, limit_length=None)
     
-    orig_dist = distance_model.calculate_weighted_distance(orig_coord)
-    print(f"Original Weighted Distance: {orig_dist:.4f}")
+    # 2. HA1 Only (for Escape/Composite Plots) - Trim signal (16), Limit to 329
+    obs_muts_ha1 = get_observed_mutations(SEQ_FILE_PATH, h3_map, trim_signal=True, limit_length=329)
     
-    results = []
-    for i, name in enumerate(mutant_names):
-        coord = (X[i], Y[i], Z_coord[i])
-        
-        # Weighted Distance
-        w_dist = distance_model.calculate_weighted_distance(coord)
-        
-        # Relative Escape (Difference from Original)
-        escape_impact = w_dist - orig_dist
-        
-        # Probability
-        prob = probs[i]
-        
-        # Composite Score
-        if prob > 0:
-            log_prob = np.log10(prob)
-        else:
-            log_prob = -10 # Floor
-            
-        # Composite: Escape Impact + log10(prob)
-        composite = escape_impact + log_prob 
-        
-        results.append({
-            "Mutation": name,
-            "Probability": prob,
-            "Log10_Prob": log_prob,
-            "Weighted_Distance": w_dist,
-            "Escape_Impact": escape_impact,
-            "Composite_Score": composite,
-            "X": X[i],
-            "Y": Y[i],
-            "Z": Z_coord[i]
-        })
-        
-    # 6. Export
-    df = pd.DataFrame(results)
-    # Filter out Original
-    df = df[df["Mutation"] != "Original"]
+    # Run Mode 1: Weighted Centroid (Standard)
+    run_analysis_mode("weighted", X, Y, Z_coord, mutant_names, probs, obs_muts_full, obs_muts_ha1, prob_matrix, aa_labels, base_sequence, h3_map)
     
-    # Sort by Composite
-    df = df.sort_values("Composite_Score", ascending=False)
-    
-    # Add Rank
-    df['Rank'] = range(1, len(df) + 1)
-    
-    out_path = os.path.join(OUT_DIR, f"{BASE_LINEAGE_NAME}_PLANT_rankings_subset.csv")
-    df.to_csv(out_path, index=False)
-    print(f"Saved rankings to {out_path}")
-    print(df.head(20))
-    
-    # 7. Plotting
-    print("Generating plot...")
-    observed_muts = get_observed_mutations(SEQ_FILE_PATH)
-    
-    # Identify observed mutations in the results
-    # We match by Mutation name (e.g. N159Y)
-    observed_data = df[df['Mutation'].isin(observed_muts)].copy()
-    
-    if len(observed_data) == 0:
-        print("Warning: No observed mutations found in the generated mutants list.")
-        if TEST_MODE:
-            print("This is expected in TEST_MODE if the observed mutations are not in the test sites.")
-    else:
-        print(f"Found {len(observed_data)} observed mutations in the results.")
-        
-    # Plot
-    plt.figure(figsize=(12, 8))
-    
-    # Plot all mutations as a line (Rank vs Composite Score)
-    # Since df is sorted by Composite Score, Rank is X, Score is Y
-    plt.plot(df['Rank'], df['Composite_Score'], color='blue', linewidth=0.8, alpha=0.5, label='All possible mutations')
-    
-    # Plot observed mutations
-    if len(observed_data) > 0:
-        plt.scatter(observed_data['Rank'], observed_data['Composite_Score'], color='red', s=50, zorder=5, alpha=0.8, label='Observed (J.2.4 -> J.2.4.1)')
-        
-        # Add labels
-        texts = []
-        for _, row in observed_data.iterrows():
-            texts.append(plt.text(row['Rank'], row['Composite_Score'], row['Mutation'], fontsize=9, ha='right', va='bottom', weight='bold'))
-            
-        # Try to adjust text if library available, else just leave them
-        try:
-            from adjustText import adjust_text
-            adjust_text(texts, arrowprops=dict(arrowstyle='-', color='black', lw=0.5))
-        except ImportError:
-            pass
-            
-    plt.xlabel('Rank (1 = Highest Composite Score)')
-    plt.ylabel('Composite Score (Distance + log10(Prob))')
-    plt.title(f'Rank vs Composite Score of non-reference mutations\nBase: {BASE_LINEAGE_NAME}')
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    
-    plot_path = os.path.join(OUT_DIR, f"{BASE_LINEAGE_NAME}_rank_analysis.png")
-    plt.savefig(plot_path, dpi=300)
-    print(f"Saved plot to {plot_path}")
-    # plt.show() # No display in terminal
+    # Run Mode 2: Reference Only
+    run_analysis_mode("reference", X, Y, Z_coord, mutant_names, probs, obs_muts_full, obs_muts_ha1, prob_matrix, aa_labels, base_sequence, h3_map)
 
 if __name__ == "__main__":
     main()
