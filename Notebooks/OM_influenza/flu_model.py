@@ -205,7 +205,7 @@ class AntigenicSeirModel:
 outdir = "/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results"
 os.makedirs(outdir, exist_ok=True)
 # %% 
-# Historic Centroids (Mock PLANT output)
+# Historic Centroids (real PLANT output)
 history = {
     2019: (2.49067, -2.0354, -1.3839),
     2020: (2.91758, -1.31161, -1.46984),

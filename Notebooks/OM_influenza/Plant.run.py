@@ -565,4 +565,3 @@ for i in range(min_length):
 if not differences_last:
     print("No differences found (ignoring X's)")
 print(f"\nTotal differences: {len(differences_last)}")
-# %%

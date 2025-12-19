@@ -1146,4 +1146,42 @@ top_mutations_df
 # %%
 mut_info_combos.head()
 
+# %% [markdown]
+# # Export Probability Matrix for Focal Lineage
 
+# %%
+print(f"Exporting probability matrix for focal lineage: {base_lineage}")
+
+# Get probability matrix for the focal sequence (defined at top)
+# Note: We use replace("-", "") to remove gaps as the model expects continuous sequence
+prob_data = get_mutation_prob_matrix(
+    sequences[base_sequence_name].replace("-", ""), 
+    model, 
+    model_layers, 
+    device, 
+    batch_converter, 
+    alphabet
+)
+
+matrix = prob_data['mutation_matrix'] # (20, L)
+amino_acids = prob_data['amino_acids'] # (20,)
+sequence_chars = list(prob_data['sequence']) # L
+
+# Create DataFrame
+# Rows: 20 Amino Acids
+# Columns: Sequence characters (Amino acid at each position)
+prob_df = pd.DataFrame(matrix, index=amino_acids, columns=sequence_chars)
+
+# Define output path
+output_file = f"{out}/{base_lineage}_probability_matrix.csv"
+
+# Export to CSV
+prob_df.to_csv(output_file)
+
+print(f"Probability matrix exported to: {output_file}")
+print(f"Matrix shape: {prob_df.shape}")
+prob_df.head()
+
+
+
+# %%
