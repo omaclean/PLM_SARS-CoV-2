@@ -328,6 +328,13 @@ print(f"Target Sequence ID: {target_record.id}")
 target_protein_seq = str(target_record.seq.translate(to_stop=True))
 focal_protein_seq = str(base_sequence) # Already translated earlier
 
+# Load Canonical Reference and Create Map
+reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
+ref_record = next(SeqIO.parse(reference_path, "fasta"))
+ref_seq_str = str(ref_record.seq)
+
+h3_map_with_ha2 = create_h3_numbering_map(focal_protein_seq, ref_seq_str, HA2_start=330)
+
 # Find differences
 observed_mutations = [] # List of (0-based-index, target_aa)
 min_len = min(len(focal_protein_seq), len(target_protein_seq))
@@ -421,8 +428,15 @@ for i, (name, matrix) in enumerate(matrices_to_plot.items()):
             ref_aa = focal_protein_seq[pos_idx]
             mut_aa = row['AA']
             rank_val = int(row['Rank'])
-            # Label format: RefPosMut
-            label = f"{ref_aa}{pos_idx + 1}{mut_aa}_R{rank_val}"
+            # Label format: RefPosMut using H3 numbering
+            h3_label = h3_map_with_ha2.get(pos_idx, str(pos_idx + 1))
+            
+            if ":" in h3_label:
+                # e.g. HA2:49 -> HA2:S49N
+                prefix, num = h3_label.split(":", 1)
+                label = f"{prefix}:{ref_aa}{num}{mut_aa}_R{rank_val}"
+            else:
+                label = f"{ref_aa}{h3_label}{mut_aa}_R{rank_val}"
             
             texts.append(ax.text(row['Rank'], row['log10Probability'], label, fontsize=8))
         
