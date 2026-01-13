@@ -49,6 +49,10 @@ print("Base sequence:",base_sequence)
 
 probability_matrix_file='/home3/oml4h/PLM_SARS-CoV-2/Results/test/J.2.4/J.2.4_probability_matrix.csv'
 
+
+outdir='/home3/oml4h/PLM_SARS-CoV-2/Results/test/J.2.4/prob_mutations'
+import os
+os.makedirs(outdir, exist_ok=True)
 # import without header, have it as it's own row
 probability_matrix=pd.read_csv(probability_matrix_file, index_col=0, header=None)
 print("Probability matrix shape:", probability_matrix.shape)
@@ -167,6 +171,7 @@ for i, codon_from in enumerate(codons):
 
 # Convert to DataFrame
 codon_mutation_df = pd.DataFrame(codon_mutation_matrix, index=codons, columns=codons)
+codon_mutation_df.to_csv(f"{outdir}/codon_mutation_matrix.csv")
 
 print("Codon Mutation Matrix (H3N2) shape:", codon_mutation_df.shape)
 print("Example transitions:")
@@ -306,6 +311,7 @@ def validate_mutational_matrix(matrix):
          print("Validation Passed: All columns sum to approximately 1.0")
 
 validate_mutational_matrix(mutational_prob_matrix)
+mutational_prob_matrix.to_csv(f"{outdir}/mutational_prob_matrix.csv")
 
 # %%
 # Calculate Combined Matrices
@@ -314,6 +320,9 @@ combined_prob_matrix = plm_matrix * mutational_prob_matrix
 
 # 2. P_plm * sqrt(P_mut)
 combined_prob_sqrt_matrix = plm_matrix * np.sqrt(mutational_prob_matrix)
+
+combined_prob_matrix.to_csv(f"{outdir}/combined_prob_matrix.csv")
+combined_prob_sqrt_matrix.to_csv(f"{outdir}/combined_prob_sqrt_matrix.csv")
 
 print("Combined Matrix Shape:", combined_prob_matrix.shape)
 print("Combined Sqrt Matrix Shape:", combined_prob_sqrt_matrix.shape)
@@ -418,6 +427,7 @@ plt.figure(figsize=(10, 6))
 sns.histplot(mutational_prob_matrix.values.flatten(), bins=100, log_scale=(True, True))
 plt.title('Histogram of Mutational Probability Matrix Values')
 plt.xlabel('Mutational Probability')
+plt.savefig(f"{outdir}/histogram_mutational_prob.png")
 
 # which have values of >0.1
 high_values = mutational_prob_matrix.values.flatten() > 0.1
@@ -474,6 +484,7 @@ for i, (name, matrix) in enumerate(matrices_to_plot.items()):
     ax.grid(True, which="both", ls="-", alpha=0.2)
 
 plt.tight_layout()
+plt.savefig(f"{outdir}/ranked_mutations.png")
 plt.show()
 
 
@@ -512,6 +523,7 @@ sns.scatterplot(x=plm_flat_log, y=mut_flat_log, alpha=0.3)
 plt.title('PLM Probability vs Mutational Probability (log10 scale)\n spearman: {:.3f} (p={:.2e}), pearson: {:.3f} (p={:.2e})'.format(spearman_corr, p_s, pearson_corr, p_p))
 plt.xlabel('log10(PLM Probability)')
 plt.ylabel('log10(Mutational Probability)')
+plt.savefig(f"{outdir}/plm_vs_mut_correlation.png")
 
 # which ones have values greater than0.1 in either?
 high_plm = plm_flat > 0.1
@@ -586,6 +598,7 @@ for col_idx in mutational_prob_matrix.columns:
 high_prob_df = pd.DataFrame(high_prob_muts)
 if not high_prob_df.empty:
     high_prob_df = high_prob_df.sort_values('Probability', ascending=False)
+    high_prob_df.to_csv(f"{outdir}/high_prob_mutations.csv")
     
     print(f"Found {len(high_prob_df)} mutations with high probability.")
     print(high_prob_df.head(20).to_string(index=False))
