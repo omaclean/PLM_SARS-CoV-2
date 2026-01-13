@@ -1,6 +1,6 @@
 # %%
-%load_ext autoreload
-%autoreload 2
+# %load_ext autoreload
+# %autoreload 2
 
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -225,7 +225,9 @@ plm_matrix = plm_matrix.apply(pd.to_numeric, errors='coerce')
 # Initialize Output Matrix
 # Index: Amino Acids (same as PLM matrix)
 # Columns: Same columns as PLM matrix
+print("Index dump:", list(plm_matrix.index))
 mutational_prob_matrix = pd.DataFrame(0.0, index=plm_matrix.index, columns=plm_matrix.columns)
+print("P in index:", 'P' in mutational_prob_matrix.index)
 
 # Verify alignment and populate matrix
 mismatch_count = 0
@@ -233,35 +235,36 @@ aligned_positions = 0
 num_plm_cols = plm_matrix.shape[1]
 
 print(f"Processing {num_plm_cols} positions...")
+print("--- [COPILOT FIX] RE-CALCULATING MUTATIONAL MATRIX ---") # Proof of execution
 
 for j in range(num_plm_cols):
     # Get column name/label in the dataframe
     col_idx = plm_matrix.columns[j]
     
+    # Map column index to 0-based sequence index
+    # Assuming col_idx is 1-based position (e.g. 1, 2, 3...)
+    try:
+        seq_idx = int(col_idx) - 1
+    except ValueError:
+        print(f"Skipping non-integer column: {col_idx}")
+        continue
+
+    # Bounds check
+    if seq_idx < 0 or seq_idx >= len(ref_nuc_seq) // 3:
+        # print(f"Column {col_idx} (SeqIdx {seq_idx}) out of bounds")
+        continue
+
     # Expected Amino Acid from PLM header (row 0 of original loaded df)
     # The header row value at column j
     expected_aa = probability_matrix.iloc[0, j]
     
     # Codon range in nucleotide sequence
-    # 0-indexed AA position implies 3*j to 3*j+3 in nucleotides
-    nuc_start = 3 * j
-    nuc_end = 3 * j + 3
+    nuc_start = 3 * seq_idx
+    nuc_end = 3 * seq_idx + 3
     
-    # Handle end of sequence cases
-    if nuc_end > len(ref_nuc_seq):
-        # Depending on if the PLM matrix has extra columns (like 'X' mentioned before)
-        # or if sequences simply length mismatch.
-        # We try to process valid codons only.
-        if nuc_start >= len(ref_nuc_seq):
-             # Completely out of bounds
-             break
-        current_codon = ref_nuc_seq[nuc_start:]
-    else:
-        current_codon = ref_nuc_seq[nuc_start:nuc_end]
+    current_codon = ref_nuc_seq[nuc_start:nuc_end]
     
     if len(current_codon) < 3:
-        # Partial codon at end or alignment issue?
-        # print(f"Partial codon at {j}: {current_codon}")
         continue
         
     translated_aa = genetic_code.get(current_codon, 'X')
@@ -272,31 +275,56 @@ for j in range(num_plm_cols):
         if translated_aa != expected_aa:
             mismatch_count += 1
             if mismatch_count < 5:
-                print(f"Alignment Mismatch at col {j} (Pos {j+1}): Seq Codon {current_codon}->{translated_aa}, PLM expects {expected_aa}")
+                print(f"Alignment Mismatch at col {col_idx} (Pos {seq_idx+1}): Seq Codon {current_codon}->{translated_aa}, PLM expects {expected_aa}")
         else:
             aligned_positions += 1
     
     # Calculate Probability of Mutation to each Target AA
     # Iterate over the amino acids in the PLM matrix (rows)
     for target_aa in mutational_prob_matrix.index:
+        
+        # 1. RESET MUST HAPPEN INSIDE THIS LOOP
+        current_target_total_prob = 0.0  
+        
         # Skip if index is NaN or not in our map
         if not isinstance(target_aa, str) or target_aa not in aa_to_codons:
             continue
             
         target_codons = aa_to_codons[target_aa]
-        total_prob = 0.0
         
-        # Sum P(current_codon -> potential_target_codon)
-        # Requires current_codon to be valid codon (A,C,G,T)
+        # 2. Summation Logic
         if current_codon in codon_mutation_df.index:
             for t_codon in target_codons:
-                # Safety check if t_codon exist in matrix
                 if t_codon in codon_mutation_df.columns:
-                    total_prob += codon_mutation_df.loc[current_codon, t_codon]
+                    current_target_total_prob += codon_mutation_df.loc[current_codon, t_codon]
         
-        mutational_prob_matrix.loc[target_aa, col_idx] = total_prob
+        # 3. Assignment
+        mutational_prob_matrix.loc[target_aa, col_idx] = current_target_total_prob
 
 print(f"Alignment Check: {aligned_positions} matches, {mismatch_count} mismatches.")
+
+def validate_mutational_matrix(matrix):
+    print("\n--- Validating Mutational Probability Matrix ---")
+    # Sum over rows (amino acids) for each column (position)
+    column_sums = matrix.sum(axis=0) 
+    
+    print(f"Mean column sum: {column_sums.mean():.6f}")
+    print(f"Min column sum: {column_sums.min():.6f}")
+    print(f"Max column sum: {column_sums.max():.6f}")
+    
+    # Check for deviations -> assuming sums should be <= 1.0 (some prob lost to stop codons)
+    # But usually very close to 1.0
+    deviations = np.abs(column_sums - 1.0)
+    # Allow small tolerance
+    significant_deviations = deviations[deviations > 1e-3]
+    if not significant_deviations.empty:
+         print(f"Warning: {len(significant_deviations)} columns sum to != 1.0 (+/- 0.001)")
+         print("Top 5 deviations:")
+         print(significant_deviations.sort_values(ascending=False).head())
+    else:
+         print("Validation Passed: All columns sum to approximately 1.0")
+
+validate_mutational_matrix(mutational_prob_matrix)
 
 # %%
 # Calculate Combined Matrices
@@ -404,6 +432,20 @@ matrices_to_plot = {
 
 # %%
 
+# Create histogram of mutation_prob_matrix values
+plt.figure(figsize=(10, 6))
+sns.histplot(mutational_prob_matrix.values.flatten(), bins=100, log_scale=(True, True))
+plt.title('Histogram of Mutational Probability Matrix Values')
+plt.xlabel('Mutational Probability')
+
+# which have values of >0.1
+high_values = mutational_prob_matrix.values.flatten() > 0.1
+num_high = np.sum(high_values)
+print(f"Number of mutations with probability > 0.1: {num_high}")
+
+
+# %%
+
 # Create Plot
 fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 axes_flat = axes.flatten()
@@ -452,6 +494,148 @@ for i, (name, matrix) in enumerate(matrices_to_plot.items()):
 
 plt.tight_layout()
 plt.show()
+
+
+# %%
+# correlate the mutation vs plm probabilities plot them and give pearson and spearman ranks
+from scipy.stats import pearsonr, spearmanr
+import seaborn as sns
+
+#need to make diagonals NaN in both matrices to avoid self-mutation bias- create a copy first
+plm_matrix_no_diag = plm_matrix.copy()
+mutational_prob_matrix_no_diag = mutational_prob_matrix.copy()
+for j in range(plm_matrix_no_diag.shape[1]):
+    if j >= len(focal_protein_seq):
+        break
+    col_idx = plm_matrix_no_diag.columns[j]
+    ref_aa = focal_protein_seq[j]
+    if ref_aa in plm_matrix_no_diag.index:
+        plm_matrix_no_diag.loc[ref_aa, col_idx] = np.nan
+        mutational_prob_matrix_no_diag.loc[ref_aa, col_idx] = np.nan    
+# Flatten the matrices to 1D arrays
+plm_flat = plm_matrix.values.flatten()
+mut_flat = mutational_prob_matrix_no_diag.values.flatten()
+
+#drop NaN values in both
+valid_indices = ~np.isnan(plm_flat) & ~np.isnan(mut_flat)
+plm_flat = plm_flat[valid_indices]
+mut_flat = mut_flat[valid_indices]
+
+# Calculate correlations
+pearson_corr, p_p = pearsonr(plm_flat, mut_flat)
+spearman_corr, p_s = spearmanr(plm_flat, mut_flat)
+
+plm_flat_log=np.log10(plm_flat + 1e-20)
+mut_flat_log=np.log10(mut_flat + 1e-20)
+# Plot
+plt.figure(figsize=(8, 6))
+sns.scatterplot(x=plm_flat_log, y=mut_flat_log, alpha=0.3)
+plt.title('PLM Probability vs Mutational Probability (log10 scale)\n spearman: {:.3f} (p={:.2e}), pearson: {:.3f} (p={:.2e})'.format(spearman_corr, p_s, pearson_corr, p_p))
+plt.xlabel('log10(PLM Probability)')
+plt.ylabel('log10(Mutational Probability)')
+
+# which ones have values greater than0.1 in either?
+high_plm = plm_flat > 0.1
+high_mut = mut_flat > 0.1
+high_either = high_plm | high_mut
+
+
+
+# %%
+# Investigation of "High" Mutational Probabilities
+# The user noticed "odd ones" with high probability.
+# We look for mutations that have a probability > max(single_nucleotide_mutation_rate).
+# This implies summations of multiple paths or multiple synonymous target codons.
+
+max_raw_prob = np.max(h3n2_transitions) # Max off-diagonal element since diagonal was 0 in definition
+print(f"\nMax raw nucleotide mutation probability: {max_raw_prob:.2e}")
+
+print("\n--- Investigating High Mutational Probabilities ---")
+prob_p_202 = mutational_prob_matrix.loc['P', plm_matrix.columns[201]] # Check 202 via same key used in assign
+print(f"[PRE-INVESTIGATION CHECK] P at 202: {prob_p_202}")
+
+print(f"Listing non-synonymous mutations with P > {max_raw_prob:.2e}")
+
+# Iterate through the matrix (it's small enough: ~20 AA rows * ~560 Cols)
+high_prob_muts = []
+
+# We need the reference sequence to check for synonymous vs non-synonymous
+# focal_protein_seq (AA) and ref_nuc_seq (DNA) are available.
+# But mutational_prob_matrix columns align with ref_nuc_seq codons.
+
+for col_idx in mutational_prob_matrix.columns:
+    # Get column index as integer (assuming 0, 1, 2...)
+    # In the code above: col_idx = plm_matrix.columns[j]
+    # plm_matrix.columns are '0', '1', '2' etc (strings) from read_csv
+    
+    try:
+        col_int = int(col_idx) # visual column index
+    except ValueError:
+        continue # skip if not integer index
+        
+    seq_idx = col_int - 1 ## FIX: Map 1-based col to 0-based seq
+    if seq_idx < 0 or seq_idx >= len(focal_protein_seq):
+        continue
+        
+    ref_aa = focal_protein_seq[seq_idx]
+    
+    # Get current codon (need to reconstruct logic from above loop)
+    nuc_start = 3 * seq_idx
+    nuc_end = 3 * seq_idx + 3
+    if nuc_end > len(ref_nuc_seq): continue
+    current_codon = ref_nuc_seq[nuc_start:nuc_end]
+    
+    # Iterate rows (target AA)
+    for target_aa in mutational_prob_matrix.index:
+        if not isinstance(target_aa, str) or len(target_aa) != 1: continue
+        
+        # Skip Synonymous / Identity
+        if target_aa == ref_aa: continue
+
+        prob = mutational_prob_matrix.loc[target_aa, col_idx]
+        
+        if prob > max_raw_prob:
+            high_prob_muts.append({
+                'Position': seq_idx + 1,
+                'Ref_AA': ref_aa,
+                'Ref_Codon': current_codon,
+                'Target_AA': target_aa,
+                'Probability': prob
+            })
+
+# Sort by probability descending
+high_prob_df = pd.DataFrame(high_prob_muts)
+if not high_prob_df.empty:
+    high_prob_df = high_prob_df.sort_values('Probability', ascending=False)
+    
+    print(f"Found {len(high_prob_df)} mutations with high probability.")
+    print(high_prob_df.head(20).to_string(index=False))
+    
+    # Detailed breakdown for the top case
+    top_case = high_prob_df.iloc[0]
+    print(f"\nBreakdown for top case: Pos {top_case['Position']} {top_case['Ref_Codon']}({top_case['Ref_AA']}) -> {top_case['Target_AA']}")
+    
+    ref_c = top_case['Ref_Codon']
+    tgt_aa = top_case['Target_AA']
+    tgt_codons = aa_to_codons[tgt_aa]
+    
+    print(f"Target Codons for {tgt_aa}: {tgt_codons}")
+    for tc in tgt_codons:
+        if tc in codon_mutation_df.columns:
+             p = codon_mutation_df.loc[ref_c, tc]
+             if p > 0:
+                 print(f"  P({ref_c} -> {tc}) = {p:.2e}")
+                 # Identify nucleotide changes
+                 changes = []
+                 base_probs = []
+                 for k in range(3):
+                     if ref_c[k] != tc[k]:
+                         tr_prob = h3n2_probs[bases.index(ref_c[k]), bases.index(tc[k])]
+                         changes.append(f"{ref_c[k]}->{tc[k]} ({tr_prob:.2e})")
+                 print(f"    Changes: {', '.join(changes)}")
+
+else:
+    print("No mutations found exceeding the max raw probability threshold.")
 
 
 # %%
