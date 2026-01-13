@@ -2,23 +2,19 @@
 # %load_ext autoreload
 # %autoreload 2
 
-from Bio import SeqIO
-from Bio.Seq import Seq
-import pandas as pd 
-import numpy as np
-
-from adjustText import adjust_text
-
-
-import seaborn as sns
-import matplotlib.pyplot as plt
-import pandas as pd
-from Bio import SeqIO
-
-from Bio import Entrez
-from Bio import SeqIO
 import sys
 import importlib
+import itertools
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.stats import pearsonr, spearmanr
+from adjustText import adjust_text
+
+from Bio import SeqIO
+from Bio.Seq import Seq
+from Bio.Data import CodonTable
 
 # Access Functions
 sys.path.append('../../')
@@ -57,10 +53,10 @@ probability_matrix_file='/home3/oml4h/PLM_SARS-CoV-2/Results/test/J.2.4/J.2.4_pr
 probability_matrix=pd.read_csv(probability_matrix_file, index_col=0, header=None)
 print("Probability matrix shape:", probability_matrix.shape)
 
-probability_matrix.shape
-probability_matrix.columns[1:20]
 print(probability_matrix.iloc[0,1:20])
 
+# %%
+print(19*probability_matrix.shape[1])
 # %%
 # compare sequences match
 # convert prob matrix header to a string
@@ -83,7 +79,6 @@ assert str(bs) == ms, "Sequences do not match!"
 #print final column of prob matrix
 print(probability_matrix.iloc[:, -1])
 # %%
-import numpy as np
 
 # ------------------------------------------------------------------
 # NOTATION AND ORDERING
@@ -145,8 +140,6 @@ print("H3N2 Matrix:\n", h3n2_transitions)
 
 # create a 64 x 64 matrix for codon to codon mutation rates based on nucleotide mutation rates above  for H3N2 - each codon is made of 3 nucleotides, so the mutation rate from one codon to another is the product of the mutation rates of the individual nucleotides 
 
-import itertools
-
 # Calculate probabilities including 'staying same' for diagonal
 # For H3N2 input matrix (approx 1 - sum(row))
 h3n2_probs = h3n2_transitions.copy()
@@ -184,24 +177,12 @@ print(f"P(AAA -> GGG): {codon_mutation_df.loc['AAA', 'GGG']}")
 # # Mutational Probability Matrix Calculation
 # %%
 # Define Genetic Code (DNA -> Amino Acid)
-genetic_code = {
-    'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M',
-    'ACA':'T', 'ACC':'T', 'ACG':'T', 'ACT':'T',
-    'AAC':'N', 'AAT':'N', 'AAA':'K', 'AAG':'K',
-    'AGC':'S', 'AGT':'S', 'AGA':'R', 'AGG':'R',
-    'CTA':'L', 'CTC':'L', 'CTG':'L', 'CTT':'L',
-    'CCA':'P', 'CCC':'P', 'CCG':'P', 'CCT':'P',
-    'CAC':'H', 'CAT':'H', 'CAA':'Q', 'CAG':'Q',
-    'CGA':'R', 'CGC':'R', 'CGG':'R', 'CGT':'R',
-    'GTA':'V', 'GTC':'V', 'GTG':'V', 'GTT':'V',
-    'GCA':'A', 'GCC':'A', 'GCG':'A', 'GCT':'A',
-    'GAC':'D', 'GAT':'D', 'GAA':'E', 'GAG':'E',
-    'GGA':'G', 'GGC':'G', 'GGG':'G', 'GGT':'G',
-    'TCA':'S', 'TCC':'S', 'TCG':'S', 'TCT':'S',
-    'TTC':'F', 'TTT':'F', 'TTA':'L', 'TTG':'L',
-    'TAC':'Y', 'TAT':'Y', 'TAA':'_', 'TAG':'_',
-    'TGC':'C', 'TGT':'C', 'TGA':'_', 'TGG':'W',
-}
+standard_table = CodonTable.unambiguous_dna_by_id[1]
+genetic_code = standard_table.forward_table.copy()
+# Add stop codons mapped to '_'
+for stop_codon in standard_table.stop_codons:
+    genetic_code[stop_codon] = '_'
+
 
 # Reverse map: Amino Acid -> List of Codons
 aa_to_codons = {}
@@ -498,8 +479,6 @@ plt.show()
 
 # %%
 # correlate the mutation vs plm probabilities plot them and give pearson and spearman ranks
-from scipy.stats import pearsonr, spearmanr
-import seaborn as sns
 
 #need to make diagonals NaN in both matrices to avoid self-mutation bias- create a copy first
 plm_matrix_no_diag = plm_matrix.copy()
