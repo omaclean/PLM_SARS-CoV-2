@@ -17,6 +17,16 @@ from Bio import SeqIO
 
 from Bio import Entrez
 from Bio import SeqIO
+import sys
+import importlib
+
+# Access Functions
+sys.path.append('../../')
+module_name = "Functions"
+if module_name in sys.modules:
+    del sys.modules[module_name]
+# Functions = importlib.import_module(module_name)
+from Functions_HuggingFace import create_h3_numbering_map
 
 # %% [markdown]
 # # Run code
@@ -385,6 +395,8 @@ matrices_to_plot = {
     'P_plm * sqrt(P_mut)': combined_prob_sqrt_matrix
 }
 
+# %%
+
 # Create Plot
 fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 axes_flat = axes.flatten()
@@ -393,13 +405,15 @@ for i, (name, matrix) in enumerate(matrices_to_plot.items()):
     ax = axes_flat[i]
     
     ranked_df, obs_df = get_ranked_mutations(matrix, focal_protein_seq, observed_mutations)
+    ranked_df['log10Probability'] = np.log10(ranked_df['Probability'])
+    obs_df['log10Probability'] = np.log10(obs_df['Probability'])
     
     # Plot all ranks (Line)
-    ax.plot(ranked_df['Rank'], ranked_df['Probability'], label='All Mutations', color='lightgray', linewidth=1)
+    ax.plot(ranked_df['Rank'], ranked_df['log10Probability'], label='All Mutations', color='lightgray', linewidth=1)
     
     # Highlight observed
     if not obs_df.empty:
-        sc = ax.scatter(obs_df['Rank'], obs_df['Probability'], color='red', zorder=5, label='Observed Diff', s=20)
+        sc = ax.scatter(obs_df['Rank'], obs_df['log10Probability'], color='red', zorder=5, label='Observed Diff', s=20)
         
         texts = []
         for idx, row in obs_df.iterrows():
@@ -408,18 +422,18 @@ for i, (name, matrix) in enumerate(matrices_to_plot.items()):
             mut_aa = row['AA']
             rank_val = int(row['Rank'])
             # Label format: RefPosMut
-            label = f"{ref_aa}{pos_idx + 1}{mut_aa}"
+            label = f"{ref_aa}{pos_idx + 1}{mut_aa}_R{rank_val}"
             
-            texts.append(ax.text(row['Rank'], label, fontsize=8))
+            texts.append(ax.text(row['Rank'], row['log10Probability'], label, fontsize=8))
         
         # Use adjust_text to repel labels
         adjust_text(texts, arrowprops=dict(arrowstyle='-', color='grey', lw=0.5), ax=ax)
 
     ax.set_title(name)
     ax.set_xlabel('Rank (1 = Highest Prob)')
-    ax.set_ylabel('Probability')
-    # ax.set_xscale('log') # User requested log scale implicitly via "rank each possible mutation" usually implies log-log or semi-log
-    ax.set_yscale('log')
+    ax.set_ylabel('log10(Probability)')
+    #ax.set_xscale('log') # User requested log scale implicitly via "rank each possible mutation" usually implies log-log or semi-log
+    #ax.set_yscale('log')
     ax.grid(True, which="both", ls="-", alpha=0.2)
 
 plt.tight_layout()
