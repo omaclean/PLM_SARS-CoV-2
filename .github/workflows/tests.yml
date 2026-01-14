@@ -40,7 +40,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install pytest biopython pandas numpy scipy
         pip install torch --index-url https://download.pytorch.org/whl/cpu
-        pip install transformers
+        pip install transformers fair-esm
     
     - name: Run ESM CPU smoke tests
       run: |
