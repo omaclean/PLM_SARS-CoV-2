@@ -38,8 +38,9 @@ jobs:
     - name: Install minimal dependencies for ESM tests
       run: |
         python -m pip install --upgrade pip
-        pip install pytest torch --index-url https://download.pytorch.org/whl/cpu
-        pip install transformers biopython pandas numpy scipy
+        pip install pytest biopython pandas numpy scipy
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install transformers
     
     - name: Run ESM CPU smoke tests
       run: |
