@@ -10,13 +10,15 @@ from Bio.SeqUtils import seq1
 
 
 pdb_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE4_assembly.pdb"
-pdb_path= "/home3/oml4h/PLM_SARS-CoV-2/Sequences/4O5N-assembly1.cif"
-pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE8-assembly1.cif"
+# pdb_path= "/home3/oml4h/PLM_SARS-CoV-2/Sequences/4O5N-assembly1.cif"
+# pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE8-assembly1.cif"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/6WXB-assembly1.cif"
+pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ7-assembly1.cif"
 
 sequences = read_sequences_to_dict(
     "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
 )
+reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 
 
 def _extract_pdb_chain_sequences(pdb_file):
@@ -136,6 +138,12 @@ if __name__ == "__main__":
         if "del" not in m and "-" not in m
     ]
 
+    with open(reference_path, "r") as f:
+        ref_record = next(SeqIO.parse(f, "fasta"))
+    h3_map_with_ha2 = create_h3_numbering_map(user_seq, str(ref_record.seq), HA2_start=330)
+    canonical_mutations = mutations_to_canonical(mutations, h3_map_with_ha2)
+    print("Canonical mutations (first 10):", canonical_mutations[:10])
+
     alignment_maps = summarize_pdb_alignment(pdb_path, user_seq, mutation_list=mutations)
     mutations_flagged = flag_outside_mutations(mutations, alignment_maps)
 
@@ -144,16 +152,19 @@ if __name__ == "__main__":
         user_seq,
         mutations_flagged,
         title=f"{target_id} mutations",
+        canonical_map=h3_map_with_ha2,
     )
     view.show()
 
     output_dir = "/home3/oml4h/PLM_SARS-CoV-2/Results/structure_play"
     os.makedirs(output_dir, exist_ok=True)
     pdb_name = os.path.basename(pdb_path)
-    lineage = target_id.split("|")[-1]
+    
+    lineage_source=reference_id.split("|")[-1]
+    lineage_target = target_id.split("|")[-1]
     output_path = os.path.join(
         output_dir,
-        f"{pdb_name}_{lineage}_mutations_structure.html",
+        f"{pdb_name}_{lineage_source}_to_{lineage_target}_mutations_structure.html",
     )
     with open(output_path, "w") as f:
         f.write(view._make_html())

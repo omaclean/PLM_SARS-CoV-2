@@ -1261,6 +1261,7 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     # If so, we need to add each model individually to show them all at once
     # instead of as an animation.
     num_models = len(list(structure))
+    model_format = "mmcif" if pdb_file.lower().endswith((".cif", ".mmcif")) else "pdb"
     if not is_monomer and num_models > 1:
         print(f"  -> Detected {num_models} models. Adding all models to viewer.")
         io = PDBIO()
@@ -1269,11 +1270,11 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
             s = StringIO()
             io.set_structure(model)
             io.save(s)
-            view.addModel(s.getvalue(), 'pdb')
+            view.addModel(s.getvalue(), model_format)
     else:
         # Use doAssembly=True to generate the biological assembly (e.g. trimer) ONLY if it's a monomer file
         # If the file is already a multimer (single model with multiple chains), we assume it represents the assembly we want.
-        view.addModel(open(pdb_file).read(), 'pdb', {'doAssembly': is_monomer})
+        view.addModel(open(pdb_file).read(), model_format, {'doAssembly': is_monomer})
     
     # Apply background coloring if provided
     if background_values is not None:
@@ -1584,9 +1585,13 @@ def create_h3_numbering_map(query_input, reference_sequence, signal_peptide_leng
     best_alignment = alignments[0]
     
     # Extract aligned strings (includes dashes)
-    # pattern: [0] is target (ref), [1] is query
-    aligned_ref = best_alignment[0]
-    aligned_query = best_alignment[1]
+    # pattern: target is ref, query is input sequence
+    try:
+        aligned_ref = best_alignment.target
+        aligned_query = best_alignment.query
+    except AttributeError:
+        aligned_ref = best_alignment[0]
+        aligned_query = best_alignment[1]
 
     # 3. Build the Mapping
     mapping_dict = {}
