@@ -1055,7 +1055,7 @@ for i, pos in enumerate(positions):
         mutation_prob_matrix[ref_idx, i] = np.nan
 #only label every tenth x axis tick
 mutation_prob_matrix = np.nan_to_num(mutation_prob_matrix, nan=0.0)
-# replace np.nan with zero for visualization
+# replace np.nan with zero for visualisation
 
 seaborn.heatmap(mutation_prob_matrix, xticklabels=positions, yticklabels=amino_acids)
 plt.xticks(ticks=np.arange(0, len(positions), 10), labels=np.array(positions)[::10])

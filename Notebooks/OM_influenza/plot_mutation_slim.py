@@ -22,6 +22,112 @@ from Bio.SeqUtils import seq1
 import os
 from collections import defaultdict
 
+
+def _extract_pdb_chain_sequences(pdb_file):
+    """Return chain sequences and residue ids from a PDB file."""
+    parser = PDB.PDBParser(QUIET=True)
+    structure = parser.get_structure("struct", pdb_file)
+
+    chain_data = {}
+    for model in structure:
+        for chain in model:
+            seq_chars = []
+            residue_ids = []
+            for residue in chain:
+                if PDB.is_aa(residue):
+                    try:
+                        aa = seq1(residue.get_resname())
+                    except Exception:
+                        aa = "X"
+                    seq_chars.append(aa)
+                    residue_ids.append(residue.get_id())
+            if seq_chars:
+                chain_data[chain.id] = ("".join(seq_chars), residue_ids)
+    return chain_data
+
+
+def _alignment_indices(alignment):
+    """Return aligned indices for query/target from a Biopython alignment."""
+    try:
+        return alignment.indices[0], alignment.indices[1]
+    except AttributeError:
+        user_indices = []
+        pdb_indices = []
+        for (u_start, u_end), (p_start, p_end) in zip(*alignment.aligned):
+            user_indices.extend(range(u_start, u_end))
+            pdb_indices.extend(range(p_start, p_end))
+        return user_indices, pdb_indices
+
+
+def summarize_pdb_alignment(pdb_file, user_sequence, mutation_list=None, threshold_score=50):
+    """Print aligned region summary and mutation mapping to PDB residue numbers."""
+    chain_data = _extract_pdb_chain_sequences(pdb_file)
+    mutation_list = mutation_list or []
+    mutation_positions = []
+    for mut in mutation_list:
+        match = re.search(r"(\d+)", mut)
+        if match:
+            mutation_positions.append((mut, int(match.group(1))))
+
+    alignment_maps = {}
+
+    for chain_id, (pdb_seq, residue_ids) in chain_data.items():
+        alignment = align_sequences(user_sequence, pdb_seq, mode="local", open_gap_score=-10, extend_gap_score=-0.5)
+        if alignment.score < threshold_score:
+            continue
+
+        user_indices, pdb_indices = _alignment_indices(alignment)
+        if not user_indices:
+            continue
+
+        user_min = min(user_indices) + 1
+        user_max = max(user_indices) + 1
+        pdb_min = min(pdb_indices)
+        pdb_max = max(pdb_indices)
+        pdb_min_res = residue_ids[pdb_min][1]
+        pdb_max_res = residue_ids[pdb_max][1]
+
+        print(f"Aligned region (chain {chain_id}): user {user_min}-{user_max} -> PDB {pdb_min_res}-{pdb_max_res}")
+
+        user_to_pdb = dict(zip(user_indices, pdb_indices))
+        alignment_maps[chain_id] = (user_to_pdb, residue_ids)
+
+    if mutation_positions:
+        print("\nMutation mapping to PDB (by chain):")
+        for mut, pos in mutation_positions:
+            mapped = False
+            for chain_id, (user_to_pdb, residue_ids) in alignment_maps.items():
+                user_idx = pos - 1
+                if user_idx in user_to_pdb:
+                    pdb_idx = user_to_pdb[user_idx]
+                    pdb_resnum = residue_ids[pdb_idx][1]
+                    print(f"  {mut}: chain {chain_id} -> PDB residue {pdb_resnum}")
+                    mapped = True
+            if not mapped:
+                print(f"  {mut}: OUTSIDE aligned PDB region")
+
+    return alignment_maps
+
+
+def flag_outside_mutations(mutation_list, alignment_maps):
+    """Append ' (OUTSIDE)' to mutation labels that do not map to any PDB residue."""
+    mapped_positions = set()
+    for user_to_pdb, _ in alignment_maps.values():
+        mapped_positions.update(user_to_pdb.keys())
+
+    flagged = []
+    for mut in mutation_list:
+        match = re.search(r"(\d+)", mut)
+        if not match:
+            flagged.append(mut)
+            continue
+        pos = int(match.group(1)) - 1
+        if pos in mapped_positions:
+            flagged.append(mut)
+        else:
+            flagged.append(f"{mut} (OUTSIDE)")
+    return flagged
+
 # %%
 
 
@@ -51,6 +157,18 @@ reference_lineage=lineage_base
 
 print(ids[2:(len(ids)-1)])
 K_indexed_muts = [m for m in get_mutations(sequences[reference],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
+
+# Print aligned region summary and map mutations to PDB residues
+alignment_maps = summarize_pdb_alignment(
+    pdb_path,
+    sequences[ids[len(ids)-1]],
+    mutation_list=K_indexed_muts,
+    threshold_score=50,
+)
+
+# Flag mutations that fall outside aligned PDB regions
+K_indexed_muts_flagged = flag_outside_mutations(K_indexed_muts, alignment_maps)
+print("Flagged mutations:", K_indexed_muts_flagged)
 
 
 
@@ -140,7 +258,7 @@ print(mutation_to_canon)
 print( K_indexed_muts)
 
 view = visualise_mutations_on_pdb(pdb_path, sequences[ids[len(ids)-1]], 
-                                  K_indexed_muts,
+                                  K_indexed_muts_flagged,
                                   canonical_map=position_to_canon, 
                                   title="{} {} mutations".format(model_name, reference_lineage))
 #view.show()
@@ -161,7 +279,7 @@ probability_dict = {i+1: val for i, val in enumerate(probability.iloc[-1, 2:].va
 view = visualise_mutations_on_pdb(
     pdb_path, 
     sequences[ids[len(ids)-1]], 
-    K_indexed_muts,
+    K_indexed_muts_flagged,
     background_values=probability_dict,
     canonical_map=mutation_to_canon,
     title=f"{model_name} Reference Probability"
@@ -202,7 +320,7 @@ entropy_dict = {i+1: val for i, val in enumerate(entropy.iloc[-1, 2:].values)}
 view = visualise_mutations_on_pdb(
     pdb_path, 
     sequences[ids[len(ids)-1]], 
-    K_indexed_muts,
+    K_indexed_muts_flagged,
     background_values=entropy_dict,
     title=f"{model_name} Reference entropy"
 )
@@ -218,7 +336,7 @@ entropy_dict = {i+1:  np.log10(val) for i, val in enumerate(entropy.iloc[-1, 2:]
 view = visualise_mutations_on_pdb(
     pdb_path, 
     sequences[ids[len(ids)-1]], 
-    K_indexed_muts,
+    K_indexed_muts_flagged,
     background_values=entropy_dict,
     title=f"{model_name} Reference entropy (log10)"
 )
@@ -279,7 +397,7 @@ print(canonical_mutations[:10])  # Show first 10
 view = visualise_mutations_on_pdb(
     pdb_path, 
     sequences[ids[len(ids)-1]], 
-    K_indexed_muts,
+    K_indexed_muts_flagged,
     background_values=entropy_dict,
     title=f"{model_name} Reference entropy (Canonical)",
     canonical_map=h3_map  # Now displays H3 canonical numbering in separate legend

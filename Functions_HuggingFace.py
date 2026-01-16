@@ -1164,8 +1164,11 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
             
             sites_of_interest[idx] = mut
     
-    # 2. Parse PDB Structure
-    parser = PDB.PDBParser(QUIET=True)
+    # 2. Parse PDB/MMCIF Structure
+    if pdb_file.lower().endswith((".cif", ".mmcif")):
+        parser = PDB.MMCIFParser(QUIET=True)
+    else:
+        parser = PDB.PDBParser(QUIET=True)
     structure = parser.get_structure("struct", pdb_file)
     
     # Check if monomer (1 chain) or multimer
