@@ -310,8 +310,9 @@ if __name__ == "__main__":
         mutations_flagged,
         title=f"{target_id} mutations (surface)",
         canonical_map=h3_map_with_ha2,
+        surface_opacity=0.7,
+        surface_color="#dddddd",
     )
-    view_surface.addSurface(py3Dmol.SAS, {"opacity": 0.7, "color": "#dddddd"})
     view_surface.show()
 
     chain_plddt = _extract_plddt_by_chain(pdb_path)

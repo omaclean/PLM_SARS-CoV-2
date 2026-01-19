@@ -1106,7 +1106,8 @@ def align_sequences(reference_seq, query_seq, mode='local', open_gap_score=-10, 
     return alignments[0]  # Return best alignment
   
 def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold_score=50, 
-                               coordinate_map=None, background_values=None, title=None, canonical_map=None):
+                               coordinate_map=None, background_values=None, title=None, canonical_map=None,
+                               surface_opacity=None, surface_color="#dddddd"):
     """
     Maps user-defined mutations onto a PDB structure (trimer friendly).
     
@@ -1124,8 +1125,10 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                                            be colored by these values using a gradient.
         title (str, optional): Title/label for the visualization and legend (e.g., "PLM Entropy").
         canonical_map (dict, optional): Mapping from 0-based sequence indices to canonical numbering
-                                       (e.g., H3 numbering: {0: 'SP-15', 16: '1', 173: '158A'}).
-                                       Displays a separate "Canonical Numbering" legend.
+                           (e.g., H3 numbering: {0: 'SP-15', 16: '1', 173: '158A'}).
+                           Displays a separate "Canonical Numbering" legend.
+        surface_opacity (float, optional): If provided, add a global molecular surface with this opacity.
+        surface_color (str, optional): Hex color for the global surface (default: "#dddddd").
     """
     
     # 1. Parse Mutation Indices from the list (e.g. 'A123T' -> 122 (0-based))
@@ -1320,6 +1323,10 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     else:
         # Base style: Grey Cartoon (only if no background coloring)
         view.setStyle({'cartoon': {'color': '#eeeeee'}})
+
+    # Optional global molecular surface (base layer)
+    if surface_opacity is not None:
+        view.addSurface(py3Dmol.SAS, {"opacity": surface_opacity, "color": surface_color})
     
     # Add style for non-protein atoms (e.g. glycans) - make them visible but neutral
     # 'hetflag': True selects heteroatoms (ligands, water, etc.)
@@ -1364,9 +1371,11 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                 selector,
                 {'stick': {'color': color, 'radius': 0.4}} 
             )
-            view.addStyle(
-                 selector,
-                 {'surface': {'opacity':0.5, 'color': color}} 
+            mutation_surface_opacity = surface_opacity if surface_opacity is not None else 0.5
+            view.addSurface(
+                py3Dmol.SAS,
+                {'opacity': mutation_surface_opacity, 'color': color},
+                selector
             )
 
     view.zoomTo()
