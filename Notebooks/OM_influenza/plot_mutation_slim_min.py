@@ -312,8 +312,22 @@ if __name__ == "__main__":
         canonical_map=h3_map_with_ha2,
         surface_opacity=0.7,
         surface_color="#dddddd",
+        mutation_surface_opacity=1.0,
     )
     view_surface.show()
+
+    view_surface_only = visualise_mutations_on_pdb(
+        pdb_path,
+        user_seq,
+        mutations_flagged,
+        title=f"{target_id} mutations (surface only)",
+        canonical_map=h3_map_with_ha2,
+        surface_opacity=1.0,
+        surface_color="#dddddd",
+        mutation_surface_opacity=1.0,
+        hide_cartoon=True,
+    )
+    view_surface_only.show()
 
     chain_plddt = _extract_plddt_by_chain(pdb_path)
     plddt_sums = {}
@@ -381,6 +395,14 @@ if __name__ == "__main__":
     with open(surface_output_path, "w") as f:
         f.write(view_surface._make_html())
     print(f"Saved surface plot to: {surface_output_path}")
+
+    surface_only_output_path = os.path.join(
+        output_dir,
+        f"{pdb_name}_{lineage_source}_to_{lineage_target}_mutations_surface_only.html",
+    )
+    with open(surface_only_output_path, "w") as f:
+        f.write(view_surface_only._make_html())
+    print(f"Saved surface-only plot to: {surface_only_output_path}")
 
     if view_plddt is not None:
         plddt_output_path = os.path.join(

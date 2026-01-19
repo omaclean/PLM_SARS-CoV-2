@@ -1107,7 +1107,8 @@ def align_sequences(reference_seq, query_seq, mode='local', open_gap_score=-10, 
   
 def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold_score=50, 
                                coordinate_map=None, background_values=None, title=None, canonical_map=None,
-                               surface_opacity=None, surface_color="#dddddd"):
+                               surface_opacity=None, surface_color="#dddddd", mutation_surface_opacity=None,
+                               hide_cartoon=False):
     """
     Maps user-defined mutations onto a PDB structure (trimer friendly).
     
@@ -1129,6 +1130,8 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                            Displays a separate "Canonical Numbering" legend.
         surface_opacity (float, optional): If provided, add a global molecular surface with this opacity.
         surface_color (str, optional): Hex color for the global surface (default: "#dddddd").
+        mutation_surface_opacity (float, optional): Opacity for colored mutation surface patches.
+        hide_cartoon (bool, optional): If True, hide the ribbon/cartoon representation.
     """
     
     # 1. Parse Mutation Indices from the list (e.g. 'A123T' -> 122 (0-based))
@@ -1324,6 +1327,9 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
         # Base style: Grey Cartoon (only if no background coloring)
         view.setStyle({'cartoon': {'color': '#eeeeee'}})
 
+    if hide_cartoon:
+        view.setStyle({'cartoon': {'opacity': 0.0}})
+
     # Optional global molecular surface (base layer)
     if surface_opacity is not None:
         view.addSurface(py3Dmol.SAS, {"opacity": surface_opacity, "color": surface_color})
@@ -1371,10 +1377,13 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                 selector,
                 {'stick': {'color': color, 'radius': 0.4}} 
             )
-            mutation_surface_opacity = surface_opacity if surface_opacity is not None else 0.5
+            if mutation_surface_opacity is not None:
+                patch_opacity = mutation_surface_opacity
+            else:
+                patch_opacity = surface_opacity if surface_opacity is not None else 0.5
             view.addSurface(
                 py3Dmol.SAS,
-                {'opacity': mutation_surface_opacity, 'color': color},
+                {'opacity': patch_opacity, 'color': color},
                 selector
             )
 
