@@ -1315,7 +1315,7 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                 mapped_pos = pos_1based
             
             # Apply coloring to this residue
-            selector = {'resi': mapped_pos}
+            selector = {'resi': int(mapped_pos)}
             view.addStyle(selector, {'cartoon': {'color': color_hex}})
     else:
         # Base style: Grey Cartoon (only if no background coloring)
@@ -1352,7 +1352,7 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
             # BUT if the PDB itself is a multimer (e.g. A, B, C parsed), we must specify chain ID 
             # to avoid highlighting wrong residues in other chains (e.g. HA2 vs HA1).
             
-            selector = {'resi': res_num}
+            selector = {'resi': int(res_num)}
             if not is_monomer:
                 selector['chain'] = chain_id
             

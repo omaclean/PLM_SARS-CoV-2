@@ -7,6 +7,7 @@ import re
 import os
 from Bio import PDB, Align
 from Bio.SeqUtils import seq1
+import py3Dmol
 
 
 pdb_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE4_assembly.pdb"
@@ -34,6 +35,7 @@ def _extract_pdb_chain_sequences(pdb_file):
         for chain in model:
             seq_chars = []
             residue_ids = []
+            hetero_resnames = []
             for residue in chain:
                 if PDB.is_aa(residue):
                     try:
@@ -42,9 +44,40 @@ def _extract_pdb_chain_sequences(pdb_file):
                         aa = "X"
                     seq_chars.append(aa)
                     residue_ids.append(residue.get_id())
-            if seq_chars:
-                chain_data[chain.id] = ("".join(seq_chars), residue_ids)
+                else:
+                    resname = residue.get_resname()
+                    if resname and resname != "HOH":
+                        hetero_resnames.append(resname)
+            chain_data[chain.id] = {
+                "seq": "".join(seq_chars),
+                "residue_ids": residue_ids,
+                "hetero_resnames": sorted(set(hetero_resnames)),
+            }
     return chain_data
+
+
+def _extract_plddt_by_chain(pdb_file):
+    if pdb_file.lower().endswith((".cif", ".mmcif")):
+        parser = PDB.MMCIFParser(QUIET=True)
+    else:
+        parser = PDB.PDBParser(QUIET=True)
+    structure = parser.get_structure("struct", pdb_file)
+    chain_plddt = {}
+
+    for model in structure:
+        for chain in model:
+            plddt_values = []
+            for residue in chain:
+                if not PDB.is_aa(residue):
+                    continue
+                if "CA" in residue:
+                    plddt_values.append(residue["CA"].get_bfactor())
+                else:
+                    atom_b = [atom.get_bfactor() for atom in residue.get_atoms()]
+                    plddt_values.append(sum(atom_b) / len(atom_b) if atom_b else None)
+            if plddt_values:
+                chain_plddt[chain.id] = plddt_values
+    return chain_plddt
 
 
 def _alignment_indices(alignment):
@@ -105,10 +138,26 @@ def summarize_pdb_alignment(pdb_file, user_sequence, mutation_list=None, thresho
 
     alignment_maps = {}
 
-    for chain_id, (pdb_seq, residue_ids) in chain_data.items():
+    for chain_id, chain_info in chain_data.items():
+        pdb_seq = chain_info["seq"]
+        residue_ids = chain_info["residue_ids"]
+        hetero_resnames = chain_info["hetero_resnames"]
+        if not pdb_seq:
+            if hetero_resnames:
+                print(
+                    f"Chain {chain_id} has no protein residues. Non-protein residues: {', '.join(hetero_resnames)}"
+                )
+            else:
+                print(f"Chain {chain_id} has no protein residues.")
+            continue
         alignment = align_sequences(user_sequence, pdb_seq, mode="local", open_gap_score=-10, extend_gap_score=-0.5)
         if alignment.score < threshold_score:
-            print(f"Skipping chain {chain_id} (Score: {alignment.score}): Sequence {pdb_seq}")
+            if hetero_resnames:
+                print(
+                    f"Chain {chain_id} skipped (alignment score {alignment.score:.1f}). Non-protein residues: {', '.join(hetero_resnames)}"
+                )
+            else:
+                print(f"Chain {chain_id} skipped (alignment score {alignment.score:.1f}).")
             continue
 
         pdb_first_res = _format_res_id(residue_ids[0])
@@ -117,7 +166,12 @@ def summarize_pdb_alignment(pdb_file, user_sequence, mutation_list=None, thresho
 
         user_indices, pdb_indices = _alignment_indices(alignment)
         if len(user_indices) == 0:
-            print(f"Skipping chain {chain_id} (No aligned residues): Sequence {pdb_seq}")
+            if hetero_resnames:
+                print(
+                    f"Chain {chain_id} skipped (no aligned residues). Non-protein residues: {', '.join(hetero_resnames)}"
+                )
+            else:
+                print(f"Chain {chain_id} skipped (no aligned residues).")
             continue
 
         user_min = min(user_indices) + 1
@@ -250,6 +304,61 @@ if __name__ == "__main__":
     )
     view.show()
 
+    view_surface = visualise_mutations_on_pdb(
+        pdb_path,
+        user_seq,
+        mutations_flagged,
+        title=f"{target_id} mutations (surface)",
+        canonical_map=h3_map_with_ha2,
+    )
+    view_surface.addSurface(py3Dmol.SAS, {"opacity": 0.7, "color": "#dddddd"})
+    view_surface.show()
+
+    chain_plddt = _extract_plddt_by_chain(pdb_path)
+    plddt_sums = {}
+    plddt_counts = {}
+    for chain_id, chain_info in alignment_maps.items():
+        user_to_pdb = chain_info["user_to_pdb"]
+        plddt_list = chain_plddt.get(chain_id)
+        if not plddt_list:
+            continue
+        for user_idx, pdb_idx in user_to_pdb.items():
+            if pdb_idx >= len(plddt_list):
+                continue
+            plddt = plddt_list[pdb_idx]
+            if plddt is None:
+                continue
+            pos_1based = user_idx + 1
+            plddt_sums[pos_1based] = plddt_sums.get(pos_1based, 0.0) + plddt
+            plddt_counts[pos_1based] = plddt_counts.get(pos_1based, 0) + 1
+
+    plddt_background = {
+        pos: plddt_sums[pos] / plddt_counts[pos]
+        for pos in plddt_sums
+        if plddt_counts.get(pos, 0) > 0
+    }
+
+    view_plddt = None
+    if plddt_background:
+        plddt_values = list(plddt_background.values())
+        plddt_min = min(plddt_values)
+        plddt_max = max(plddt_values)
+        plddt_mean = sum(plddt_values) / len(plddt_values)
+        plddt_title = (
+            f"{target_id} pLDDT (mean {plddt_mean:.1f}, min {plddt_min:.1f}, max {plddt_max:.1f})"
+        )
+        view_plddt = visualise_mutations_on_pdb(
+            pdb_path,
+            user_seq,
+            mutations_flagged,
+            title=plddt_title,
+            canonical_map=h3_map_with_ha2,
+            background_values=plddt_background,
+        )
+        view_plddt.show()
+    else:
+        print("No pLDDT values detected in structure; skipping pLDDT ribbon plot.")
+
     output_dir = "/home3/oml4h/PLM_SARS-CoV-2/Results/structure_play"
     os.makedirs(output_dir, exist_ok=True)
     pdb_name = os.path.basename(pdb_path)
@@ -263,6 +372,23 @@ if __name__ == "__main__":
     with open(output_path, "w") as f:
         f.write(view._make_html())
     print(f"Saved PDB plot to: {output_path}")
+
+    surface_output_path = os.path.join(
+        output_dir,
+        f"{pdb_name}_{lineage_source}_to_{lineage_target}_mutations_surface.html",
+    )
+    with open(surface_output_path, "w") as f:
+        f.write(view_surface._make_html())
+    print(f"Saved surface plot to: {surface_output_path}")
+
+    if view_plddt is not None:
+        plddt_output_path = os.path.join(
+            output_dir,
+            f"{pdb_name}_{lineage_source}_to_{lineage_target}_plddt_ribbon.html",
+        )
+        with open(plddt_output_path, "w") as f:
+            f.write(view_plddt._make_html())
+        print(f"Saved pLDDT ribbon plot to: {plddt_output_path}")
 
     alignments_path = os.path.join(
         output_dir,
