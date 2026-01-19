@@ -14,6 +14,8 @@ pdb_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE4_assembly.pdb"
 # pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE8-assembly1.cif"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/6WXB-assembly1.cif"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ7-assembly1.cif"
+pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/viro3d_CF-CAA24272.1_9914_relaxed.pdb"
+pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/EPI4748783_HA_A_England_01837755_2025_EPI_ISL_20210731_J_2_4_1_model.cif"
 
 sequences = read_sequences_to_dict(
     "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
@@ -57,6 +59,41 @@ def _alignment_indices(alignment):
         return user_indices, pdb_indices
 
 
+def _format_res_id(res_id):
+    resseq = res_id[1]
+    icode = res_id[2].strip()
+    return f"{resseq}{icode}" if icode else str(resseq)
+
+
+def _build_gapped_alignment(seq_a, seq_b, aligned_coords):
+    aligned_a = []
+    aligned_b = []
+    a_pos = 0
+    b_pos = 0
+
+    for (a_start, a_end), (b_start, b_end) in zip(*aligned_coords):
+        if a_start > a_pos:
+            aligned_a.append(seq_a[a_pos:a_start])
+            aligned_b.append("-" * (a_start - a_pos))
+        if b_start > b_pos:
+            aligned_a.append("-" * (b_start - b_pos))
+            aligned_b.append(seq_b[b_pos:b_start])
+
+        aligned_a.append(seq_a[a_start:a_end])
+        aligned_b.append(seq_b[b_start:b_end])
+        a_pos = a_end
+        b_pos = b_end
+
+    if a_pos < len(seq_a):
+        aligned_a.append(seq_a[a_pos:])
+        aligned_b.append("-" * (len(seq_a) - a_pos))
+    if b_pos < len(seq_b):
+        aligned_a.append("-" * (len(seq_b) - b_pos))
+        aligned_b.append(seq_b[b_pos:])
+
+    return "".join(aligned_a), "".join(aligned_b)
+
+
 def summarize_pdb_alignment(pdb_file, user_sequence, mutation_list=None, threshold_score=50):
     chain_data = _extract_pdb_chain_sequences(pdb_file)
     mutation_list = mutation_list or []
@@ -71,10 +108,16 @@ def summarize_pdb_alignment(pdb_file, user_sequence, mutation_list=None, thresho
     for chain_id, (pdb_seq, residue_ids) in chain_data.items():
         alignment = align_sequences(user_sequence, pdb_seq, mode="local", open_gap_score=-10, extend_gap_score=-0.5)
         if alignment.score < threshold_score:
+            print(f"Skipping chain {chain_id} (Score: {alignment.score}): Sequence {pdb_seq}")
             continue
 
+        pdb_first_res = _format_res_id(residue_ids[0])
+        pdb_last_res = _format_res_id(residue_ids[-1])
+        print(f"PDB residue range (chain {chain_id}): {pdb_first_res}-{pdb_last_res}")
+
         user_indices, pdb_indices = _alignment_indices(alignment)
-        if not user_indices:
+        if len(user_indices) == 0:
+            print(f"Skipping chain {chain_id} (No aligned residues): Sequence {pdb_seq}")
             continue
 
         user_min = min(user_indices) + 1
@@ -87,13 +130,61 @@ def summarize_pdb_alignment(pdb_file, user_sequence, mutation_list=None, thresho
         print(f"Aligned region (chain {chain_id}): user {user_min}-{user_max} -> PDB {pdb_min_res}-{pdb_max_res}")
 
         user_to_pdb = dict(zip(user_indices, pdb_indices))
-        alignment_maps[chain_id] = (user_to_pdb, residue_ids)
+
+        if pdb_min > 0:
+            pdb_prefix_seq = pdb_seq[:pdb_min]
+            pdb_prefix_start = _format_res_id(residue_ids[0])
+            pdb_prefix_end = _format_res_id(residue_ids[pdb_min - 1])
+            print(
+                f"Unaligned PDB prefix (chain {chain_id}, residues {pdb_prefix_start}-{pdb_prefix_end}): {pdb_prefix_seq}"
+            )
+        else:
+            print(f"Unaligned PDB prefix (chain {chain_id}): none")
+
+        if pdb_max + 1 < len(pdb_seq):
+            pdb_suffix_seq = pdb_seq[pdb_max + 1 :]
+            pdb_suffix_start = _format_res_id(residue_ids[pdb_max + 1])
+            pdb_suffix_end = _format_res_id(residue_ids[-1])
+            print(
+                f"Unaligned PDB suffix (chain {chain_id}, residues {pdb_suffix_start}-{pdb_suffix_end}): {pdb_suffix_seq}"
+            )
+        else:
+            print(f"Unaligned PDB suffix (chain {chain_id}): none")
+
+        if user_min > 1:
+            print(
+                f"Unaligned user prefix (positions 1-{user_min - 1}): {user_sequence[:user_min - 1]}"
+            )
+        else:
+            print("Unaligned user prefix: none")
+
+        if user_max < len(user_sequence):
+            print(
+                f"Unaligned user suffix (positions {user_max + 1}-{len(user_sequence)}): {user_sequence[user_max:]}"
+            )
+        else:
+            print("Unaligned user suffix: none")
+
+        aligned_user, aligned_pdb = _build_gapped_alignment(
+            user_sequence,
+            pdb_seq,
+            alignment.aligned,
+        )
+
+        alignment_maps[chain_id] = {
+            "user_to_pdb": user_to_pdb,
+            "residue_ids": residue_ids,
+            "aligned_user": aligned_user,
+            "aligned_pdb": aligned_pdb,
+        }
 
     if mutation_positions:
         print("\nMutation mapping to PDB (by chain):")
         for mut, pos in mutation_positions:
             mapped = False
-            for chain_id, (user_to_pdb, residue_ids) in alignment_maps.items():
+            for chain_id, chain_info in alignment_maps.items():
+                user_to_pdb = chain_info["user_to_pdb"]
+                residue_ids = chain_info["residue_ids"]
                 user_idx = pos - 1
                 if user_idx in user_to_pdb:
                     pdb_idx = user_to_pdb[user_idx]
@@ -108,8 +199,11 @@ def summarize_pdb_alignment(pdb_file, user_sequence, mutation_list=None, thresho
 
 def flag_outside_mutations(mutation_list, alignment_maps):
     mapped_positions = set()
-    for user_to_pdb, _ in alignment_maps.values():
-        mapped_positions.update(user_to_pdb.keys())
+    for chain_info in alignment_maps.values():
+        if isinstance(chain_info, dict):
+            mapped_positions.update(chain_info["user_to_pdb"].keys())
+        else:
+            mapped_positions.update(chain_info[0].keys())
 
     flagged = []
     for mut in mutation_list:
@@ -169,5 +263,19 @@ if __name__ == "__main__":
     with open(output_path, "w") as f:
         f.write(view._make_html())
     print(f"Saved PDB plot to: {output_path}")
+
+    alignments_path = os.path.join(
+        output_dir,
+        f"{pdb_name}_{lineage_source}_to_{lineage_target}_alignments.fasta",
+    )
+    with open(alignments_path, "w") as f:
+        for chain_id, chain_info in alignment_maps.items():
+            aligned_user = chain_info["aligned_user"]
+            aligned_pdb = chain_info["aligned_pdb"]
+            f.write(f">user_{lineage_target}_chain_{chain_id}\n")
+            f.write(f"{aligned_user}\n")
+            f.write(f">pdb_{pdb_name}_chain_{chain_id}\n")
+            f.write(f"{aligned_pdb}\n")
+    print(f"Saved alignment FASTA to: {alignments_path}")
     
     
