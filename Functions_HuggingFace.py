@@ -1108,7 +1108,8 @@ def align_sequences(reference_seq, query_seq, mode='local', open_gap_score=-10, 
 def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold_score=50, 
                                coordinate_map=None, background_values=None, title=None, canonical_map=None,
                                surface_opacity=None, surface_color="#dddddd", mutation_surface_opacity=None,
-                               hide_cartoon=False):
+                               hide_cartoon=False, mutation_surface_probe_radius=None,
+                               base_surface_exclude_mutations=False):
     """
     Maps user-defined mutations onto a PDB structure (trimer friendly).
     
@@ -1132,6 +1133,9 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
         surface_color (str, optional): Hex color for the global surface (default: "#dddddd").
         mutation_surface_opacity (float, optional): Opacity for colored mutation surface patches.
         hide_cartoon (bool, optional): If True, hide the ribbon/cartoon representation.
+        mutation_surface_probe_radius (float, optional): Probe radius for mutation surface patches.
+        base_surface_exclude_mutations (bool, optional): If True, mask mutation residues from the
+            base surface so colored patches aren't shrouded.
     """
     
     # 1. Parse Mutation Indices from the list (e.g. 'A123T' -> 122 (0-based))
@@ -1142,15 +1146,21 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
 
     
     # If more than 8 mutations, use tab20 (20 colors), otherwise use Dark2 (8 colors)
+    #    Determine palette based on list length
     if len(mutation_list) > 8:
-        colormap = plt.cm.tab20
-        n_colors = 20
+        # tab20 is a Colormap object; we sample it
+        colors = [plt.cm.tab20(i) for i in range(20)]
+
     else:
-        colormap = plt.cm.Dark2
-        n_colors = 8
-    
-    colors = [colormap(i / n_colors) for i in range(n_colors)]
-    colors_hex = ['#%02x%02x%02x' % (int(r*255), int(g*255), int(b*255)) for r, g, b, a in colors]
+        # Dark2 is a Colormap; we sample it
+        colors = [plt.cm.Dark2(i) for i in range(8)]
+    colors_hex = []
+    for color in colors:
+        if len(color) == 4:
+            r, g, b, _ = color
+        else:
+            r, g, b = color
+        colors_hex.append('#%02x%02x%02x' % (int(r * 255), int(g * 255), int(b * 255)))
     mutation_colors = {mut: colors_hex[i % len(colors_hex)] for i, mut in enumerate(mutation_list)}
 
     for mut in mutation_list:
@@ -1332,7 +1342,19 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
 
     # Optional global molecular surface (base layer)
     if surface_opacity is not None:
-        view.addSurface(py3Dmol.SAS, {"opacity": surface_opacity, "color": surface_color})
+        base_surface_selection = None
+        if base_surface_exclude_mutations and residues_to_highlight:
+            exclude_resis = []
+            for residues in residues_to_highlight.values():
+                for res_num, _ in residues:
+                    exclude_resis.append(int(res_num))
+            if exclude_resis:
+                base_surface_selection = {"not": {"resi": exclude_resis}}
+        view.addSurface(
+            py3Dmol.SAS,
+            {"opacity": surface_opacity, "color": surface_color},
+            base_surface_selection,
+        )
     
     # Add style for non-protein atoms (e.g. glycans) - make them visible but neutral
     # 'hetflag': True selects heteroatoms (ligands, water, etc.)
@@ -1381,9 +1403,12 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
                 patch_opacity = mutation_surface_opacity
             else:
                 patch_opacity = surface_opacity if surface_opacity is not None else 0.5
+            patch_options = {'opacity': patch_opacity, 'color': color}
+            if mutation_surface_probe_radius is not None:
+                patch_options['probeRadius'] = mutation_surface_probe_radius
             view.addSurface(
                 py3Dmol.SAS,
-                {'opacity': patch_opacity, 'color': color},
+                patch_options,
                 selector
             )
 
@@ -1512,6 +1537,65 @@ def visualise_mutations_on_pdb(pdb_file, user_sequence, mutation_list, threshold
     view._make_html = make_html_with_legend
     
     return view
+
+def export_view_to_png(view, output_path, width=3000, height=3000, view_state=None, zoom_to=True):
+    """
+    Export a py3Dmol view to a high-resolution PNG file.
+
+    Args:
+        view (py3Dmol.view): The view instance to export.
+        output_path (str): Destination PNG file path.
+        width (int): Render width in pixels.
+        height (int): Render height in pixels.
+        view_state (list | None): Optional camera state from ``view.getView()``.
+        zoom_to (bool): If True, call ``view.zoomTo()`` before export.
+
+    Returns:
+        bool: True if a PNG was written, False otherwise.
+    """
+    if view_state is not None:
+        try:
+            view.setView(view_state)
+        except Exception:
+            pass
+
+    if zoom_to:
+        try:
+            view.zoomTo()
+        except Exception:
+            pass
+
+    if hasattr(view, "resize"):
+        try:
+            view.resize(width, height)
+        except Exception:
+            pass
+
+    try:
+        png_data = view.png()
+    except Exception:
+        print("PNG export failed: view.png() is unavailable in this environment.")
+        return False
+
+    if png_data is None:
+        print("PNG export failed: no image data returned.")
+        return False
+
+    import base64
+
+    if isinstance(png_data, bytes):
+        png_bytes = png_data
+    elif isinstance(png_data, str):
+        if png_data.startswith("data:image/png;base64,"):
+            png_data = png_data.split(",", 1)[1]
+        png_bytes = base64.b64decode(png_data)
+    else:
+        print("PNG export failed: unsupported image data format.")
+        return False
+
+    with open(output_path, "wb") as f:
+        f.write(png_bytes)
+    return True
 
 def mutations_to_canonical(mutations, h3_map):
     """

@@ -17,7 +17,8 @@ pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/6WXB-assembly1.cif"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ7-assembly1.cif"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/viro3d_CF-CAA24272.1_9914_relaxed.pdb"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/EPI4748783_HA_A_England_01837755_2025_EPI_ISL_20210731_J_2_4_1_model.cif"
-
+pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ6-assembly1.cif"
+pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ8-assembly1.cif"
 sequences = read_sequences_to_dict(
     "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
 )
@@ -313,6 +314,8 @@ if __name__ == "__main__":
         surface_opacity=0.7,
         surface_color="#dddddd",
         mutation_surface_opacity=1.0,
+        mutation_surface_probe_radius=3.0,
+        base_surface_exclude_mutations=True,
     )
     view_surface.show()
 
@@ -325,9 +328,25 @@ if __name__ == "__main__":
         surface_opacity=1.0,
         surface_color="#dddddd",
         mutation_surface_opacity=1.0,
+        mutation_surface_probe_radius=3.0,
+        base_surface_exclude_mutations=True,
         hide_cartoon=True,
     )
     view_surface_only.show()
+
+    surface_only_view_state = None
+    surface_only_png_path = os.path.join(
+        output_dir,
+        f"{pdb_name}_{lineage_source}_to_{lineage_target}_mutations_surface_only.png",
+    )
+    export_view_to_png(
+        view_surface_only,
+        surface_only_png_path,
+        width=3000,
+        height=3000,
+        view_state=surface_only_view_state,
+        zoom_to=True,
+    )
 
     chain_plddt = _extract_plddt_by_chain(pdb_path)
     plddt_sums = {}
