@@ -1597,6 +1597,242 @@ def export_view_to_png(view, output_path, width=3000, height=3000, view_state=No
         f.write(png_bytes)
     return True
 
+# def _get_plane_from_points(points):
+#     if len(points) < 3:
+#         raise ValueError("Need at least 3 points to define a plane.")
+#     centroid = np.mean(points, axis=0)
+#     centered = points - centroid
+#     _, _, vh = np.linalg.svd(centered, full_matrices=False)
+#     normal = vh[-1]
+#     normal = normal / np.linalg.norm(normal)
+#     return centroid, normal
+
+# def _rotation_matrix_from_vectors(vec_a, vec_b):
+#     a = vec_a / np.linalg.norm(vec_a)
+#     b = vec_b / np.linalg.norm(vec_b)
+#     v = np.cross(a, b)
+#     c = np.dot(a, b)
+#     if np.isclose(c, 1.0):
+#         return np.eye(3)
+#     if np.isclose(c, -1.0):
+#         axis = np.array([1.0, 0.0, 0.0])
+#         if np.allclose(a, axis):
+#             axis = np.array([0.0, 1.0, 0.0])
+#         v = np.cross(a, axis)
+#         v = v / np.linalg.norm(v)
+#         return _rotation_matrix_from_vectors(a, -a + 2 * v * np.dot(v, a))
+#     s = np.linalg.norm(v)
+#     vx = np.array(
+#         [
+#             [0, -v[2], v[1]],
+#             [v[2], 0, -v[0]],
+#             [-v[1], v[0], 0],
+#         ]
+#     )
+#     r = np.eye(3) + vx + vx.dot(vx) * ((1 - c) / (s * s))
+#     return r
+
+# def _rotation_matrix_axis_angle(axis, angle_rad):
+#     axis = np.array(axis, dtype=float)
+#     axis = axis / np.linalg.norm(axis)
+#     x, y, z = axis
+#     c = np.cos(angle_rad)
+#     s = np.sin(angle_rad)
+#     c1 = 1 - c
+#     return np.array(
+#         [
+#             [c + x * x * c1, x * y * c1 - z * s, x * z * c1 + y * s],
+#             [y * x * c1 + z * s, c + y * y * c1, y * z * c1 - x * s],
+#             [z * x * c1 - y * s, z * y * c1 + x * s, c + z * z * c1],
+#         ]
+#     )
+
+# def _transform_structure(structure, rotation=None, translation=None, center=None):
+#     rotation = np.eye(3) if rotation is None else rotation
+#     translation = np.zeros(3) if translation is None else np.array(translation, dtype=float)
+#     if center is not None:
+#         center = np.array(center, dtype=float)
+#         translation = translation + center - rotation.dot(center)
+#     structure.transform(rotation, translation)
+
+# def embed_membrane_to_protein_plane(
+#     protein_pdb_path,
+#     membrane_pdb_path,
+#     residue_start=526,
+#     residue_end=541,
+#     output_membrane_pdb_path=None,
+#     rotate_membrane=True,
+#     inplane_align=True,
+#     inplane_rotation_deg=None,
+# ):
+#     if protein_pdb_path.lower().endswith((".cif", ".mmcif")):
+#         protein_parser = PDB.MMCIFParser(QUIET=True)
+#     else:
+#         protein_parser = PDB.PDBParser(QUIET=True)
+#     protein_structure = protein_parser.get_structure("protein", protein_pdb_path)
+
+#     ca_points = []
+#     for model in protein_structure:
+#         for chain in model:
+#             for residue in chain:
+#                 if not PDB.is_aa(residue):
+#                     continue
+#                 resseq = residue.id[1]
+#                 if residue_start <= resseq <= residue_end and "CA" in residue:
+#                     ca_points.append(residue["CA"].get_coord())
+
+#     if len(ca_points) < 3:
+#         raise ValueError("Not enough CA atoms found for the specified residue range.")
+
+#     ca_points = np.array(ca_points)
+#     protein_plane_center, protein_plane_normal = _get_plane_from_points(ca_points)
+#     protein_axis = None
+#     try:
+#         centered = ca_points - protein_plane_center
+#         _, _, vh = np.linalg.svd(centered, full_matrices=False)
+#         protein_axis = vh[0]
+#     except Exception:
+#         protein_axis = None
+
+#     protein_all_points = []
+#     for model in protein_structure:
+#         for chain in model:
+#             for residue in chain:
+#                 if not PDB.is_aa(residue):
+#                     continue
+#                 if "CA" in residue:
+#                     protein_all_points.append(residue["CA"].get_coord())
+#     if protein_all_points:
+#         protein_all_points = np.array(protein_all_points)
+#         protein_center = protein_all_points.mean(axis=0)
+#         tail_vector = protein_plane_center - protein_center
+#         if np.dot(protein_plane_normal, tail_vector) < 0:
+#             protein_plane_normal = -protein_plane_normal
+
+#     membrane_parser = PDB.PDBParser(QUIET=True)
+#     membrane_structure = membrane_parser.get_structure("membrane", membrane_pdb_path)
+
+#     membrane_points = []
+#     phosphate_points = []
+#     membrane_resnames = set()
+#     for model in membrane_structure:
+#         for chain in model:
+#             for residue in chain:
+#                 resname = residue.get_resname()
+#                 if resname == "HOH":
+#                     continue
+#                 membrane_resnames.add(resname)
+#                 for atom in residue.get_atoms():
+#                     coord = atom.get_coord()
+#                     membrane_points.append(coord)
+#                     atom_name = atom.get_name().strip()
+#                     if atom_name.startswith("P"):
+#                         phosphate_points.append(coord)
+
+#     if len(membrane_points) < 3:
+#         raise ValueError("Not enough membrane atoms to define a plane.")
+
+#     membrane_points = np.array(membrane_points)
+#     phosphate_points = np.array(phosphate_points) if phosphate_points else None
+#     plane_points = phosphate_points if phosphate_points is not None and len(phosphate_points) >= 3 else membrane_points
+
+#     membrane_plane_center, membrane_plane_normal = _get_plane_from_points(plane_points)
+#     membrane_axis = None
+#     try:
+#         centered = plane_points - membrane_plane_center
+#         _, _, vh = np.linalg.svd(centered, full_matrices=False)
+#         membrane_axis = vh[0]
+#     except Exception:
+#         membrane_axis = None
+
+#     protein_inplane_axis = None
+#     try:
+#         chain_centers = []
+#         for model in protein_structure:
+#             for chain in model:
+#                 chain_points = []
+#                 for residue in chain:
+#                     if not PDB.is_aa(residue):
+#                         continue
+#                     resseq = residue.id[1]
+#                     if residue_start <= resseq <= residue_end and "CA" in residue:
+#                         chain_points.append(residue["CA"].get_coord())
+#                 if chain_points:
+#                     chain_centers.append(np.mean(chain_points, axis=0))
+#         if len(chain_centers) >= 2:
+#             vec = chain_centers[1] - chain_centers[0]
+#             vec = vec - protein_plane_normal * np.dot(vec, protein_plane_normal)
+#             if np.linalg.norm(vec) > 1e-6:
+#                 protein_inplane_axis = vec / np.linalg.norm(vec)
+#     except Exception:
+#         protein_inplane_axis = None
+
+#     if rotate_membrane:
+#         rotation = _rotation_matrix_from_vectors(membrane_plane_normal, protein_plane_normal)
+#         _transform_structure(
+#             membrane_structure,
+#             rotation=rotation,
+#             translation=np.zeros(3),
+#             center=membrane_plane_center,
+#         )
+#         membrane_plane_normal = rotation.dot(membrane_plane_normal)
+#         if membrane_axis is not None:
+#             membrane_axis = rotation.dot(membrane_axis)
+
+#     if inplane_align and membrane_axis is not None:
+#         target_axis = protein_inplane_axis
+#         if target_axis is None and protein_axis is not None:
+#             target_axis = protein_axis - protein_plane_normal * np.dot(protein_axis, protein_plane_normal)
+#             if np.linalg.norm(target_axis) > 1e-6:
+#                 target_axis = target_axis / np.linalg.norm(target_axis)
+#         if target_axis is None:
+#             target_axis = None
+
+#         membrane_proj = membrane_axis - membrane_plane_normal * np.dot(membrane_axis, membrane_plane_normal)
+#         if target_axis is not None and np.linalg.norm(membrane_proj) > 1e-6:
+#             membrane_proj = membrane_proj / np.linalg.norm(membrane_proj)
+#             cross_val = np.cross(membrane_proj, target_axis)
+#             sign = np.sign(np.dot(cross_val, membrane_plane_normal))
+#             angle = np.arccos(np.clip(np.dot(membrane_proj, target_axis), -1.0, 1.0))
+#             angle = angle * sign
+#             if inplane_rotation_deg is not None:
+#                 angle = np.deg2rad(inplane_rotation_deg)
+#             if not np.isclose(angle, 0.0):
+#                 rot_inplane = _rotation_matrix_axis_angle(membrane_plane_normal, angle)
+#                 _transform_structure(
+#                     membrane_structure,
+#                     rotation=rot_inplane,
+#                     translation=np.zeros(3),
+#                     center=membrane_plane_center,
+#                 )
+
+#     rotated_points = []
+#     for model in membrane_structure:
+#         for chain in model:
+#             for residue in chain:
+#                 if residue.get_resname() == "HOH":
+#                     continue
+#                 for atom in residue.get_atoms():
+#                     rotated_points.append(atom.get_coord())
+#     rotated_points = np.array(rotated_points)
+#     rotated_center = rotated_points.mean(axis=0)
+
+#     translation = protein_plane_center - rotated_center
+#     membrane_structure.transform(np.eye(3), translation)
+
+#     if output_membrane_pdb_path:
+#         io = PDBIO()
+#         io.set_structure(membrane_structure)
+#         io.save(output_membrane_pdb_path)
+
+#     return {
+#         "membrane_structure": membrane_structure,
+#         "membrane_resnames": sorted(membrane_resnames),
+#         "protein_plane_center": protein_plane_center,
+#         "protein_plane_normal": protein_plane_normal,
+#         "output_membrane_pdb_path": output_membrane_pdb_path,
+#     }
+
 def mutations_to_canonical(mutations, h3_map):
     """
     Convert mutation labels from sequence numbering to canonical H3 numbering.

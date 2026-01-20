@@ -48,7 +48,7 @@ sub_mod='ESM2-H3'
 sub_mod='ESM2-HA80'
 # sub_mod="ESM_C_600M" <- doesn't work with old esm libs
 
-query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
+query_path = "home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
 
 reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 

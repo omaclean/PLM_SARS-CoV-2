@@ -48,9 +48,12 @@ base_sequence=protein_sequences[base_lineage_index]
 print("Base sequence:",base_sequence)
 
 probability_matrix_file='/home3/oml4h/PLM_SARS-CoV-2/Results/test/J.2.4/J.2.4_probability_matrix.csv'
-
+probability_matrix_file='/home3/oml4h/PLM_SARS-CoV-2/Results/test/ESM2_OG/J.2.4_probability_matrix.csv'
+#/home3/oml4h/PLM_SARS-CoV-2/Results/test/ESM2_OG/J.2_int_probability_matrix.csv
 
 outdir='/home3/oml4h/PLM_SARS-CoV-2/Results/test/J.2.4/prob_mutations'
+outdir='/home3/oml4h/PLM_SARS-CoV-2/Results/test/J.2.4/prob_mutations_OG_ESM2'
+
 import os
 os.makedirs(outdir, exist_ok=True)
 # import without header, have it as it's own row

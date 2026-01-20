@@ -17,12 +17,16 @@ pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/6WXB-assembly1.cif"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ7-assembly1.cif"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/viro3d_CF-CAA24272.1_9914_relaxed.pdb"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/EPI4748783_HA_A_England_01837755_2025_EPI_ISL_20210731_J_2_4_1_model.cif"
-pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ6-assembly1.cif"
-pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ8-assembly1.cif"
+# pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ6-assembly1.cif"
+# pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ8-assembly1.cif"
+membrane_pdb_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/membrane_dppc128.pdb"
 sequences = read_sequences_to_dict(
     "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
 )
 reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
+
+output_dir = "/home3/oml4h/PLM_SARS-CoV-2/Results/structure_play"
+os.makedirs(output_dir, exist_ok=True)
 
 
 def _extract_pdb_chain_sequences(pdb_file):
@@ -334,6 +338,51 @@ if __name__ == "__main__":
     )
     view_surface_only.show()
 
+    # membrane_output_path = os.path.join(
+    #     output_dir,
+    #     f"{os.path.basename(pdb_path)}_membrane_embedded.pdb",
+    # )
+    # membrane_embed = embed_membrane_to_protein_plane(
+    #     pdb_path,
+    #     membrane_pdb_path,
+    #     residue_start=526,
+    #     residue_end=541,
+    #     output_membrane_pdb_path=membrane_output_path,
+    #     rotate_membrane=True,
+    #     inplane_align=True,
+    # )
+    # membrane_resnames = membrane_embed["membrane_resnames"]
+
+    # view_surface_membrane = visualise_mutations_on_pdb(
+    #     pdb_path,
+    #     user_seq,
+    #     mutations_flagged,
+    #     title=f"{target_id} mutations (surface + membrane)",
+    #     canonical_map=h3_map_with_ha2,
+    #     surface_opacity=0.7,
+    #     surface_color="#dddddd",
+    #     mutation_surface_opacity=1.0,
+    #     mutation_surface_probe_radius=3.0,
+    #     base_surface_exclude_mutations=True,
+    # )
+    # with open(membrane_output_path, "r") as f:
+    #     view_surface_membrane.addModel(f.read(), "pdb")
+    # if membrane_resnames:
+    #     view_surface_membrane.addStyle(
+    #         {"resn": membrane_resnames},
+    #         {"stick": {"color": "#7fcdbb", "radius": 0.15}},
+    #     )
+    #     view_surface_membrane.addSurface(
+    #         py3Dmol.SAS,
+    #         {"opacity": 0.5, "color": "#7fcdbb"},
+    #         {"resn": membrane_resnames},
+    #     )
+    # view_surface_membrane.show()
+
+    pdb_name = os.path.basename(pdb_path)
+    lineage_source = reference_id.split("|")[-1]
+    lineage_target = target_id.split("|")[-1]
+
     surface_only_view_state = None
     surface_only_png_path = os.path.join(
         output_dir,
@@ -393,12 +442,7 @@ if __name__ == "__main__":
     else:
         print("No pLDDT values detected in structure; skipping pLDDT ribbon plot.")
 
-    output_dir = "/home3/oml4h/PLM_SARS-CoV-2/Results/structure_play"
-    os.makedirs(output_dir, exist_ok=True)
-    pdb_name = os.path.basename(pdb_path)
     
-    lineage_source=reference_id.split("|")[-1]
-    lineage_target = target_id.split("|")[-1]
     output_path = os.path.join(
         output_dir,
         f"{pdb_name}_{lineage_source}_to_{lineage_target}_mutations_structure.html",
@@ -422,6 +466,14 @@ if __name__ == "__main__":
     with open(surface_only_output_path, "w") as f:
         f.write(view_surface_only._make_html())
     print(f"Saved surface-only plot to: {surface_only_output_path}")
+
+    # surface_membrane_output_path = os.path.join(
+    #     output_dir,
+    #     f"{pdb_name}_{lineage_source}_to_{lineage_target}_mutations_surface_membrane.html",
+    # )
+    # with open(surface_membrane_output_path, "w") as f:
+    #     f.write(view_surface_membrane._make_html())
+    # print(f"Saved surface+membrane plot to: {surface_membrane_output_path}")
 
     if view_plddt is not None:
         plddt_output_path = os.path.join(

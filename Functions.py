@@ -151,6 +151,50 @@ def embed_sequence(sequence,model,device,model_layers,batch_converter,alphabet):
     base_logits = lsoftmax((results["logits"][0]).to(device="cpu"))
     return results, base_logits, base_mean_embedding,full_embedding
 
+def get_mutation_prob_matrix(reference_protein, model, model_layers, device, batch_converter, alphabet):
+    """
+    Embed a reference protein sequence and return a 20 × Length mutation probability matrix.
+    Each column represents a position in the sequence, and each row represents one of the
+    20 standard amino acids. Values represent the model's predicted probability of each
+    amino acid at each position.
+
+    Args:
+        reference_protein (str): Reference amino acid sequence to analyze.
+        model (PreTrainedModel): ESM model instance.
+        model_layers (int): Hidden-state index used for embeddings.
+        device (torch.device): Device for computation.
+        batch_converter (callable): Token converter from the alphabet.
+        alphabet (Any): Alphabet helper exposing tokens and indices.
+
+    Returns:
+        dict: Contains:
+            - 'mutation_matrix': numpy.ndarray of shape (20, len(sequence))
+            - 'amino_acids': list of 20 amino acid letters (row labels)
+            - 'sequence': the reference protein sequence
+            - 'positions': list of 1-indexed positions (column labels)
+    """
+    amino_acids = ["A", "R", "N", "D", "C", "Q", "E", "G", "H", "I", "L", "K", "M", "F", "P", "S", "T", "W", "Y", "V"]
+
+    results, reference_logits, reference_mean_embedding, full_embedding = embed_sequence(
+        reference_protein, model, device, model_layers, batch_converter, alphabet
+    )
+
+    # reference_logits are log-probabilities (log-softmax) including BOS/EOS
+    aa_logits = reference_logits[1 : len(reference_protein) + 1]
+    probs = torch.exp(aa_logits)
+
+    aa_indices = [alphabet.get_idx(aa) for aa in amino_acids]
+    mutation_matrix = probs[:, aa_indices].T
+
+    positions = list(range(1, len(reference_protein) + 1))
+
+    return {
+        'mutation_matrix': mutation_matrix.numpy(),
+        'amino_acids': amino_acids,
+        'sequence': reference_protein,
+        'positions': positions
+    }
+
 def process_protein_sequence(sequence,model,model_layers,batch_converter,alphabet,device):
     #Embed Sequence
     base_seq = sequence
