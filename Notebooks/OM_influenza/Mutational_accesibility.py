@@ -241,9 +241,9 @@ print(f"P(AAA -> GGG): {codon_mutation_df.loc['AAA', 'GGG']}")
 # Define Genetic Code (DNA -> Amino Acid)
 standard_table = CodonTable.unambiguous_dna_by_id[1]
 genetic_code = standard_table.forward_table.copy()
-# Add stop codons mapped to '_'
+# Add stop codons mapped to '*'
 for stop_codon in standard_table.stop_codons:
-    genetic_code[stop_codon] = '_'
+    genetic_code[stop_codon] = '*'
 
 
 # Reverse map: Amino Acid -> List of Codons
@@ -254,6 +254,84 @@ for codon, aa in genetic_code.items():
         aa_to_codons[aa] = []
     aa_to_codons[aa].append(codon)
 
+# Build codon -> amino acid (including stop) probability matrix (64 x 21)
+aa_to_codons_all = {}
+for codon, aa in genetic_code.items():
+    if aa not in aa_to_codons_all:
+        aa_to_codons_all[aa] = []
+    aa_to_codons_all[aa].append(codon)
+# %% 
+target_aas = sorted(aa_to_codons_all.keys(), key=lambda x: (x == '*', x))
+
+# Order codons so rows follow the amino-acid ordering (diagonal-like grouping)
+ordered_codons = []
+for aa in target_aas:
+    ordered_codons.extend(sorted(aa_to_codons_all[aa]))
+
+codon_to_aa_matrix = pd.DataFrame(0.0, index=ordered_codons, columns=target_aas)
+
+for codon_from in ordered_codons:
+    for aa in target_aas:
+        total_prob = 0.0
+        for codon_to in aa_to_codons_all[aa]:
+            total_prob += codon_mutation_df.loc[codon_from, codon_to]
+        codon_to_aa_matrix.loc[codon_from, aa] = total_prob
+
+# Mask codons mapping to their own amino acid
+for codon_from in ordered_codons:
+    own_aa = genetic_code.get(codon_from)
+    if own_aa in codon_to_aa_matrix.columns:
+        codon_to_aa_matrix.loc[codon_from, own_aa] = np.nan
+
+plt.figure(figsize=(18, 10))
+ax = sns.heatmap(
+    codon_to_aa_matrix.T,
+    cmap="viridis",
+    cbar_kws={"label": "Codon → Amino Acid probability"}
+)
+ax.set_xlabel("Starting Codon", fontsize=16)
+ax.set_ylabel("Target Amino Acid (including stop '*')", fontsize=16)
+ax.set_title("H3N2 Codon → Amino Acid Probability Matrix (64×21)", fontsize=20)
+ax.tick_params(axis="both", labelsize=12)
+ytick_labels = ["*" if lab == "-" else lab for lab in target_aas]
+ax.set_yticklabels(ytick_labels, rotation=279)
+plt.tight_layout()
+plt.savefig(f"{outdir}/codon_to_amino_acid_matrix_heatmap.png", dpi=300)
+plt.show()
+
+# Ratio of most to least likely non-synonymous change
+codon_to_aa_values = codon_to_aa_matrix.values
+valid_non_syn = codon_to_aa_values[np.isfinite(codon_to_aa_values) & (codon_to_aa_values > 0)]
+if valid_non_syn.size:
+    ratio_max_min = valid_non_syn.max() / valid_non_syn.min()
+    print(f"Ratio (max/min) of non-synonymous change probabilities: {ratio_max_min:.3e}")
+else:
+    print("No non-synonymous probabilities found for ratio calculation.")
+    
+# %% 
+# Manual sanity checks for codon→AA probabilities
+def _raw_codon_to_aa_prob(codon_from, aa):
+    return sum(
+        codon_mutation_df.loc[codon_from, codon_to]
+        for codon_to in aa_to_codons_all.get(aa, [])
+    )
+
+test_codons = ["AAA", "ATG", "TGG", "TAA"]
+test_aas = ["A", "G", "L", "*", "W"]
+
+print("\nManual codon→AA checks (raw vs matrix):")
+for codon_from in test_codons:
+    if codon_from not in codon_to_aa_matrix.index:
+        continue
+    for aa in test_aas:
+        if aa not in codon_to_aa_matrix.columns:
+            continue
+        raw_val = _raw_codon_to_aa_prob(codon_from, aa)
+        matrix_val = codon_to_aa_matrix.loc[codon_from, aa]
+        diff = np.abs(raw_val - matrix_val)
+        print(f"  {codon_from} → {aa}: raw={raw_val:.3e}, matrix={matrix_val:.3e}, |Δ|={diff:.3e}")
+
+# %% 
 # Get reference nucleotide sequence
 ref_nuc_seq = str(nuc_sequences[base_lineage_index].seq)
 # Ensure it's uppercase and uses T instead of U
