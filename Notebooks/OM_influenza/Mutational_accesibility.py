@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 from scipy.stats import pearsonr, spearmanr
 from adjustText import adjust_text
 
@@ -144,6 +145,59 @@ print("H1N1 Matrix:\n", h1n1_transitions)
 print("-" * 30)
 print(f"H3N2 Matrix Shape: {h3n2_transitions.shape}")
 print("H3N2 Matrix:\n", h3n2_transitions)
+# %%
+# Heatmaps for H3N2 transition matrix (4x4)
+h3n2_heat = h3n2_transitions.astype(float).copy()
+np.fill_diagonal(h3n2_heat, np.nan)
+
+cmap_linear = plt.cm.viridis.copy()
+cmap_linear.set_bad(color="white")
+
+plt.figure(figsize=(5, 4.5))
+ax = sns.heatmap(
+    h3n2_heat,
+    annot=True,
+    fmt=".1e",
+    cmap=cmap_linear,
+    xticklabels=bases,
+    yticklabels=bases,
+    cbar_kws={"label": "Mutation rate"}
+)
+ax.set_xlabel("To")
+ax.set_ylabel("From")
+ax.set_title("H3N2 Nucleotide Transition Matrix (Diagonal Masked)")
+plt.tight_layout()
+plt.savefig(f"{outdir}/h3n2_transition_matrix_heatmap.png", dpi=300)
+plt.show()
+
+# Log-scaled palette (diagonals masked to white)
+nonzero_vals = h3n2_heat[~np.isnan(h3n2_heat) & (h3n2_heat > 0)]
+vmin = nonzero_vals.min() if nonzero_vals.size else 1e-8
+vmax = nonzero_vals.max() if nonzero_vals.size else 1.0
+
+cmap_log = plt.cm.magma.copy()
+cmap_log.set_bad(color="white")
+
+plt.figure(figsize=(5, 4.5))
+ax = sns.heatmap(
+    h3n2_heat,
+    annot=True,
+    fmt=".1e",
+    cmap=cmap_log,
+    norm=LogNorm(vmin=vmin, vmax=vmax),
+    xticklabels=bases,
+    yticklabels=bases,
+    cbar_kws={"label": "Mutation rate (log scale)"}
+)
+ax.set_xlabel("To")
+ax.set_ylabel("From")
+ax.set_title("H3N2 Nucleotide Transition Matrix (Log Scale)")
+plt.tight_layout()
+plt.savefig(f"{outdir}/h3n2_transition_matrix_heatmap_log.png", dpi=300)
+plt.show()
+# %%
+
+# %%
 
 # create a 64 x 64 matrix for codon to codon mutation rates based on nucleotide mutation rates above  for H3N2 - each codon is made of 3 nucleotides, so the mutation rate from one codon to another is the product of the mutation rates of the individual nucleotides 
 
