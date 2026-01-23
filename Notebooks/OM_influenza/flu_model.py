@@ -14,10 +14,17 @@ SEASONAL_AMPLITUDE = 0.6
 PEAK_DAY = 204  # Jan 20th approx (relative to July 1st start)
 INFECTIOUS_PERIOD = 3.0
 LATENT_PERIOD = 2.0
-IMPORTATION_RATE = 5.0  # Constant daily importations (year-round)
-beta=0.9 # Calibrated to match observed growth rates
+IMPORTATION_RATE = 10.0  # Constant daily importations (year-round)
+BETA_K = 0.7 # Higher baseline R0 for K lineage
+BETA_CF = 0.6  # Baseline R0 for counterfactual lineage
+PLANT_ESCAPE_SLOPE = 0.0147  # Adjusted slope for linear susceptibility function
 
+# % H3N2 circulation by season (used to scale cohort sizes)
 
+outdir = "/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu"
+outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
+
+#%% 
 class AntigenicSeirModel:
     # ... [Previous Init and Susceptibility methods remain unchanged] ...
     
@@ -28,7 +35,7 @@ class AntigenicSeirModel:
         self.epochs = sorted(list(self.history.keys()))
 
     # [Include _sigmoid_susceptibility and _linear_susceptibility here]
-    def _linear_susceptibility(self, distance, base_susceptibility=0.3, scaling_factor=0.0147):
+    def _linear_susceptibility(self, distance, base_susceptibility=0.3, scaling_factor=PLANT_ESCAPE_SLOPE):
         return min(1.0, base_susceptibility + (scaling_factor * distance))
 
     def calculate_susceptibility(self, current_strain_coord, vaccine_coord=None):
@@ -120,7 +127,7 @@ class AntigenicSeirModel:
 # ==========================================
 
 # Output directory
-outdir = "/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results"
+
 os.makedirs(outdir, exist_ok=True)
 # %% 
 # Historic Centroids (real PLANT output)
@@ -142,17 +149,44 @@ for year in sorted(history.keys()):
     print(f"Distance from {year-1} to {year}: {dist:.2f} units")
 # %% 
 # Population Distribution [Naive, 2019...2024, Vacc]
-# Sum = 67M. Added a 5M "Naive" pool (young children/never infected).
+# Each year cohort is scaled by %H3N2 circulation for that season.
+
+H3N2_FRACTION_BY_YEAR = {
+    2019: 0.30, #https://archive.cdc.gov/www_cdc_gov/flu/about/burden/2019-2020/archive-09292021.html#:~:text=seasonal%20influenza%20vaccination.-,2019%E2%80%932020%20Burden%20Estimates,by%20A(H1N1)pdm09%20viruses
+    2020: 0.30,
+    2021: 0.90,
+    2022: 0.28, #https://www.ecdc.europa.eu/en/publications-data/seasonal-influenza-annual-epidemiological-report-20222023
+    2023: 0.30, #https://www.rivm.nl/en/flu-and-flu-vaccine/facts-and-figures/annual-reporting-surveillance-2023-2024
+    2024: 0.45, #https://www.rivm.nl/en/flu-and-flu-vaccine/facts-and-figures/annual-reporting-surveillance-2024-2025#:~:text=In%20all%20age%20groups%2C%20influenza,%2C%20Meijer%20et%20al.).
+}
+#citation for these estimates?
+BASE_COHORT_COUNTS = {
+    
+    2019: 12_000_000,
+    2020: 1_000_000,
+    2021: 5_000_000,
+    2022: 8_000_000,
+    2023: 10_000_000,
+    2024: 10_000_000,
+    "Vacc": 15_000_000,
+}
+
+
 pop_dist = [
-    5_000_000,   # Naive
-    12_000_000,  # Last inf 2019
-    2_000_000,   # Last inf 2020
-    5_000_000,   # Last inf 2021
-    8_000_000,   # Last inf 2022
-    10_000_000,  # Last inf 2023
-    10_000_000,  # Last inf 2024
-    15_000_000   # Current Season Vaccinated
+
+    *[
+        int(BASE_COHORT_COUNTS[yr] * H3N2_FRACTION_BY_YEAR[yr])
+        for yr in sorted(history.keys())
+    ],
+    BASE_COHORT_COUNTS["Vacc"],
 ]
+naive=POPULATION - sum(pop_dist)
+pop_dist = [naive] + pop_dist
+
+model = AntigenicSeirModel(history, population_size=67_000_000, current_year=2025.5)
+
+# %%
+
 
 model = AntigenicSeirModel(history, population_size=67_000_000, current_year=2025.5)
 
@@ -160,7 +194,7 @@ model = AntigenicSeirModel(history, population_size=67_000_000, current_year=202
 # 2. SCENARIO RUNS
 # ==========================================
 # %% 
-output_path = os.path.join(outdir, 'flu_model_comprehensive_analysis.png')
+
 # A. Actual Scenario: K Lineage (High Drift)
 # [cite_start]Distance from 2024 (3.2, 2.2) is ~2.2 units -> Crosses the 2.0 threshold [cite: 147]
 k_coord = (3.498047, 3.57003, 0.4946) 
@@ -179,13 +213,13 @@ for year in sorted(history.keys()):
 # Vaccine mismatched
 
 
-res_k, sigmas_k = model.run(k_coord, vacc_coord, pop_dist, beta=beta)
+res_k, sigmas_k = model.run(k_coord, vacc_coord, pop_dist, beta=BETA_K)
 
 # B. Counterfactual: No Mutation I160K
 # Distance from 2024 is ~1.0 unit -> Within 2.0 threshold (protected)
 cf_coord = (3.011719, 3.59375, -0.34155) # (3.693,3.424,-0.073) # Approx PLANT coord on just first branch with I160K only
 
-res_cf, sigmas_cf = model.run(cf_coord, vacc_coord, pop_dist, beta=beta)
+res_cf, sigmas_cf = model.run(cf_coord, vacc_coord, pop_dist, beta=BETA_CF)
 
 # ==========================================
 # 3. ANALYSIS & VALIDATION
@@ -252,9 +286,9 @@ def day_to_date(day, start_month=7, start_day=1):
     return current
 
 # Calculate Rt (time-varying reproduction number) for both scenarios
-Rt_k = calculate_Rt_over_time(res_k, beta, infectious_period=INFECTIOUS_PERIOD, 
+Rt_k = calculate_Rt_over_time(res_k, BETA_K, infectious_period=INFECTIOUS_PERIOD, 
                                sigma_vector=sigmas_k, pop_size=model.pop_size)
-Rt_cf = calculate_Rt_over_time(res_cf, beta, infectious_period=INFECTIOUS_PERIOD, 
+Rt_cf = calculate_Rt_over_time(res_cf, BETA_CF, infectious_period=INFECTIOUS_PERIOD, 
                                 sigma_vector=sigmas_cf, pop_size=model.pop_size)
 
 # Create comprehensive figure
@@ -292,19 +326,20 @@ ax3 = plt.subplot(4, 2, 3)
 times = res_k['time'].values
 seasonal_forcing = 1 + SEASONAL_AMPLITUDE * np.cos(2 * np.pi * (times - PEAK_DAY) / 365.0)
 
-R0_t = beta * INFECTIOUS_PERIOD * seasonal_forcing  # R0(t) - same for both scenarios!
-
+R0_t_k = BETA_K * INFECTIOUS_PERIOD * seasonal_forcing
+R0_t_cf = BETA_CF * INFECTIOUS_PERIOD * seasonal_forcing
 
 # Seasonality forcing on secondary axis - shows multiplicative factor
 
 
 # Plot R0(t) (same for both) and Rt (different for both)
-ax3.plot(times, R0_t, 'k--', lw=1.5, alpha=0.5, label='R₀(t) (Potential)', zorder=5)
+ax3.plot(times, R0_t_k, 'k--', lw=1.5, alpha=0.5, label='R₀(t) (K baseline)', zorder=5)
+ax3.plot(times, R0_t_cf, 'k-.', lw=1.2, alpha=0.5, label='R₀(t) (CF baseline)', zorder=5)
 
-ax3.fill_between(times, 0,R0_t, where=(seasonal_forcing > 1.0), 
-                    alpha=0.15, color='skyblue', label='Winter boost (>1.0)')
-ax3.fill_between(times,0, R0_t, where=(seasonal_forcing <= 1.0), 
-                    alpha=0.15, color='orange', label='Summer reduction (<1.0)')
+ax3.fill_between(times, 0, R0_t_k, where=(seasonal_forcing > 1.0), 
+                    alpha=0.10, color='skyblue', label='Winter boost (>1.0)')
+ax3.fill_between(times, 0, R0_t_k, where=(seasonal_forcing <= 1.0), 
+                    alpha=0.10, color='orange', label='Summer reduction (<1.0)')
 
 ax3.plot(times, Rt_k, label='Rₜ (K lineage)', color='#d62728', lw=2.5)
 ax3.plot(times, Rt_cf, label='Rₜ (Counterfactual)', color='#1f77b4', lw=2.5, ls='--')
@@ -322,17 +357,20 @@ ax3.tick_params(axis='y', labelcolor='gray')
 ax3.legend(loc='upper left', fontsize=8)
 ax3.grid(alpha=0.3)
 # Don't set ylim minimum - let it drop below 1 naturally
-ax3.set_ylim([0, max(Rt_k.max(), Rt_cf.max(), R0_t.max()) * 1.15])
+ax3.set_ylim([0, max(Rt_k.max(), Rt_cf.max(), R0_t_k.max(), R0_t_cf.max()) * 1.15])
 
 # ============ Plot 4: R₀ → R₀(t) → Rₜ Decomposition ============
 ax4 = plt.subplot(4, 2, 4)
 # Base R₀ (intrinsic, no seasonality) - same for both scenarios
-base_R0_line = np.ones_like(times) * beta * INFECTIOUS_PERIOD
-# R₀(t) with seasonality - SAME for both scenarios  
-R0_t_line = base_R0_line * seasonal_forcing
+base_R0_k = np.ones_like(times) * BETA_K * INFECTIOUS_PERIOD
+base_R0_cf = np.ones_like(times) * BETA_CF * INFECTIOUS_PERIOD
+R0_t_k_line = base_R0_k * seasonal_forcing
+R0_t_cf_line = base_R0_cf * seasonal_forcing
 
-ax4.fill_between(times, 0, base_R0_line, alpha=0.1, color='gray', label='Base R₀ (β×D)')
-ax4.fill_between(times, 0, R0_t_line, alpha=0.15, color='purple', label='R₀(t) (Seasonality)')
+ax4.fill_between(times, 0, base_R0_k, alpha=0.08, color='gray', label='Base R₀ (K)')
+ax4.fill_between(times, 0, base_R0_cf, alpha=0.08, color='lightgray', label='Base R₀ (CF)')
+ax4.fill_between(times, 0, R0_t_k_line, alpha=0.12, color='purple', label='R₀(t) (K)')
+ax4.fill_between(times, 0, R0_t_cf_line, alpha=0.12, color='violet', label='R₀(t) (CF)')
 ax4.plot(times, Rt_k, color='#d62728', lw=2.5, label='Rₜ (K lineage)', zorder=10)
 ax4.plot(times, Rt_cf, color='#1f77b4', lw=2.5, ls='--', label='Rₜ (Counterfactual)', zorder=10)
 
@@ -341,7 +379,7 @@ ax4.set_xlabel('Days')
 ax4.set_ylabel('Reproduction Number')
 ax4.legend(loc='best', fontsize=8)
 ax4.grid(alpha=0.3)
-ax4.text(0.02, 0.98, 'Key: R₀(t) identical for both.\nRₜ differs due to immune escape.', 
+ax4.text(0.02, 0.98, 'Key: R₀(t) differs by lineage baseline.\nRₜ further differs due to immune escape.', 
          transform=ax4.transAxes, fontsize=8, va='top',
          bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
 
@@ -381,7 +419,11 @@ ax5_top.set_xticklabels([month_names[i] for i in visible_months])
 
 # ============ Plot 6: Susceptibility Profile ============
 ax6 = plt.subplot(4, 2, 6)
-cohort_labels = ['Naive'] + [str(y) for y in model.epochs] + ['Vacc']
+cohort_labels = (
+    ['Naive']
+    + [f"{y} (H3N2 {int(H3N2_FRACTION_BY_YEAR[y]*100)}%)" for y in model.epochs]
+    + ['Vacc']
+)
 x = np.arange(len(cohort_labels))
 width = 0.35
 
@@ -448,6 +490,10 @@ ax8.text(0.02, 0.98, f'Initial S_eff:\nK: {S_eff_k[0]:.1f}M\nCF: {S_eff_cf[0]:.1
          bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
 
 plt.tight_layout()
+
+
+regime=f"R0_shift_k_{R0_t_k.mean():.2f}_vs_{R0_t_cf.mean():.2f}_escape_param={PLANT_ESCAPE_SLOPE}"
+output_path = os.path.join(outdir, f'flu_model_comprehensive_analysis_{regime}.png')
 
 plt.savefig(output_path, dpi=300, bbox_inches='tight')
 plt.show()
