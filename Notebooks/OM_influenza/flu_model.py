@@ -15,11 +15,11 @@ PEAK_DAY = 200  # Jan 14th approx (relative to July 1st start)
 INFECTIOUS_PERIOD = 3.0
 LATENT_PERIOD = 2.0
 IMPORTATION_RATE = 10.0  # Constant daily importations (year-round)
-BETA_K = 0.65 # Higher baseline R0 for K lineage
+BETA_K = 0.7 # Higher baseline R0 for K lineage
 BETA_CF = 0.65  # Baseline R0 for counterfactual lineage
-PLANT_ESCAPE_SLOPE = 0.0147  # Adjusted slope for linear susceptibility function
+PLANT_ESCAPE_SLOPE = 0.0247  # Adjusted slope for linear susceptibility function
 POPULATION=67_000_000  # UK Population Approximation
-NAIVE=2_500_0000  # Approximate naive population size
+NAIVE=2_500_000  # Approximate naive population size
 # % H3N2 circulation by season (used to scale cohort sizes)
 
 outdir = "/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu"
@@ -179,43 +179,60 @@ BASE_COHORT_COUNTS = {
     2024: 10_000_000,
     "Vacc": 15_000_000,
 }
-
+# 2. Identify which years are explicit (2019-2024) and which are imputed (2014-2018)
 history_years = sorted(history.keys())
-cohort_counts = []
-missing_years = []
+explicit_years_int = sorted(y for y in BASE_COHORT_COUNTS.keys() if isinstance(y, int))
+imputed_years = [y for y in history_years if y not in explicit_years_int]
 
-for year in history_years:
-    if year in BASE_COHORT_COUNTS and year in H3N2_FRACTION_BY_YEAR:
-        cohort_counts.append(int(BASE_COHORT_COUNTS[year] * H3N2_FRACTION_BY_YEAR[year]))
-    else:
-        cohort_counts.append(0)
-        missing_years.append(year)
+# 3. Calculate the size of the "Residual" (Smear) population
+# Start with Total
+residual_pop = POPULATION - NAIVE - BASE_COHORT_COUNTS["Vacc"]
 
-vacc_count = BASE_COHORT_COUNTS.get("Vacc", 0)
-dump_remainder = POPULATION - NAIVE - vacc_count - sum(cohort_counts)
+# Subtract the known recent cohorts
+current_explicit_sum = 0
+for y in explicit_years_int:
+    # Safe logic: if data exists, use it, otherwise 0
+    fraction = H3N2_FRACTION_BY_YEAR.get(y, 0)
+    base = BASE_COHORT_COUNTS.get(y, 0)
+    count = int(base * fraction)
+    current_explicit_sum += count
 
-valid_indices = [
-    i for i, year in enumerate(history_years)
-    if year in BASE_COHORT_COUNTS and year in H3N2_FRACTION_BY_YEAR
-]
+residual_pop -= current_explicit_sum
 
-if valid_indices:
-    sign = 1 if dump_remainder >= 0 else -1
-    abs_remainder = abs(dump_remainder)
-    base_share, extra = divmod(abs_remainder, len(valid_indices))
-    for idx in valid_indices:
-        cohort_counts[idx] += sign * base_share
-    for idx in valid_indices[:extra]:
-        cohort_counts[idx] += sign
-elif missing_years:
-    last_missing_year = missing_years[-1]
-    last_missing_idx = history_years.index(last_missing_year)
-    cohort_counts[last_missing_idx] += dump_remainder
+print(f"Residual Population to Smear (2014-{max(imputed_years)}): {residual_pop:,.0f}")
+
+# 4. Distribute the Residual Population
+# We divide the residual evenly across the imputed years (2014-2018)
+if imputed_years and residual_pop > 0:
+    pop_per_year = int(residual_pop / len(imputed_years))
+    remainder = residual_pop % len(imputed_years)
 else:
-    cohort_counts[-1] += dump_remainder
+    pop_per_year = 0
+    remainder = 0
+    if residual_pop > 0:
+        print("WARNING: No imputed years found to hold residual population. Dumping into oldest explicit year.")
+        # Fallback logic would go here, but with your data, imputed_years will be valid.
 
-pop_dist = [NAIVE, *cohort_counts, vacc_count]
+# 5. Construct the Final Distribution List
+cohort_counts = []
+for year in history_years:
+    if year in imputed_years:
+        # Give them the smear share
+        val = pop_per_year
+        # Add the tiny remainder to the last imputed year to keep sums exact
+        if year == imputed_years[-1]:
+            val += remainder
+        cohort_counts.append(val)
+    else:
+        # Use the explicit data
+        fraction = H3N2_FRACTION_BY_YEAR.get(year, 0)
+        base = BASE_COHORT_COUNTS.get(year, 0)
+        cohort_counts.append(int(base * fraction))
 
+# Final check
+pop_dist = [NAIVE] + cohort_counts + [BASE_COHORT_COUNTS["Vacc"]]
+
+assert sum(pop_dist) == POPULATION, f"Population mismatch! Sum: {sum(pop_dist):,.0f} vs Target: {POPULATION:,.0f}"
 
 model = AntigenicSeirModel(history, population_size=67_000_000, current_year=2025.5)
 
