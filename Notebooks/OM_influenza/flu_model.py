@@ -8,21 +8,25 @@ import os
 import math
 
 # Global Simulation Parameters
-SEASONAL_AMPLITUDE = 0.6
+SEASONAL_AMPLITUDE = 0.5
 # upping seasonal amplitude https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1005844#:~:text=Specific%20humidity%2C%20a%20measure%20of,(4)
 # https://www.researchgate.net/figure/Absolute-humidity-relative-humidity-temperature-and-wind-speed-in-the-Toronto-area_fig2_330205997
-PEAK_DAY = 204  # Jan 20th approx (relative to July 1st start)
+PEAK_DAY = 200  # Jan 14th approx (relative to July 1st start)
 INFECTIOUS_PERIOD = 3.0
 LATENT_PERIOD = 2.0
 IMPORTATION_RATE = 10.0  # Constant daily importations (year-round)
-BETA_K = 0.7 # Higher baseline R0 for K lineage
-BETA_CF = 0.6  # Baseline R0 for counterfactual lineage
+BETA_K = 0.85 # Higher baseline R0 for K lineage
+BETA_CF = 0.75  # Baseline R0 for counterfactual lineage
 PLANT_ESCAPE_SLOPE = 0.0147  # Adjusted slope for linear susceptibility function
-
+POPULATION=67_000_000  # UK Population Approximation
+NAIVE=2_500_0000  # Approximate naive population size
 # % H3N2 circulation by season (used to scale cohort sizes)
 
 outdir = "/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu"
-outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
+outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu_naive_rest/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
+
+outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu_smear_rest/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
+
 
 #%% 
 class AntigenicSeirModel:
@@ -132,6 +136,12 @@ os.makedirs(outdir, exist_ok=True)
 # %% 
 # Historic Centroids (real PLANT output)
 history = {
+    
+    2014: (0.63602, -3.79551, -0.88322),
+    2015: (1.43803, -4.35738, -0.52841),
+    2016: (2.03978, -4.16784, -0.91984),
+    2017: (2.22809, -3.68523, -0.79706),
+    2018: (2.48353, -2.99210, -0.45817),
     2019: (2.49067, -2.0354, -1.3839),
     2020: (2.91758, -1.31161, -1.46984),
     2021: (3.42502, 2.18306, -2.05458),
@@ -161,7 +171,6 @@ H3N2_FRACTION_BY_YEAR = {
 }
 #citation for these estimates?
 BASE_COHORT_COUNTS = {
-    
     2019: 12_000_000,
     2020: 1_000_000,
     2021: 5_000_000,
@@ -171,17 +180,29 @@ BASE_COHORT_COUNTS = {
     "Vacc": 15_000_000,
 }
 
+history_years = sorted(history.keys())
+cohort_counts = []
+missing_years = []
 
-pop_dist = [
+for year in history_years:
+    if year in BASE_COHORT_COUNTS and year in H3N2_FRACTION_BY_YEAR:
+        cohort_counts.append(int(BASE_COHORT_COUNTS[year] * H3N2_FRACTION_BY_YEAR[year]))
+    else:
+        cohort_counts.append(0)
+        missing_years.append(year)
 
-    *[
-        int(BASE_COHORT_COUNTS[yr] * H3N2_FRACTION_BY_YEAR[yr])
-        for yr in sorted(history.keys())
-    ],
-    BASE_COHORT_COUNTS["Vacc"],
-]
-naive=POPULATION - sum(pop_dist)
-pop_dist = [naive] + pop_dist
+vacc_count = BASE_COHORT_COUNTS.get("Vacc", 0)
+dump_remainder = POPULATION - NAIVE - vacc_count - sum(cohort_counts)
+
+if missing_years:
+    last_missing_year = missing_years[-1]
+    last_missing_idx = history_years.index(last_missing_year)
+    cohort_counts[last_missing_idx] += dump_remainder
+else:
+    cohort_counts[-1] += dump_remainder
+
+pop_dist = [NAIVE, *cohort_counts, vacc_count]
+
 
 model = AntigenicSeirModel(history, population_size=67_000_000, current_year=2025.5)
 
@@ -421,7 +442,10 @@ ax5_top.set_xticklabels([month_names[i] for i in visible_months])
 ax6 = plt.subplot(4, 2, 6)
 cohort_labels = (
     ['Naive']
-    + [f"{y} (H3N2 {int(H3N2_FRACTION_BY_YEAR[y]*100)}%)" for y in model.epochs]
+    + [
+        f"{y} (H3N2 {int(H3N2_FRACTION_BY_YEAR.get(y, 0)*100)}%)"
+        for y in model.epochs
+    ]
     + ['Vacc']
 )
 x = np.arange(len(cohort_labels))

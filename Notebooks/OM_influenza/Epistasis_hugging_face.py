@@ -48,7 +48,7 @@ sub_mod='ESM2-H3'
 sub_mod='ESM2-HA80'
 # sub_mod="ESM_C_600M" <- doesn't work with old esm libs
 
-query_path = "home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
+query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
 
 reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 
@@ -96,7 +96,7 @@ ref_record = next(SeqIO.parse(reference_path, "fasta"))
 ref_seq_str = str(ref_record.seq)
 
 
-
+# %%
 # 2. Read the query sequences
 # We parse the file and pick the first one as a test case
 query_iterator = SeqIO.parse(query_path, "fasta")
@@ -104,11 +104,19 @@ first_query_record = next(query_iterator)
 
 h3_map_with_ha2 = create_h3_numbering_map(first_query_record, ref_seq_str, HA2_start=330)
 
+# save the mapping to a csv
+mapping_df = pd.DataFrame(list(h3_map_with_ha2.items()), columns=['Query_Position', 'H3_Canonical_Position'])
+#append the sequence of the focal_lineage as a final column
+final_sequence_name = seq_keys[-1]
+final_lineage = final_sequence_name.split("|")[-1]
+mapping_df[f'{final_lineage}_AA'] = mapping_df['Query_Position'].apply(lambda x: sequences[final_sequence_name][x] if x < len(sequences[final_sequence_name]) else '-')
+mapping_df.to_csv(out+"H3_numbering_map_{}.csv".format(final_lineage),index=False)
 
-
-
+print(out+"H3_numbering_map_{}.csv".format(base_lineage))
 # %%
+
 ids=list(sequences.keys())
+
 
 
 
@@ -119,6 +127,8 @@ K_indexed_muts = [m for m in get_mutations(sequences[base_sequence_name],sequenc
 # Convert your mutations to canonical numbering
 canonical_mutations = mutations_to_canonical(K_indexed_muts, h3_map_with_ha2)
 print("K->J mutations")
+print("Base lineage:",base_lineage)
+print("vs lineage:",final_lineage)
 print(K_indexed_muts)
 
 # %%
