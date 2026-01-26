@@ -15,8 +15,8 @@ PEAK_DAY = 200  # Jan 14th approx (relative to July 1st start)
 INFECTIOUS_PERIOD = 3.0
 LATENT_PERIOD = 2.0
 IMPORTATION_RATE = 10.0  # Constant daily importations (year-round)
-BETA_K = 0.85 # Higher baseline R0 for K lineage
-BETA_CF = 0.75  # Baseline R0 for counterfactual lineage
+BETA_K = 0.65 # Higher baseline R0 for K lineage
+BETA_CF = 0.65  # Baseline R0 for counterfactual lineage
 PLANT_ESCAPE_SLOPE = 0.0147  # Adjusted slope for linear susceptibility function
 POPULATION=67_000_000  # UK Population Approximation
 NAIVE=2_500_0000  # Approximate naive population size
@@ -194,7 +194,20 @@ for year in history_years:
 vacc_count = BASE_COHORT_COUNTS.get("Vacc", 0)
 dump_remainder = POPULATION - NAIVE - vacc_count - sum(cohort_counts)
 
-if missing_years:
+valid_indices = [
+    i for i, year in enumerate(history_years)
+    if year in BASE_COHORT_COUNTS and year in H3N2_FRACTION_BY_YEAR
+]
+
+if valid_indices:
+    sign = 1 if dump_remainder >= 0 else -1
+    abs_remainder = abs(dump_remainder)
+    base_share, extra = divmod(abs_remainder, len(valid_indices))
+    for idx in valid_indices:
+        cohort_counts[idx] += sign * base_share
+    for idx in valid_indices[:extra]:
+        cohort_counts[idx] += sign
+elif missing_years:
     last_missing_year = missing_years[-1]
     last_missing_idx = history_years.index(last_missing_year)
     cohort_counts[last_missing_idx] += dump_remainder
