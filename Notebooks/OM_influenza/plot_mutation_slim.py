@@ -617,9 +617,9 @@ if reference_backbone in prob_pivot.columns:
     cols_ordered =  shift_cols
     shift_data = shift_data[cols_ordered]
     sns.heatmap(shift_data, annot=True, fmt='.4f', cmap='viridis', 
-                center=0, cbar_kws={'label': 'Probability Shift from Reference'},
+                center=0, cbar_kws={'label': f'Probability Shift from Reference {lineage_base}'},
                 mask=shift_data.isna(), annot_kws={'size': 14})  # Mask NaN values
-    plt.title(f'{model_name} Top {top_n} Epistatic Mutations: Probability Shifts from {reference_backbone}')
+    plt.title(f'{model_name} Top {top_n} Epistatic Mutations: Probability Shifts from Reference {lineage_base}')
     plt.xlabel('Backbone Lineage')
     plt.ylabel('Mutation -canon name')
     plt.yticks(rotation=0) 
@@ -636,9 +636,9 @@ if reference_backbone in prob_pivot.columns:
     cols_ordered =  shift_cols
     gram_data = gram_data[cols_ordered]
     sns.heatmap(gram_data, annot=True, fmt='.4f', cmap='viridis', 
-                center=0, cbar_kws={'label': 'mutation Gramaticality Shift from Reference'},
+                center=0, cbar_kws={'label': f'Mutation Grammaticality Shift from Reference {lineage_base}'},
                 mask=gram_data.isna(), annot_kws={'size': 14})  # Mask NaN values
-    plt.title(f'{model_name} Top {top_n} Epistatic Mutations: log10(probx/prob_root) Shifts from {reference_backbone}')
+    plt.title(f'{model_name} Top {top_n} Epistatic Mutations: log10(probx/prob_root) Shifts from Reference {lineage_base}')
     plt.xlabel('Backbone Lineage')
     plt.ylabel('Mutation -canon name')
     plt.tight_layout()
@@ -774,8 +774,8 @@ prob_shift_matrix = mut_combo_probability_matrix.subtract(mut_combo_probability_
 
 plt.figure(figsize=(12, 8))
 sns.heatmap(prob_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
-            cbar_kws={'label': 'Probability Shift (vs Reference)'}, annot_kws={'size': 14})
-plt.title(f'{model_name} Probability Shift Matrix (Relative to Reference)')
+            cbar_kws={'label': f'Probability Shift (vs Reference {lineage_base})'}, annot_kws={'size': 14})
+plt.title(f'{model_name} Probability Shift Matrix (Relative to Reference {lineage_base})')
 plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_probability_shift_matrix.png"), dpi=300)
 plt.show()
@@ -790,8 +790,8 @@ log_prob_shift_matrix.iloc[:,0]= np.nan
 
 plt.figure(figsize=(12, 8))
 sns.heatmap(log_prob_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
-            cbar_kws={'label': 'Log10 Probability Shift (vs Reference)'}, annot_kws={'size': 14})
-plt.title(f'{model_name} Log10 Probability Shift Matrix (Relative to Reference)')
+            cbar_kws={'label': f'Log10 Probability Shift (vs Reference {lineage_base})'}, annot_kws={'size': 14})
+plt.title(f'{model_name} Log10 Probability Shift Matrix (Relative to Reference {lineage_base})')
 plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_log10_probability_shift_matrix.png"), dpi=300)
 plt.show()
@@ -862,7 +862,7 @@ else:
 # Plot the heatmap
 sns.heatmap(grammar_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=-0.5,
             vmin=vmin_grammar, vmax=vmax_grammar,
-            cbar_kws={'label': 'Grammar Delta (vs Reference Backbone)'}, annot_kws={'size': 12},
+            cbar_kws={'label': f'Grammar Delta (vs Reference {lineage_base})'}, annot_kws={'size': 12},
             mask=mask, ax=ax, linewidths=0.5, linecolor='white')
 
 # Add visual separator lines between Reference row/col and pairwise section
@@ -872,7 +872,7 @@ ax.axhline(y=1, color=SEPARATOR_COLOR, linewidth=SEPARATOR_WIDTH)
 # Update axis labels
 ax.set_xlabel('First Mutation (Backbone)', fontsize=14, fontweight='bold')
 ax.set_ylabel('Extra Mutation (Focal)', fontsize=14, fontweight='bold')
-plt.title(f'{model_name} Grammar Delta Matrix\n(Reference row/col: single effects | Pairwise: upper triangle)')
+plt.title(f'{model_name} Grammar Delta Matrix (vs Reference {lineage_base})\n(Reference row/col: single effects | Pairwise: upper triangle)')
 plt.yticks(rotation=0)
 plt.xticks(rotation=45, ha='right')
 plt.tight_layout()
@@ -978,4 +978,6 @@ print(epistasis_flat.tail(5))
 
 
 
+# %%
+print(outdir)
 # %%
