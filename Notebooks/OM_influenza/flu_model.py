@@ -15,9 +15,9 @@ PEAK_DAY = 200  # Jan 14th approx (relative to July 1st start)
 INFECTIOUS_PERIOD = 3.0
 LATENT_PERIOD = 2.0
 IMPORTATION_RATE = 10.0  # Constant daily importations (year-round)
-BETA_K = 0.7 # Higher baseline R0 for K lineage
+BETA_K = 0.65 # Higher baseline R0 for K lineage
 BETA_CF = 0.65  # Baseline R0 for counterfactual lineage
-PLANT_ESCAPE_SLOPE = 0.0247  # Adjusted slope for linear susceptibility function
+PLANT_ESCAPE_SLOPE = 0.0147  # Adjusted slope for linear susceptibility function
 POPULATION=67_000_000  # UK Population Approximation
 NAIVE=2_500_000  # Approximate naive population size
 # % H3N2 circulation by season (used to scale cohort sizes)

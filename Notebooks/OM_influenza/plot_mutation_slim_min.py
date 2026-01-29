@@ -1,3 +1,4 @@
+# %%
 import sys
 sys.path.append('../../')
 
@@ -14,12 +15,15 @@ pdb_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE4_assembly.pdb"
 # pdb_path= "/home3/oml4h/PLM_SARS-CoV-2/Sequences/4O5N-assembly1.cif"
 # pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE8-assembly1.cif"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/6WXB-assembly1.cif"
-pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ7-assembly1.cif"
+
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/viro3d_CF-CAA24272.1_9914_relaxed.pdb"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/EPI4748783_HA_A_England_01837755_2025_EPI_ISL_20210731_J_2_4_1_model.cif"
+pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/Joe_new_K_lin.pdb"
 # pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ6-assembly1.cif"
 # pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ8-assembly1.cif"
+pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ7-assembly1.cif"
 membrane_pdb_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/membrane_dppc128.pdb"
+
 sequences = read_sequences_to_dict(
     "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
 )
@@ -280,7 +284,7 @@ def flag_outside_mutations(mutation_list, alignment_maps):
 
 if __name__ == "__main__":
     ids = list(sequences.keys())
-    reference_id = ids[3]
+    reference_id = ids[2]
     target_id = ids[-1]
     print(f"Reference ID: {reference_id}")
     print(f"Target ID: {target_id}")

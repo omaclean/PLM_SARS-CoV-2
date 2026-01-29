@@ -45,14 +45,14 @@ batch_converter = alphabet.get_batch_converter()
 
 
 sub_mod='ESM2-H3'
-sub_mod='ESM2-HA80'
+#sub_mod='ESM2-HA80'
 # sub_mod="ESM_C_600M" <- doesn't work with old esm libs
 
 query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
 
 reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 
-base_lineage_index=4
+base_lineage_index=3
 
 modnam="/home3/oml4h/hugging_face_downloads/model_weights_topublish/{}".format(sub_mod)
 
@@ -357,6 +357,7 @@ for mut in K_indexed_muts:
 mut_info_rows=[]
 plm_entropy=[]
 plm_probability=[]
+backbone_full_grammar = {}
 
 #loop through each point mutation
 for backbone_i in range(len(K_indexed_muts)+1):
@@ -367,6 +368,17 @@ for backbone_i in range(len(K_indexed_muts)+1):
     else:
         backbone = point_mutations[list(point_mutations.keys())[backbone_i]]
         backbone_name=list(point_mutations.keys())[backbone_i]
+
+    if backbone_name not in backbone_full_grammar:
+        backbone_result = process_protein_sequence(
+            backbone.replace("-", ""),
+            model,
+            model_layers,
+            batch_converter,
+            alphabet,
+            device
+        )
+        backbone_full_grammar[backbone_name] = backbone_result["sequence_grammaticality"]
     
     for mutation_j in range(len(K_indexed_muts)):
         if backbone_i == mutation_j:
@@ -396,13 +408,15 @@ for backbone_i in range(len(K_indexed_muts)+1):
         
         #append mutation info to dataframe
         new_row={"Mutation":mut,"rel_grammar":mutations[mut]["S:0"]["relative_grammaticality"],
-                                    "rel_seq_grammar":mutations[mut]["S:0"]["relative_sequence_grammaticality"],
-                                    "narrow_seq_grammar":mutations[mut]["S:0"]["narrow_sequence_grammaticality"],
-                                    "relative_narrow_seq_grammar":mutations[mut]["S:0"]["relative_narrow_sequence_grammaticality"],
-                                    "semanatic_score":mutations[mut]["S:0"]["semantic_score"],
-                                    "probability":mutations[mut]["S:0"]["probability"],
-                                    "Backbone": backbone_name,
-                                    }
+                        "rel_seq_grammar":mutations[mut]["S:0"]["relative_sequence_grammaticality"],
+                        "narrow_seq_grammar":mutations[mut]["S:0"]["narrow_sequence_grammaticality"],
+                        "relative_narrow_seq_grammar":mutations[mut]["S:0"]["relative_narrow_sequence_grammaticality"],
+                        "semanatic_score":mutations[mut]["S:0"]["semantic_score"],
+                        "probability":mutations[mut]["S:0"]["probability"],
+                        "Backbone": backbone_name,
+                        "backbone_sequence_grammar": backbone_full_grammar[backbone_name],
+                        "focal_sequence_grammar": mutations[mut]["S:0"]["sequence_grammaticality"],
+                        }
         mut_info_rows.append(new_row)
 
         plm_entropy.append({"Mutation":mut,"Backbone":backbone_name,"entropy":mutations[mut]["S:0"]["entropy"]})
@@ -410,6 +424,32 @@ for backbone_i in range(len(K_indexed_muts)+1):
         
 plm_entropy.append({"Mutation":"reference","Backbone":"reference","entropy":mutations["Reference"]["S:0"]["sequence_entropy"]})
 plm_probability.append({"Mutation":"reference","Backbone":"reference","probability":mutations["Reference"]["S:0"]["sequence_probabilities"]})
+
+# Add a reference row for full-sequence grammar comparison
+reference_full_grammar = backbone_full_grammar.get("Reference")
+if reference_full_grammar is None:
+    reference_result = process_protein_sequence(
+        reference_spike_sequence.replace("-", ""),
+        model,
+        model_layers,
+        batch_converter,
+        alphabet,
+        device
+    )
+    reference_full_grammar = reference_result["sequence_grammaticality"]
+
+mut_info_rows.append({
+    "Mutation": "Reference",
+    "rel_grammar": np.nan,
+    "rel_seq_grammar": np.nan,
+    "narrow_seq_grammar": np.nan,
+    "relative_narrow_seq_grammar": np.nan,
+    "semanatic_score": np.nan,
+    "probability": np.nan,
+    "Backbone": "Reference",
+    "backbone_sequence_grammar": reference_full_grammar,
+    "focal_sequence_grammar": reference_full_grammar,
+})
 
 mut_info_combos=pd.DataFrame(mut_info_rows)
 
@@ -498,6 +538,42 @@ plt.xlabel('Focal Mutation')
 plt.ylabel('Backbone')
 plt.tight_layout()
 plt.savefig(out + sub_mod + '_probability_shifts_heatmap_log.png')
+plt.show()
+
+# %% Plot relative grammar shifts (clear Reference row/column)
+
+# Pivot rel_grammar as Mutation (rows) vs Backbone (columns)
+# This makes the Reference column show each mutation's effect on the Reference backbone.
+rel_grammar_matrix = mut_info_combos.pivot_table(
+    index='Mutation',
+    columns='Backbone',
+    values='rel_grammar'
+)
+
+# Ensure Reference row/column exist
+if 'Reference' not in rel_grammar_matrix.index:
+    rel_grammar_matrix.loc['Reference'] = 0.0
+if 'Reference' not in rel_grammar_matrix.columns:
+    rel_grammar_matrix['Reference'] = 0.0
+
+# Align ordering: Reference first
+row_order = ['Reference'] + [i for i in rel_grammar_matrix.index if i != 'Reference']
+col_order = ['Reference'] + [c for c in rel_grammar_matrix.columns if c != 'Reference']
+rel_grammar_matrix = rel_grammar_matrix.reindex(index=row_order, columns=col_order)
+
+# Set x=y values to 0 (including Reference-Reference)
+for label in rel_grammar_matrix.index.intersection(rel_grammar_matrix.columns):
+    rel_grammar_matrix.loc[label, label] = 0.0
+
+plt.figure(figsize=(14, 10))
+sns.heatmap(rel_grammar_matrix, annot=True, fmt=".2f", cmap='viridis',
+            center=0, cbar_kws={'label': 'Relative Grammar (rel_grammar)'},
+            annot_kws={'size': 10})
+plt.title(f'Relative Grammar Shifts (Mutation vs Backbone) {base_lineage} ({sub_mod})')
+plt.xlabel('Focal Mutation')
+plt.ylabel('Backbone')
+plt.tight_layout()
+plt.savefig(out + sub_mod + '_rel_grammar_shift_matrix.png')
 plt.show()
 
 # %% Generate wide dataframes for entropy and probability
@@ -817,7 +893,11 @@ import seaborn
 #sns.histplot(entropy_wide.iloc[-1,2:])
 sns.histplot(probability_wide.iloc[-1,2:])
 
-numeric_positions = [int(re.search(r'\d+', site).group()) for site in mutated_sites]
+numeric_positions = []
+for site in mutated_sites:
+    match = re.search(r'\d+', str(site))
+    if match:
+        numeric_positions.append(int(match.group()))
 print(numeric_positions) # Sort the list for easier reading/comparison
 
 

@@ -22,6 +22,19 @@ from Bio.SeqUtils import seq1
 import os
 from collections import defaultdict
 
+# Global plotting style for larger text
+import matplotlib as mpl
+mpl.rcParams.update({
+    'font.size': 16,
+    'axes.titlesize': 18,
+    'axes.labelsize': 16,
+    'xtick.labelsize': 14,
+    'ytick.labelsize': 14,
+    'legend.fontsize': 14,
+    'figure.titlesize': 18,
+    'axes.titleweight': 'bold',
+})
+
 
 def _extract_pdb_chain_sequences(pdb_file):
     """Return chain sequences and residue ids from a PDB file."""
@@ -77,7 +90,12 @@ def summarize_pdb_alignment(pdb_file, user_sequence, mutation_list=None, thresho
             continue
 
         user_indices, pdb_indices = _alignment_indices(alignment)
-        if not user_indices:
+        if user_indices is None:
+            continue
+        if hasattr(user_indices, "size"):
+            if user_indices.size == 0:
+                continue
+        elif len(user_indices) == 0:
             continue
 
         user_min = min(user_indices) + 1
@@ -147,7 +165,7 @@ print(get_mutations(sequences[ids[0]],sequences[ids[3]]))
 # import entropy and reference
 model_name="ESM2-H3"
 model_name="ESM2-HA80"
-lineage_base="J"
+lineage_base="J.2_int"
 
 #find first id in list with lineage base in 
 lineages=[str(x).split("|")[-1] for x in ids]
@@ -179,6 +197,10 @@ entropy=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/{}_entropy.csv"
 
 backbone_mut_probs=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/H3_epistasis_mutation_info_spyros_model_{}_rel_J.csv".format(lineage_base,model_name))
 mut_combos=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/{}_mut_info_combos.csv".format(lineage_base,model_name))
+
+# Drop J.2 lineage and swap to J.2_int where present
+if 'lineage_backbone' in backbone_mut_probs.columns:
+    backbone_mut_probs['lineage_backbone'] = backbone_mut_probs['lineage_backbone'].replace({'J.2': 'J.2_int'})
 
 os.makedirs(outdir, exist_ok=True)
 # Take the final row and extract columns from position 2 onwards as numpy arrays
@@ -271,7 +293,7 @@ html_content = view._make_html()
 with open(output_path, 'w') as f:
     f.write(html_content)
 
-view.show()
+#view.show()
 # %%
 # Create background_values as a dict with 1-based positions
 probability_dict = {i+1: val for i, val in enumerate(probability.iloc[-1, 2:].values)}
@@ -284,7 +306,7 @@ view = visualise_mutations_on_pdb(
     canonical_map=mutation_to_canon,
     title=f"{model_name} Reference Probability"
 )
-view.show()
+#view.show()
 with open(os.path.join(outdir, f"{lineage_base}_{model_name}_reference_probability_structure.html"), 'w') as f:
     f.write(view._make_html())
 
@@ -300,7 +322,7 @@ view = visualise_mutations_on_pdb(
     background_values=probability_dict,
     title=f"{model_name} log10 (1-Reference_Probability)"
 )
-view.show()
+#view.show()
 # save plot as interactive html
 # Save plot as interactive html
 output_path = "{}{}_{}_{}_lin_mutations_probability.html".format(outdir, lineage_base, model_name, reference_lineage)
@@ -324,7 +346,7 @@ view = visualise_mutations_on_pdb(
     background_values=entropy_dict,
     title=f"{model_name} Reference entropy"
 )
-view.show()
+#view.show()
 with open(os.path.join(outdir, f"{lineage_base}_{model_name}_reference_entropy_structure.html"), 'w') as f:
     f.write(view._make_html())
 
@@ -340,7 +362,7 @@ view = visualise_mutations_on_pdb(
     background_values=entropy_dict,
     title=f"{model_name} Reference entropy (log10)"
 )
-view.show()
+#view.show()
 with open(os.path.join(outdir, f"{lineage_base}_{model_name}_reference_log10_entropy_structure.html"), 'w') as f:
     f.write(view._make_html())
 
@@ -482,6 +504,13 @@ prob_pivot = backbone_mut_probs.pivot_table(
     aggfunc='first'  # In case of duplicates, take first
 )
 
+# Order backbone columns: J, then J.2_int, then J.2.4, then the rest
+preferred_backbones = [reference_backbone, 'J.2_int', 'J.2.4']
+ordered_cols = [c for c in preferred_backbones if c in prob_pivot.columns] + [
+    c for c in prob_pivot.columns if c not in preferred_backbones
+]
+prob_pivot = prob_pivot[ordered_cols]
+
 print(f"\nProbability pivot shape: {prob_pivot.shape}")
 print(prob_pivot.head())
 
@@ -497,6 +526,9 @@ if reference_backbone in prob_pivot.columns:
     
     # Get only the shift columns
     shift_cols = [col for col in prob_shifts.columns if '_shift' in col]
+    # Order columns to place J, then J.2_int, then J.2.4 (if present)
+    preferred = [f"{reference_backbone}_shift", "J.2_int_shift", "J.2.4_shift"]
+    shift_cols = [c for c in preferred if c in shift_cols] + [c for c in shift_cols if c not in preferred]
     prob_shifts_only = prob_shifts[shift_cols].copy()
     
     # 4. Find biggest shifts (epistatic interactions)
@@ -531,9 +563,10 @@ if reference_backbone in prob_pivot.columns:
                 return int(match.group(1))
         return 0  # Fallback
 
-    # Sort epistatic_ranking by genomic position
+    # Sort by number of non-zero shifts (fewest to most), then genomic position
     epistatic_ranking['genomic_position'] = epistatic_ranking.index.map(extract_position)
-    epistatic_ranking = epistatic_ranking.sort_values('genomic_position')
+    epistatic_ranking['nonzero_shifts'] = prob_shifts_only[shift_cols].fillna(0).ne(0).sum(axis=1)
+    epistatic_ranking = epistatic_ranking.sort_values(['nonzero_shifts', 'genomic_position'])
 
     # Update prob_shifts_only with the same order
     prob_shifts_only = prob_shifts_only.loc[epistatic_ranking.index]
@@ -554,9 +587,9 @@ if reference_backbone in prob_pivot.columns:
     top_prob_data = prob_pivot.loc[top_mutations]
     
     plt.figure(figsize=(12, 8))
-    sns.heatmap(top_prob_data, annot=True, fmt='.3f', cmap='RdYlGn', 
+    sns.heatmap(top_prob_data, annot=True, fmt='.3f', cmap='viridis', 
                 center=top_prob_data.mean().mean(), cbar_kws={'label': 'Probability'},
-                mask=top_prob_data.isna())  # Mask NaN values
+                mask=top_prob_data.isna(), annot_kws={'size': 14})  # Mask NaN values
     plt.title(f'{model_name} Top {top_n} Epistatic Mutations: Probabilities Across Backbones')
     plt.xlabel('Backbone Lineage')
     plt.ylabel('Mutation-canon name')
@@ -573,9 +606,9 @@ if reference_backbone in prob_pivot.columns:
     # Reorder columns to put reference first
     cols_ordered =  shift_cols
     shift_data = shift_data[cols_ordered]
-    sns.heatmap(shift_data, annot=True, fmt='.4f', cmap='RdBu_r', 
+    sns.heatmap(shift_data, annot=True, fmt='.4f', cmap='viridis', 
                 center=0, cbar_kws={'label': 'Probability Shift from Reference'},
-                mask=shift_data.isna())  # Mask NaN values
+                mask=shift_data.isna(), annot_kws={'size': 14})  # Mask NaN values
     plt.title(f'{model_name} Top {top_n} Epistatic Mutations: Probability Shifts from {reference_backbone}')
     plt.xlabel('Backbone Lineage')
     plt.ylabel('Mutation -canon name')
@@ -592,9 +625,9 @@ if reference_backbone in prob_pivot.columns:
     # Reorder columns to put reference first
     cols_ordered =  shift_cols
     gram_data = gram_data[cols_ordered]
-    sns.heatmap(gram_data, annot=True, fmt='.4f', cmap='RdBu_r', 
+    sns.heatmap(gram_data, annot=True, fmt='.4f', cmap='viridis', 
                 center=0, cbar_kws={'label': 'mutation Gramaticality Shift from Reference'},
-                mask=gram_data.isna())  # Mask NaN values
+                mask=gram_data.isna(), annot_kws={'size': 14})  # Mask NaN values
     plt.title(f'{model_name} Top {top_n} Epistatic Mutations: log10(probx/prob_root) Shifts from {reference_backbone}')
     plt.xlabel('Backbone Lineage')
     plt.ylabel('Mutation -canon name')
@@ -695,8 +728,8 @@ mut_combo_probability_matrix = mut_combo_probability_matrix.loc[filtered_order, 
 mut_combo_grammar_matrix = mut_combo_grammar_matrix.loc[filtered_order, cols]
 # Plot Probability Matrix
 plt.figure(figsize=(12, 8))
-sns.heatmap(mut_combo_probability_matrix, annot=True, fmt='.3f', cmap='Greens', 
-            cbar_kws={'label': 'Probability'})
+sns.heatmap(mut_combo_probability_matrix, annot=True, fmt='.3f', cmap='viridis', 
+            cbar_kws={'label': 'Probability'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Mutation Probability Matrix')
 plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_mutation_probability_matrix.png"), dpi=300)
@@ -704,8 +737,8 @@ plt.show()
 
 # Plot Log10 Probability Matrix
 plt.figure(figsize=(12, 8))
-sns.heatmap(np.log10(mut_combo_probability_matrix), annot=True, fmt='.3f', cmap='Greens', 
-            cbar_kws={'label': 'Log10 Probability'})
+sns.heatmap(np.log10(mut_combo_probability_matrix), annot=True, fmt='.3f', cmap='viridis', 
+            cbar_kws={'label': 'Log10 Probability'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Log10 Mutation Probability Matrix')
 plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_log10_mutation_probability_matrix.png"), dpi=300)
@@ -713,8 +746,8 @@ plt.show()
 
 # Plot Relative Sequence Grammar Matrix
 plt.figure(figsize=(12, 8))
-sns.heatmap(mut_combo_grammar_matrix, annot=True, fmt='.3f', cmap='RdYlGn', center=0,
-            cbar_kws={'label': 'Relative Sequence Grammar'})
+sns.heatmap(mut_combo_grammar_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
+            cbar_kws={'label': 'Relative Sequence Grammar'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Relative Sequence Grammar Matrix')
 plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_relative_sequence_grammar_matrix.png"), dpi=300)
@@ -729,8 +762,8 @@ prob_shift_matrix = mut_combo_probability_matrix.subtract(mut_combo_probability_
 
 
 plt.figure(figsize=(12, 8))
-sns.heatmap(prob_shift_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
-            cbar_kws={'label': 'Probability Shift (vs Reference)'})
+sns.heatmap(prob_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
+            cbar_kws={'label': 'Probability Shift (vs Reference)'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Probability Shift Matrix (Relative to Reference)')
 plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_probability_shift_matrix.png"), dpi=300)
@@ -745,8 +778,8 @@ log_prob_shift_matrix.iloc[:,0]= np.nan
 
 
 plt.figure(figsize=(12, 8))
-sns.heatmap(log_prob_shift_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
-            cbar_kws={'label': 'Log10 Probability Shift (vs Reference)'})
+sns.heatmap(log_prob_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
+            cbar_kws={'label': 'Log10 Probability Shift (vs Reference)'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Log10 Probability Shift Matrix (Relative to Reference)')
 plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_log10_probability_shift_matrix.png"), dpi=300)
@@ -756,8 +789,8 @@ plt.show()
 grammar_shift_matrix = mut_combo_grammar_matrix.subtract(mut_combo_grammar_matrix['Reference'], axis=0)
 
 plt.figure(figsize=(12, 8))
-sns.heatmap(grammar_shift_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
-            cbar_kws={'label': 'Grammar Shift (vs Reference)'})
+sns.heatmap(grammar_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
+            cbar_kws={'label': 'Grammar Shift (vs Reference)'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Relative Sequence Grammar Shift Matrix (Relative to Reference)')
 plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_relative_sequence_grammar_shift_matrix.png"), dpi=300)
