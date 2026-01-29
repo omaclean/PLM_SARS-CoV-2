@@ -198,6 +198,16 @@ entropy=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/{}_entropy.csv"
 backbone_mut_probs=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/H3_epistasis_mutation_info_spyros_model_{}_rel_J.csv".format(lineage_base,model_name))
 mut_combos=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/{}_mut_info_combos.csv".format(lineage_base,model_name))
 
+# Backward-compatible grammar columns for older exports
+if 'focal_sequence_grammar' not in mut_combos.columns:
+    if 'backbone_sequence_grammar' in mut_combos.columns and 'rel_seq_grammar' in mut_combos.columns:
+        mut_combos['focal_sequence_grammar'] = mut_combos['backbone_sequence_grammar'] + mut_combos['rel_seq_grammar']
+    elif 'rel_seq_grammar' in mut_combos.columns:
+        mut_combos['focal_sequence_grammar'] = mut_combos['rel_seq_grammar']
+if 'backbone_sequence_grammar' not in mut_combos.columns:
+    if 'focal_sequence_grammar' in mut_combos.columns and 'rel_seq_grammar' in mut_combos.columns:
+        mut_combos['backbone_sequence_grammar'] = mut_combos['focal_sequence_grammar'] - mut_combos['rel_seq_grammar']
+
 # Drop J.2 lineage and swap to J.2_int where present
 if 'lineage_backbone' in backbone_mut_probs.columns:
     backbone_mut_probs['lineage_backbone'] = backbone_mut_probs['lineage_backbone'].replace({'J.2': 'J.2_int'})
@@ -686,18 +696,20 @@ else:
 mut_combos.head()
 
 
-# Create pivot tables for probability and relative sequence grammar
+# Create pivot tables for probability and grammar
 mut_combo_probability_matrix = mut_combos.pivot_table(
     index='Focal_canon', 
     columns='Backbone_canon', 
     values='probability'
 )
 
+# Absolute grammar on each backbone (focal sequence grammar)
 mut_combo_grammar_matrix = mut_combos.pivot_table(
-    index='Focal_canon', 
+    index='Focal_canon',
     columns='Backbone_canon',
-    values='rel_seq_grammar'
+    values='focal_sequence_grammar'
 )
+
 
 
 # Extract position for sorting
@@ -723,9 +735,11 @@ filtered_order = [c for c in original_order if c != 'Reference']
 cols = ['Reference'] + filtered_order
 mut_combo_probability_matrix = mut_combo_probability_matrix[cols]
 mut_combo_grammar_matrix = mut_combo_grammar_matrix[cols]
+mut_combo_grammar_delta_matrix = mut_combo_grammar_delta_matrix[cols]
 # now sort rows by filtered_order
 mut_combo_probability_matrix = mut_combo_probability_matrix.loc[filtered_order, cols]
 mut_combo_grammar_matrix = mut_combo_grammar_matrix.loc[filtered_order, cols]
+mut_combo_grammar_delta_matrix = mut_combo_grammar_delta_matrix.loc[filtered_order, cols]
 # Plot Probability Matrix
 plt.figure(figsize=(12, 8))
 sns.heatmap(mut_combo_probability_matrix, annot=True, fmt='.3f', cmap='viridis', 
@@ -744,13 +758,13 @@ plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_log10_mutation_probability_matrix.png"), dpi=300)
 plt.show()
 
-# Plot Relative Sequence Grammar Matrix
+# Plot Grammar on Backbone (absolute)
 plt.figure(figsize=(12, 8))
 sns.heatmap(mut_combo_grammar_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
-            cbar_kws={'label': 'Relative Sequence Grammar'}, annot_kws={'size': 14})
-plt.title(f'{model_name} Relative Sequence Grammar Matrix')
+            cbar_kws={'label': 'Focal Sequence Grammar'}, annot_kws={'size': 14})
+plt.title(f'{model_name} Focal Sequence Grammar on Backbone')
 plt.tight_layout()
-plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_relative_sequence_grammar_matrix.png"), dpi=300)
+plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_focal_sequence_grammar_matrix.png"), dpi=300)
 plt.show()
 
 # %%
@@ -785,16 +799,125 @@ plt.tight_layout()
 plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_log10_probability_shift_matrix.png"), dpi=300)
 plt.show()
 
-# 3. Relative Sequence Grammar Shift (Grammar - Ref_Grammar)
-grammar_shift_matrix = mut_combo_grammar_matrix.subtract(mut_combo_grammar_matrix['Reference'], axis=0)
+# %%
+# Grammar delta relative to OG reference
+# Align reference backbone grammar values to the backbone columns
 
-plt.figure(figsize=(12, 8))
+reference_backbone_grammar = mut_combos.loc[
+    (mut_combos['Mutation'] == "Reference") &
+    (mut_combos['Backbone'] == "Reference"),
+    "backbone_sequence_grammar"
+].values[0]  # or use .iloc[0] or .item()
+
+mut_combo_grammar_delta_matrix = mut_combo_grammar_matrix.subtract(reference_backbone_grammar, axis=1)
+
+# 3. Grammar Delta Matrix - Reference column in lower half, pairwise in upper half
+grammar_shift_matrix = mut_combo_grammar_delta_matrix.copy()
+
+# Create mask: show lower triangle for reference column only, upper triangle for the rest
+n_rows, n_cols = grammar_shift_matrix.shape
+mask = np.zeros((n_rows, n_cols), dtype=bool)
+
+# Mask the lower triangle (excluding diagonal) for non-reference columns
+lower_tri = np.tril(np.ones((n_rows, n_cols), dtype=bool), k=-1)
+# For columns after Reference (index 0), mask the lower triangle
+if n_cols > 1:
+    mask[:, 1:] = lower_tri[:, 1:]
+
+# Mask the upper triangle for the Reference column (keep only lower + diagonal)
+upper_tri_ref = np.triu(np.ones((n_rows, n_cols), dtype=bool), k=1)
+mask[:, 0] = upper_tri_ref[:, 0]
+
+# Also mask the diagonal for non-reference columns (self-interactions are meaningless)
+np.fill_diagonal(mask[:, 1:] if n_cols > 1 else mask, True)
+
+print(reference_backbone_grammar)
+print(mut_combo_grammar_matrix.iloc[0:5,0:5])
+print(mut_combo_grammar_delta_matrix.iloc[0:5,0:5])
+
+# Create figure with visual separation between reference and pairwise sections
+fig, ax = plt.subplots(figsize=(14, 10))
+
+# Plot the heatmap
 sns.heatmap(grammar_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
-            cbar_kws={'label': 'Grammar Shift (vs Reference)'}, annot_kws={'size': 14})
-plt.title(f'{model_name} Relative Sequence Grammar Shift Matrix (Relative to Reference)')
+            cbar_kws={'label': 'Grammar Delta (vs Reference Backbone)'}, annot_kws={'size': 12},
+            mask=mask, ax=ax, linewidths=0.5, linecolor='white')
+
+# Add visual separator line between Reference column and pairwise columns
+ax.axvline(x=1, color='black', linewidth=3)
+
+# Update axis labels
+ax.set_xlabel('First Mutation (Backbone)', fontsize=14, fontweight='bold')
+ax.set_ylabel('Extra Mutation (Focal)', fontsize=14, fontweight='bold')
+plt.title(f'{model_name} Grammar Delta Matrix\n(Reference column: lower triangle | Pairwise: upper triangle)')
+plt.yticks(rotation=0)
+plt.xticks(rotation=45, ha='right')
 plt.tight_layout()
-plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_relative_sequence_grammar_shift_matrix.png"), dpi=300)
+plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_grammar_delta_matrix.png"), dpi=300)
 plt.show()
+
+# %%
+# 4. Epistasis Detection Plot: Expected vs Observed grammar effects
+# Expected = sum of individual mutation effects on reference
+# Observed = actual pairwise grammar delta
+# Epistasis = Observed - Expected
+
+# Get the individual effects from Reference column (mutations on reference backbone)
+individual_effects = grammar_shift_matrix['Reference'].dropna()
+
+# Create epistasis matrix: for each pair (row=extra mut, col=first mut),
+# Expected = individual_effects[row] + individual_effects[col]
+# Observed = grammar_shift_matrix[row, col]
+# Epistasis = Observed - Expected
+
+epistasis_matrix = grammar_shift_matrix.copy()
+expected_matrix = grammar_shift_matrix.copy()
+
+for row_idx, row_name in enumerate(grammar_shift_matrix.index):
+    for col_idx, col_name in enumerate(grammar_shift_matrix.columns):
+        if col_name == 'Reference':
+            # Reference column - set epistasis to NaN (no pairwise comparison)
+            epistasis_matrix.iloc[row_idx, col_idx] = np.nan
+            expected_matrix.iloc[row_idx, col_idx] = np.nan
+        elif row_name in individual_effects.index and col_name in individual_effects.index:
+            # Calculate expected additive effect
+            expected = individual_effects[row_name] + individual_effects[col_name]
+            expected_matrix.iloc[row_idx, col_idx] = expected
+            observed = grammar_shift_matrix.iloc[row_idx, col_idx]
+            if pd.notna(observed):
+                epistasis_matrix.iloc[row_idx, col_idx] = observed - expected
+            else:
+                epistasis_matrix.iloc[row_idx, col_idx] = np.nan
+        else:
+            epistasis_matrix.iloc[row_idx, col_idx] = np.nan
+            expected_matrix.iloc[row_idx, col_idx] = np.nan
+
+# Create mask for epistasis plot (same as pairwise section - upper triangle only, no reference)
+epistasis_mask = np.ones((n_rows, n_cols), dtype=bool)
+upper_tri = np.triu(np.ones((n_rows, n_cols), dtype=bool), k=1)
+epistasis_mask[:, 1:] = ~upper_tri[:, 1:]  # Show upper triangle for non-reference cols
+
+# Plot Epistasis Matrix
+fig, ax = plt.subplots(figsize=(14, 10))
+sns.heatmap(epistasis_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
+            cbar_kws={'label': 'Epistasis (Observed - Expected)'}, annot_kws={'size': 12},
+            mask=epistasis_mask, ax=ax, linewidths=0.5, linecolor='white')
+
+ax.set_xlabel('First Mutation (Backbone)', fontsize=14, fontweight='bold')
+ax.set_ylabel('Extra Mutation (Focal)', fontsize=14, fontweight='bold')
+plt.title(f'{model_name} Epistasis Detection\n(Positive = synergistic, Negative = antagonistic)')
+plt.yticks(rotation=0)
+plt.xticks(rotation=45, ha='right')
+plt.tight_layout()
+plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_epistasis_detection.png"), dpi=300)
+plt.show()
+
+# Print summary of strongest epistatic interactions
+epistasis_flat = epistasis_matrix.unstack().dropna().sort_values()
+print("\n=== Top 5 Antagonistic (Negative) Epistatic Pairs ===")
+print(epistasis_flat.head(5))
+print("\n=== Top 5 Synergistic (Positive) Epistatic Pairs ===")
+print(epistasis_flat.tail(5))
 
 
 
