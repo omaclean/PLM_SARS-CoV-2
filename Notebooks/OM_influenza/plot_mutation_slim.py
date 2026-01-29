@@ -731,15 +731,12 @@ print(original_order)
 #    This ensures 'Reference' only appears once.
 filtered_order = [c for c in original_order if c != 'Reference']
 
-# 3. Concatenate the lists to place 'Reference' first
+# 3. Concatenate the lists to place 'Reference' first (both rows and columns)
 cols = ['Reference'] + filtered_order
-mut_combo_probability_matrix = mut_combo_probability_matrix[cols]
-mut_combo_grammar_matrix = mut_combo_grammar_matrix[cols]
-mut_combo_grammar_delta_matrix = mut_combo_grammar_delta_matrix[cols]
-# now sort rows by filtered_order
-mut_combo_probability_matrix = mut_combo_probability_matrix.loc[filtered_order, cols]
-mut_combo_grammar_matrix = mut_combo_grammar_matrix.loc[filtered_order, cols]
-mut_combo_grammar_delta_matrix = mut_combo_grammar_delta_matrix.loc[filtered_order, cols]
+rows = ['Reference'] + filtered_order  # Reference as first row too
+mut_combo_probability_matrix = mut_combo_probability_matrix.reindex(index=rows, columns=cols)
+mut_combo_grammar_matrix = mut_combo_grammar_matrix.reindex(index=rows, columns=cols)
+mut_combo_grammar_delta_matrix = mut_combo_grammar_delta_matrix.reindex(index=rows, columns=cols)
 # Plot Probability Matrix
 plt.figure(figsize=(12, 8))
 sns.heatmap(mut_combo_probability_matrix, annot=True, fmt='.3f', cmap='viridis', 
@@ -811,25 +808,40 @@ reference_backbone_grammar = mut_combos.loc[
 
 mut_combo_grammar_delta_matrix = mut_combo_grammar_matrix.subtract(reference_backbone_grammar, axis=1)
 
-# 3. Grammar Delta Matrix - Reference column in lower half, pairwise in upper half
+# 3. Grammar Delta Matrix - Reference row/col in lower half, pairwise in upper half
 grammar_shift_matrix = mut_combo_grammar_delta_matrix.copy()
 
-# Create mask: show lower triangle for reference column only, upper triangle for the rest
+# Populate Reference row with individual mutation effects from Reference column
+# The Reference row shows: effect of each mutation (columns) applied alone to Reference
+# This is the same as the Reference column data, so copy it to make the row visible
+for col_name in grammar_shift_matrix.columns:
+    if col_name != 'Reference' and col_name in grammar_shift_matrix.index:
+        # Copy the value from Reference column (row=col_name) to Reference row (col=col_name)
+        grammar_shift_matrix.loc['Reference', col_name] = grammar_shift_matrix.loc[col_name, 'Reference']
+
+# Configuration for separator lines
+SEPARATOR_COLOR = 'red'  # Easy to change: try 'black', 'red', 'white', etc.
+SEPARATOR_WIDTH = 4
+
+# Create mask: 
+# - Reference row (row 0): show all (no mask)
+# - Reference column (col 0): show row 1 onwards (mask row 0 to avoid double-counting)
+# - Pairwise section (rows 1+, cols 1+): show upper triangle only
 n_rows, n_cols = grammar_shift_matrix.shape
 mask = np.zeros((n_rows, n_cols), dtype=bool)
 
-# Mask the lower triangle (excluding diagonal) for non-reference columns
-lower_tri = np.tril(np.ones((n_rows, n_cols), dtype=bool), k=-1)
-# For columns after Reference (index 0), mask the lower triangle
-if n_cols > 1:
-    mask[:, 1:] = lower_tri[:, 1:]
+# For pairwise section (excluding Reference row/col): mask lower triangle + diagonal
+if n_rows > 1 and n_cols > 1:
+    # Create lower triangle mask for the pairwise section (rows 1:, cols 1:)
+    pairwise_size = n_rows - 1
+    lower_tri_pairwise = np.tril(np.ones((pairwise_size, pairwise_size), dtype=bool), k=0)  # k=0 includes diagonal
+    mask[1:, 1:] = lower_tri_pairwise
 
-# Mask the upper triangle for the Reference column (keep only lower + diagonal)
-upper_tri_ref = np.triu(np.ones((n_rows, n_cols), dtype=bool), k=1)
-mask[:, 0] = upper_tri_ref[:, 0]
+# Mask the Reference-Reference cell (row 0, col 0) - it's redundant
+mask[0, 0] = True
 
-# Also mask the diagonal for non-reference columns (self-interactions are meaningless)
-np.fill_diagonal(mask[:, 1:] if n_cols > 1 else mask, True)
+# Ensure Reference column is visible for rows 1+ (not masked)
+mask[1:, 0] = False  # Show Reference column for all mutation rows
 
 print(reference_backbone_grammar)
 print(mut_combo_grammar_matrix.iloc[0:5,0:5])
@@ -838,18 +850,29 @@ print(mut_combo_grammar_delta_matrix.iloc[0:5,0:5])
 # Create figure with visual separation between reference and pairwise sections
 fig, ax = plt.subplots(figsize=(14, 10))
 
+# Calculate symmetric vmin/vmax from visible data only (respecting mask)
+visible_data = grammar_shift_matrix.values[~mask]
+visible_valid = visible_data[~np.isnan(visible_data)]
+if len(visible_valid) > 0:
+    vmax_grammar = np.abs(visible_valid).max()
+    vmin_grammar, vmax_grammar = -vmax_grammar, vmax_grammar
+else:
+    vmin_grammar, vmax_grammar = None, None
+
 # Plot the heatmap
-sns.heatmap(grammar_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
+sns.heatmap(grammar_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=-0.5,
+            vmin=vmin_grammar, vmax=vmax_grammar,
             cbar_kws={'label': 'Grammar Delta (vs Reference Backbone)'}, annot_kws={'size': 12},
             mask=mask, ax=ax, linewidths=0.5, linecolor='white')
 
-# Add visual separator line between Reference column and pairwise columns
-ax.axvline(x=1, color='black', linewidth=3)
+# Add visual separator lines between Reference row/col and pairwise section
+ax.axvline(x=1, color=SEPARATOR_COLOR, linewidth=SEPARATOR_WIDTH)
+ax.axhline(y=1, color=SEPARATOR_COLOR, linewidth=SEPARATOR_WIDTH)
 
 # Update axis labels
 ax.set_xlabel('First Mutation (Backbone)', fontsize=14, fontweight='bold')
 ax.set_ylabel('Extra Mutation (Focal)', fontsize=14, fontweight='bold')
-plt.title(f'{model_name} Grammar Delta Matrix\n(Reference column: lower triangle | Pairwise: upper triangle)')
+plt.title(f'{model_name} Grammar Delta Matrix\n(Reference row/col: single effects | Pairwise: upper triangle)')
 plt.yticks(rotation=0)
 plt.xticks(rotation=45, ha='right')
 plt.tight_layout()
@@ -892,16 +915,50 @@ for row_idx, row_name in enumerate(grammar_shift_matrix.index):
             epistasis_matrix.iloc[row_idx, col_idx] = np.nan
             expected_matrix.iloc[row_idx, col_idx] = np.nan
 
-# Create mask for epistasis plot (same as pairwise section - upper triangle only, no reference)
+# Create mask for epistasis plot (same as pairwise section - upper triangle only, no reference row/col)
 epistasis_mask = np.ones((n_rows, n_cols), dtype=bool)
-upper_tri = np.triu(np.ones((n_rows, n_cols), dtype=bool), k=1)
-epistasis_mask[:, 1:] = ~upper_tri[:, 1:]  # Show upper triangle for non-reference cols
+if n_rows > 1 and n_cols > 1:
+    # Show upper triangle for pairwise section (rows 1+, cols 1+)
+    pairwise_size = n_rows - 1
+    upper_tri_pairwise = np.triu(np.ones((pairwise_size, pairwise_size), dtype=bool), k=1)  # k=1 excludes diagonal
+    epistasis_mask[1:, 1:] = ~upper_tri_pairwise  # Invert: False = show
+
+# Show Reference row (row 0) for individual effects context
+epistasis_mask[0, 1:] = False  # Show Reference row (except Reference-Reference cell)
+
+# Show Reference column for rows 1+ (individual effects)
+epistasis_mask[1:, 0] = False
+
+# Populate Reference row AND column with individual effects
+for col_name in epistasis_matrix.columns:
+    if col_name != 'Reference' and col_name in individual_effects.index:
+        # Reference row: individual effect of each mutation
+        epistasis_matrix.loc['Reference', col_name] = individual_effects[col_name]
+
+for row_name in epistasis_matrix.index:
+    if row_name != 'Reference' and row_name in individual_effects.index:
+        # Reference column: individual effect of each mutation  
+        epistasis_matrix.loc[row_name, 'Reference'] = individual_effects[row_name]
+
+# Calculate vmin/vmax from pairwise section only (exclude Reference row/col from color scale)
+pairwise_data = epistasis_matrix.iloc[1:, 1:].values
+pairwise_valid = pairwise_data[~np.isnan(pairwise_data) & ~epistasis_mask[1:, 1:]]
+if len(pairwise_valid) > 0:
+    vmax_pairwise = np.abs(pairwise_valid).max()
+    vmin_epistasis, vmax_epistasis = -vmax_pairwise, vmax_pairwise
+else:
+    vmin_epistasis, vmax_epistasis = None, None
 
 # Plot Epistasis Matrix
 fig, ax = plt.subplots(figsize=(14, 10))
-sns.heatmap(epistasis_matrix, annot=True, fmt='.3f', cmap='RdBu_r', center=0,
+sns.heatmap(epistasis_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
+            vmin=vmin_epistasis, vmax=vmax_epistasis,
             cbar_kws={'label': 'Epistasis (Observed - Expected)'}, annot_kws={'size': 12},
             mask=epistasis_mask, ax=ax, linewidths=0.5, linecolor='white')
+
+# Add separator lines (same style as grammar delta plot)
+ax.axvline(x=1, color=SEPARATOR_COLOR, linewidth=SEPARATOR_WIDTH)
+ax.axhline(y=1, color=SEPARATOR_COLOR, linewidth=SEPARATOR_WIDTH)
 
 ax.set_xlabel('First Mutation (Backbone)', fontsize=14, fontweight='bold')
 ax.set_ylabel('Extra Mutation (Focal)', fontsize=14, fontweight='bold')

@@ -3,8 +3,8 @@
 Dep. Variable:         semantic_score   R-squared:                       0.011
 Model:                            OLS   Adj. R-squared:                  0.011
 Method:                 Least Squares   F-statistic:                     20.51
-Date:                Thu, 11 Dec 2025   Prob (F-statistic):           3.28e-13
-Time:                        10:33:53   Log-Likelihood:                -12448.
+Date:                Fri, 12 Dec 2025   Prob (F-statistic):           3.28e-13
+Time:                        13:47:55   Log-Likelihood:                -12448.
 No. Observations:                5412   AIC:                         2.490e+04
 Df Residuals:                    5408   BIC:                         2.493e+04
 Df Model:                           3                                         

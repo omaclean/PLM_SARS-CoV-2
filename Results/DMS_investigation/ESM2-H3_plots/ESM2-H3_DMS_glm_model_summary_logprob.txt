@@ -3,8 +3,8 @@
 Dep. Variable:     mutation_probability   R-squared:                       0.036
 Model:                              OLS   Adj. R-squared:                  0.035
 Method:                   Least Squares   F-statistic:                     66.38
-Date:                  Thu, 11 Dec 2025   Prob (F-statistic):           3.82e-42
-Time:                          10:33:17   Log-Likelihood:                -8546.6
+Date:                  Fri, 12 Dec 2025   Prob (F-statistic):           3.82e-42
+Time:                          13:47:55   Log-Likelihood:                -8546.6
 No. Observations:                  5412   AIC:                         1.710e+04
 Df Residuals:                      5408   BIC:                         1.713e+04
 Df Model:                             3                                         
