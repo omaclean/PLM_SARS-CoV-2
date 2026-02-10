@@ -22,16 +22,16 @@ from Functions_HuggingFace import create_h3_numbering_map, align_sequences
 
 # ---- User parameters ----
 FASTA_PATH = "/home4/lm305z/IAV_DB/flu_vgtk_integrations/tmp/Protein-alignment/sgt_4_HA_AA.fasta"
-OUTPUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/canon_sites_test"
+OUTPUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/canon_sites"
 REFERENCE_PATH = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 
 HA2_START = 330
 REFERENCE_LINEAGE_LABEL = "J.2_odd"  # Label used in plots/output for the lineage reference sequence
 REFERENCE_LINEAGE_ACCESSION = "PV511679"  # Accession of the lineage reference sequence for distance calculations
 
-REFERENCE_LINEAGE_LABEL="oldHA2:49:S_lineage"
-REFERENCE_LINEAGE_ACCESSION ="MT186157"
-OUTPUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/canon_sites_test_weird_ha2_49_lineage"
+# REFERENCE_LINEAGE_LABEL="oldHA2:49:S_lineage"
+# REFERENCE_LINEAGE_ACCESSION ="MT186157"
+# OUTPUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/canon_sites_test_weird_ha2_49_lineage"
 #
 # Canonical sites to measure (H3 numbering; use HA2:## for HA2 sites)
 CANONICAL_SITES = ["2", "122","135","144", "158", "160", "173", "189", "276","328", "HA2:49"]
@@ -52,6 +52,9 @@ DISTANCE_LABELS = [
 TEST_MODE = False #True #False  #False
 TEST_SAMPLE_SIZE = 1000
 RANDOM_SEED = 42
+
+if TEST_MODE:
+    OUTPUT_DIR += "_test"
 
 # Fixed amino-acid palette and ordering
 AA_ORDER = [
@@ -93,6 +96,21 @@ warnings.filterwarnings(
     ),
     category=UserWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message=(
+        r"A NumPy version .* is required for this version of SciPy \(detected version .*\)"
+    ),
+    category=UserWarning,
+    module=r"seaborn\._statistics",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=(
+        r"A NumPy version .* is required for this version of SciPy \(detected version .*\)"
+    ),
+    category=UserWarning,
+)
 
 
 def _sanitize_filename(value: str) -> str:
@@ -108,10 +126,23 @@ def _ordered_aas(columns: List) -> List[str]:
 
 def parse_alignment_records(fasta_path: str) -> List:
     records = []
+    seen_sequences = set()
+    reference_record = None
+    reference_in_records = False
     for record in SeqIO.parse(fasta_path, "fasta"):
         record.id = record.id.strip()
         record.description = ""
+        seq_str = str(record.seq)
+        if record.id == REFERENCE_LINEAGE_ACCESSION:
+            reference_record = record
+            if seq_str not in seen_sequences:
+                reference_in_records = True
+        if seq_str in seen_sequences:
+            continue
+        seen_sequences.add(seq_str)
         records.append(record)
+    if reference_record is not None and not reference_in_records:
+        records.append(reference_record)
     return records
 
 
@@ -196,7 +227,7 @@ def plot_distance_panels(df: pd.DataFrame, output_path: str) -> None:
     )
 
     num_sites = len(CANONICAL_SITES)
-    cols = 3
+    cols = 4
     rows = (num_sites + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows), sharey=True)
     axes = axes.flatten()
@@ -268,7 +299,52 @@ def export_alignment_label_map(
     output_dir: str,
 ) -> str:
     ungapped = aligned_seq.replace("-", "")
-    query_map = create_h3_numbering_map(ungapped, ref_sequence, HA2_start=HA2_START)
+
+    # Use gap-aware pairwise alignment + canonical self-labelling so that the
+    # signal-peptide offset is applied only once.  create_h3_numbering_map's
+    # internal .target/.query are ungapped in modern Biopython, so calling it
+    # with two *different* sequences yields a 1:1 positional mapping that
+    # silently double-counts the signal peptide when the MSA sequences have
+    # already had it stripped.
+    pw = align_sequences(
+        reference_seq=ref_sequence,
+        query_seq=ungapped,
+        mode="global",
+        open_gap_score=-10,
+        extend_gap_score=-0.5,
+    )
+    ref_aligned_pw, query_aligned_pw = _build_aligned_strings(
+        pw, ref_sequence, ungapped
+    )
+    # Labels for the canonical reference via self-alignment (always correct)
+    canonical_self_map = create_h3_numbering_map(
+        ref_sequence, ref_sequence, HA2_start=HA2_START
+    )
+    query_map: Dict[int, str] = {}
+    ref_pos0 = -1
+    query_pos0 = -1
+    for r_aa, q_aa in zip(ref_aligned_pw, query_aligned_pw):
+        if r_aa != "-":
+            ref_pos0 += 1
+        if q_aa != "-":
+            query_pos0 += 1
+        if r_aa != "-" and q_aa != "-":
+            label = canonical_self_map.get(ref_pos0)
+            if label is not None:
+                query_map[query_pos0] = label
+        elif q_aa != "-" and r_aa == "-":
+            # Insertion in query relative to reference
+            if query_map:
+                last_label = list(query_map.values())[-1]
+                base = last_label.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+                ins_count = sum(
+                    1 for v in query_map.values()
+                    if v.startswith(base) and v != base
+                )
+                query_map[query_pos0] = f"{base}{chr(ord('A') + ins_count)}"
+            else:
+                query_map[query_pos0] = "N-term-Insert"
+
     ungapped_to_aligned = build_ungapped_to_aligned_index(aligned_seq)
 
     rows = []
@@ -540,6 +616,117 @@ def run_association_experiment(out_df: pd.DataFrame, output_dir: str) -> None:
         handle.write(f"Diffs table: {assoc_path}\n")
 
 
+def run_full_alignment_association(
+    out_df: pd.DataFrame,
+    records: List,
+    ref_aligned: str,
+    ha2_49_aligned_pos1: int,
+    aligned_pos1_to_label: Dict[int, Optional[str]],
+    output_dir: str,
+) -> None:
+    def bin_distance(d: int) -> str:
+        if d <= 0:
+            return "0"
+        if d <= 5:
+            return "1-5"
+        if d <= 10:
+            return "5-10"
+        if d <= 20:
+            return "10-20"
+        if d <= 50:
+            return "20-50"
+        if d <= 100:
+            return "50-100"
+        if d <= 150:
+            return "100-150"
+        if d <= 200:
+            return "150-200"
+        return "200+"
+
+    df = out_df.copy()
+    df["distance_bin"] = df["distance_to_k"].apply(bin_distance)
+
+    s_div_ids = set(
+        df[(df["aa_HA2:49"] == "S") & (df["distance_bin"] == "200+")][
+            "record_id"
+        ]
+    )
+    n_close_ids = set(
+        df[(df["aa_HA2:49"] == "N") & (df["distance_bin"] == "200+")][
+            "record_id"
+        ]
+    )
+
+    s_records = [r for r in records if r.id in s_div_ids]
+    n_records = [r for r in records if r.id in n_close_ids]
+
+    aligned_len = len(ref_aligned)
+    s_total = len(s_records)
+    n_total = len(n_records)
+
+    rows = []
+    for aligned_pos1 in range(1, aligned_len + 1):
+        label = aligned_pos1_to_label.get(aligned_pos1)
+        focal_flag = "Y" if label in CANONICAL_SITES else "N"
+        s_counts: Dict[str, int] = {}
+        n_counts: Dict[str, int] = {}
+        for rec in s_records:
+            aa = str(rec.seq)[aligned_pos1 - 1]
+            s_counts[aa] = s_counts.get(aa, 0) + 1
+        for rec in n_records:
+            aa = str(rec.seq)[aligned_pos1 - 1]
+            n_counts[aa] = n_counts.get(aa, 0) + 1
+        aas = set(s_counts.keys()).union(set(n_counts.keys()))
+        ref_aa = ref_aligned[aligned_pos1 - 1]
+        for aa in aas:
+            s_prop = s_counts.get(aa, 0) / s_total if s_total else 0.0
+            n_prop = n_counts.get(aa, 0) / n_total if n_total else 0.0
+            rows.append(
+                {
+                    "aligned_pos1": label,
+                    "ref_aa": ref_aa,
+                    "aa": aa,
+                    "s_prop": s_prop,
+                    "n_prop": n_prop,
+                    "diff": s_prop - n_prop,
+                    "s_count": int(s_counts.get(aa, 0)),
+                    "n_count": int(n_counts.get(aa, 0)),
+                    "ha2_49_aligned_pos1": ha2_49_aligned_pos1,
+                    "focal_site": focal_flag,
+                }
+            )
+
+    full_assoc_df = pd.DataFrame(rows)
+    full_assoc_path = os.path.join(
+        output_dir, "ha2_49_full_alignment_association_diffs.tsv"
+    )
+    full_assoc_df.sort_values("diff", key=lambda s: s.abs(), ascending=False).to_csv(
+        full_assoc_path, sep="\t", index=False
+    )
+
+    summary_path = os.path.join(
+        output_dir, "ha2_49_full_alignment_association_summary.txt"
+    )
+    with open(summary_path, "w", encoding="utf-8") as handle:
+        handle.write("Full alignment association: HA2:49 S (200+) vs N (200+)\n")
+        handle.write(f"S 200+ count: {s_total}\n")
+        handle.write(f"N 200+ count: {n_total}\n")
+        handle.write(f"HA2:49 aligned_pos1: {ha2_49_aligned_pos1}\n")
+        handle.write(f"Diffs table: {full_assoc_path}\n")
+
+
+def validate_ha2_49_label(
+    aligned_pos1_to_label: Dict[int, Optional[str]],
+    ha2_49_aligned_pos1: int,
+) -> None:
+    label = aligned_pos1_to_label.get(ha2_49_aligned_pos1)
+    if label != "HA2:49":
+        raise ValueError(
+            "HA2:49 label mismatch: expected HA2:49 at aligned_pos1 "
+            f"{ha2_49_aligned_pos1}, got {label}"
+        )
+
+
 def main() -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -571,6 +758,15 @@ def main() -> None:
         ref_aligned.replace("-", ""),
         ref_sequence,
         OUTPUT_DIR,
+    )
+
+    alignment_map_df = pd.read_csv(alignment_map_path)
+    aligned_pos1_to_label = (
+        alignment_map_df.dropna(subset=["aligned_pos1"])
+        .drop_duplicates(subset=["aligned_pos1"])
+        .set_index("aligned_pos1")["label"]
+        .astype(object)
+        .to_dict()
     )
 
     homology_path = export_reference_homology(
@@ -631,6 +827,17 @@ def main() -> None:
     plot_distance_panels(out_df, panel_output)
 
     run_association_experiment(out_df, OUTPUT_DIR)
+    ha2_49_aligned_pos1 = site_to_aligned_pos1.get("HA2:49")
+    if ha2_49_aligned_pos1 is not None:
+        validate_ha2_49_label(aligned_pos1_to_label, ha2_49_aligned_pos1)
+        run_full_alignment_association(
+            out_df=out_df,
+            records=records,
+            ref_aligned=ref_aligned,
+            ha2_49_aligned_pos1=ha2_49_aligned_pos1,
+            aligned_pos1_to_label=aligned_pos1_to_label,
+            output_dir=OUTPUT_DIR,
+        )
 
     print("Done.")
     print(f"Alignment label map written to: {alignment_map_path}")
