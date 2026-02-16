@@ -202,6 +202,22 @@ def main() -> None:
 			)
 			handle.write(f"{ref.sequence}\n")
 
+	dedup_translated_cluster_path = os.path.join(
+		OUTPUT_DIR,
+		"cluster_references_protein_translated_unique.fasta",
+	)
+	unique_proteins: Dict[str, List[ClusterRef]] = {}
+	for ref in cluster_refs:
+		unique_proteins.setdefault(ref.sequence, []).append(ref)
+	with open(dedup_translated_cluster_path, "w", encoding="utf-8") as handle:
+		for idx, (protein_seq, refs_for_seq) in enumerate(unique_proteins.items(), start=1):
+			representative = refs_for_seq[0]
+			handle.write(
+				f">unique_{idx}|rep={representative.record_id}|lineage={representative.lineage}|"
+				f"duplicates={len(refs_for_seq)}\n"
+			)
+			handle.write(f"{protein_seq}\n")
+
 	records_all = parse_alignment_records(FASTA_PATH)
 	anchor_alignment = build_anchor_aligned_sequence(records_all, ALIGN_ACCESSION)
 	anchor_ungapped_len = len(anchor_alignment.replace("-", ""))
@@ -372,6 +388,7 @@ def main() -> None:
 	print(f"Ignored (>{MAX_MUTATIONS} mutations): {len(ignored_records)}")
 	print(f"Anchor accession used for coordinate padding: {ALIGN_ACCESSION}")
 	print(f"Exported translated cluster proteins: {translated_cluster_path}")
+	print(f"Exported unique translated proteins: {dedup_translated_cluster_path}")
 	if TEST_MODE:
 		print(f"Test mode: sampled {len(records)} sequences")
 
