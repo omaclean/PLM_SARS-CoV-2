@@ -23,13 +23,18 @@ pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/Joe_new_K_lin.pdb"
 # pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ8-assembly1.cif"
 pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/7ZJ7-assembly1.cif"
 membrane_pdb_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/membrane_dppc128.pdb"
-
+pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/EPI4748783_HA_A_England_01837755_2025_EPI_ISL_20210731_J_2_4_1_model.cif"
 sequences = read_sequences_to_dict(
     "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
 )
+
 reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 
+seq1_index=0
+seq2_index=4
 output_dir = "/home3/oml4h/PLM_SARS-CoV-2/Results/structure_play"
+
+output_dir = "/home3/oml4h/PLM_SARS-CoV-2/Results/structure_playJ.2"
 os.makedirs(output_dir, exist_ok=True)
 
 
@@ -284,8 +289,8 @@ def flag_outside_mutations(mutation_list, alignment_maps):
 
 if __name__ == "__main__":
     ids = list(sequences.keys())
-    reference_id = ids[2]
-    target_id = ids[-1]
+    reference_id = ids[seq1_index]
+    target_id = ids[seq2_index]
     print(f"Reference ID: {reference_id}")
     print(f"Target ID: {target_id}")
     user_seq = sequences[target_id]

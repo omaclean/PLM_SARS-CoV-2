@@ -29,10 +29,10 @@ FASTA_PATH = "/home4/lm305z/IAV_DB/flu_vgtk_integrations/tmp/Protein-alignment/s
 # Accession in FASTA_PATH used as the anchor gapped alignment coordinate system.
 ALIGN_ACCESSION = "PV511679"
 CLUSTER_PATH = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/OM_list_cluster_nuc_plus.fa"
-OUTPUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/alignment_based_16feb26_dryrun"
+OUTPUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/alignment_based_19feb26_"
 
 # Maximum allowed Hamming distance to assign a sequence to a lineage reference.
-MAX_MUTATIONS = 5
+MAX_MUTATIONS = 10
 LINEAGE_ALIAS = {
 	"J.2.4.1": "K",
 }

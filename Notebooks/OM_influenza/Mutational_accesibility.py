@@ -791,16 +791,16 @@ RUN_LINEAGE_PANEL = True
 TEST_MODE = False
 TEST_MAX_LINEAGES = 3
 LINEAGE_CLUSTER_FASTA = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/OM_list_cluster_nuc_plus.fa"
-LINEAGE_DIVERSITY_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/alignment_based_16feb26_dryrun"
-LINEAGE_PANEL_OUTDIR = "/home3/oml4h/PLM_SARS-CoV-2/Results/test/lineage_panel_mutability_vs_plm"
+LINEAGE_DIVERSITY_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/alignment_based_19feb26_"
+LINEAGE_PANEL_OUTDIR = "/home3/oml4h/PLM_SARS-CoV-2/Results/test/lineage_panel_mutability_vs_plm/gisaidinc"
 # Flexible input selector for diversity FASTAs.
 # Examples:
 # - "H3N2_*_max5.fasta"
 # - "H3N2_*_max10.fasta"
-# - "H3N2_*_max_unique.fasta"
+# - "H3N2_*_max10_unique.fasta"
 # - "H3N2_*_max*.fasta"  (all max variants)
 # 
-LINEAGE_DIVERSITY_FILE_PATTERN = "H3N2_*_max5.fasta"
+LINEAGE_DIVERSITY_FILE_PATTERN = "H3N2_*_max10.fasta"
 
 MODEL_RUNS = [
     {
@@ -1215,7 +1215,7 @@ def evaluate_alpha_sweep(
 
     return pd.DataFrame(alpha_results).sort_values("alpha")
 
-
+# %%
 if RUN_LINEAGE_PANEL:
     os.makedirs(LINEAGE_PANEL_OUTDIR, exist_ok=True)
 
@@ -1483,53 +1483,89 @@ if RUN_LINEAGE_PANEL:
             index=False,
         )
 
-        alpha_grid_set = {round(float(a), 6) for a in ALPHA_GRID}
-        scatter_alphas = [a for a in METHOD2_SCATTER_ALPHAS if round(float(a), 6) in alpha_grid_set]
-        if len(scatter_alphas) == 0 and len(ALPHA_GRID) > 0:
-            candidate_alphas = [float(ALPHA_GRID[0]), float(ALPHA_GRID[len(ALPHA_GRID) // 2]), float(ALPHA_GRID[-1])]
-            scatter_alphas = list(dict.fromkeys(candidate_alphas))
+        scatter_alphas = list(dict.fromkeys([float(a) for a in METHOD2_SCATTER_ALPHAS]))
 
-        scatter_df = combined_df[["obs_freq", "plm_prob", "mut_prob"]].copy()
-        if len(scatter_df) > METHOD2_SCATTER_MAX_POINTS:
-            scatter_df = scatter_df.sample(METHOD2_SCATTER_MAX_POINTS, random_state=0)
-
-        if len(scatter_alphas) > 0 and len(scatter_df) > 0:
-            fig_sc, axes_sc = plt.subplots(1, len(scatter_alphas), figsize=(6 * len(scatter_alphas), 5), sharey=True)
-            if len(scatter_alphas) == 1:
-                axes_sc = [axes_sc]
-
-            for ax, alpha_value in zip(axes_sc, scatter_alphas):
-                x_vals = np.log10(
-                    scatter_df["plm_prob"].clip(lower=PSEUDOCOUNT)
-                    * np.power(scatter_df["mut_prob"].clip(lower=PSEUDOCOUNT), alpha_value)
-                )
-                y_vals = np.log10(scatter_df["obs_freq"].clip(lower=PSEUDOCOUNT))
-
-                sns.scatterplot(
-                    x=x_vals,
-                    y=y_vals,
-                    ax=ax,
-                    s=8,
-                    alpha=0.25,
-                    edgecolor=None,
+        if len(scatter_alphas) > 0 and len(combined_df) > 0:
+            lineage_names = sorted(combined_df["lineage"].dropna().unique().tolist())
+            n_lineages = len(lineage_names)
+            if n_lineages > 0:
+                nrows = n_lineages
+                ncols = len(scatter_alphas)
+                fig_sc, axes_sc = plt.subplots(
+                    nrows,
+                    ncols,
+                    figsize=(4.5 * ncols, 3.8 * nrows),
+                    sharex="row",
+                    sharey="row",
                 )
 
-                corr_result = spearmanr(x_vals, y_vals)
-                corr_r, _ = _extract_corr_pvalue(corr_result)
-                ax.set_title(
-                    "Method B (mutation-level flattened)\n"
-                    f"alpha={alpha_value:.2f}, Spearman={corr_r:.3f}"
-                )
-                ax.set_xlabel("log10(PLM probability × mutation accessibility^alpha)")
-                ax.set_ylabel("log10(observed mutation frequency in lineage alignment)")
-                ax.grid(alpha=0.25)
+                axes_sc = np.array(axes_sc)
+                if axes_sc.ndim == 1:
+                    if nrows == 1:
+                        axes_sc = axes_sc.reshape(1, -1)
+                    else:
+                        axes_sc = axes_sc.reshape(-1, 1)
 
-            plt.tight_layout()
-            plt.savefig(
-                os.path.join(model_outdir, _tag_output_name("method2_obsfreq_vs_plm_mut_scatter.png")),
-                dpi=300,
-            )
-            plt.show()
+                for row_idx, lineage_name in enumerate(lineage_names):
+                    lineage_scatter_df = combined_df.loc[
+                        combined_df["lineage"] == lineage_name,
+                        ["obs_freq", "plm_prob", "mut_prob"],
+                    ].copy()
+
+                    if len(lineage_scatter_df) > METHOD2_SCATTER_MAX_POINTS:
+                        lineage_scatter_df = lineage_scatter_df.sample(METHOD2_SCATTER_MAX_POINTS, random_state=0)
+
+                    for col_idx, alpha_value in enumerate(scatter_alphas):
+                        ax = axes_sc[row_idx, col_idx]
+
+                        if len(lineage_scatter_df) == 0:
+                            ax.set_title(f"alpha={alpha_value:.2f}\nno data")
+                            ax.grid(alpha=0.2)
+                            continue
+
+                        x_vals = np.log10(
+                            lineage_scatter_df["plm_prob"].clip(lower=PSEUDOCOUNT)
+                            * np.power(lineage_scatter_df["mut_prob"].clip(lower=PSEUDOCOUNT), alpha_value)
+                        )
+                        y_vals = np.log10(lineage_scatter_df["obs_freq"].clip(lower=PSEUDOCOUNT))
+
+                        sns.scatterplot(
+                            x=x_vals,
+                            y=y_vals,
+                            ax=ax,
+                            s=8,
+                            alpha=0.25,
+                            edgecolor=None,
+                        )
+
+                        corr_result = spearmanr(x_vals, y_vals)
+                        corr_r, _ = _extract_corr_pvalue(corr_result)
+                        ax.set_title(f"alpha={alpha_value:.2f}\nρ={corr_r:.3f}, n={len(lineage_scatter_df)}")
+                        ax.grid(alpha=0.25)
+
+                        if row_idx == nrows - 1:
+                            ax.set_xlabel("log10(PLM × mut^alpha)")
+                        else:
+                            ax.set_xlabel("")
+
+                        if col_idx == 0:
+                            ax.set_ylabel(f"{lineage_name}\nlog10(observed freq)")
+                        else:
+                            ax.set_ylabel("")
+
+                fig_sc.suptitle(
+                    "Method B (mutation-level): observed mutation frequency vs PLM×mutation accessibility score\n"
+                    "rows = lineages, columns = alpha values"
+                )
+                plt.tight_layout(rect=(0, 0, 1, 0.95))
+                plt.savefig(
+                    os.path.join(
+                        model_outdir,
+                        _tag_output_name("method2_obsfreq_vs_plm_mut_scatter_by_lineage_grid.png"),
+                    ),
+                    dpi=300,
+                )
+                plt.show()
 
         # Per-lineage best-alpha extraction for explicit Method A vs Method B overlays
         for lineage_name, lineage_df in combined_df.groupby("lineage"):
@@ -1602,12 +1638,12 @@ if RUN_LINEAGE_PANEL:
             for model_tag, sub in alpha_all_df.groupby("model"):
                 ax.plot(sub["alpha"], sub[metric_col], marker="o", label=model_tag)
             title_map = {
-                "site_top10pct_mutated_enrichment": "Method A (site-level): enrichment of mutated sites in top 10% scored sites",
-                "site_top10pct_mutated_precision": "Method A (site-level): fraction of top 10% scored sites that are observed mutated",
-                "site_rank_spearman_r": "Method A (site-level): Spearman(site score vs observed site mutation burden)",
-                "mut_flat_global_spearman_r": "Method B (mutation-level): Spearman(pred score vs observed mutation frequency)",
-                "mut_flat_global_pearson_r": "Method B (mutation-level): Pearson(pred score vs observed mutation frequency)",
-                "mut_flat_mean_site_nll": "Method B (mutation-level): mean site-level NLL of observed residue distribution",
+                "site_top10pct_mutated_enrichment": "Method A (site-level): \nenrichment of mutated sites in top 10% scored sites",
+                "site_top10pct_mutated_precision": "Method A (site-level): f\nraction of top 10% scored sites that are observed mutated",
+                "site_rank_spearman_r": "Method A (site-level): \nSpearman(site score vs observed site mutation burden)",
+                "mut_flat_global_spearman_r": "Method B (mutation-level):\n Spearman(pred score vs observed mutation frequency)",
+                "mut_flat_global_pearson_r": "Method B (mutation-level): \nPearson(pred score vs observed mutation frequency)",
+                "mut_flat_mean_site_nll": "Method B (mutation-level):\n mean site-level NLL of observed residue distribution",
             }
             ylabel_map = {
                 "site_top10pct_mutated_enrichment": "Enrichment ratio (top-10% sites / baseline)",

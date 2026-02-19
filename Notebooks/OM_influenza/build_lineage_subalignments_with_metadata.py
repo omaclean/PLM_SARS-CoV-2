@@ -28,17 +28,21 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 from Bio import SeqIO
+import sys
+# add the path to Functions_HuggingFace.py if it's not in the same directory
+
+sys.path.append('/home3/oml4h/PLM_SARS-CoV-2/')
 
 from Functions_HuggingFace import create_h3_numbering_map
 
 
 # ---- User parameters ----
 # Input aligned protein FASTA (record.id is used as the accession key for metadata matching).
-FASTA_PATH = "/home4/lm305z/IAV_DB/flu_vgtk_integrations/tmp/Protein-alignment/sgt_4_HA_AA.fasta"
+FASTA_PATH = "/home4/lm305z/IAV_DB/flu_vgtk_integrations/tmp/Protein-alignment/sgt_4_HA_CDS.fasta"
 # Input metadata TSV (must contain clade + subtype + at least one accession column).
 METADATA_PATH = "/home4/lm305z/IAV_DB/flu_vgtk_integrations/tmp/gisaid-data/metadata.tsv"
 # Output folder where lineage FASTAs and reports are written.
-OUTPUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data"
+OUTPUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_and_genbank_data"
 # Canonical H3 reference sequence used to map canonical mutation labels (e.g., K189R).
 REFERENCE_PATH = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 
