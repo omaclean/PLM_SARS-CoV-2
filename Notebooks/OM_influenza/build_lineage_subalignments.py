@@ -181,6 +181,15 @@ def safe_label(label: str) -> str:
 	return cleaned.replace("/", "-")
 
 
+def deduplicate_records(records: List) -> List:
+	unique_by_sequence: Dict[str, object] = {}
+	for record in records:
+		seq_key = str(record.seq)
+		if seq_key not in unique_by_sequence:
+			unique_by_sequence[seq_key] = record
+	return list(unique_by_sequence.values())
+
+
 def main() -> None:
 	os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -322,14 +331,28 @@ def main() -> None:
 			f"H3N2_{safe_lineage}_max{MAX_MUTATIONS}.fasta",
 		)
 		SeqIO.write(recs, output_path, "fasta")
+		unique_recs = deduplicate_records(recs)
+		unique_output_path = os.path.join(
+			OUTPUT_DIR,
+			f"H3N2_{safe_lineage}_max{MAX_MUTATIONS}_unique.fasta",
+		)
+		SeqIO.write(unique_recs, unique_output_path, "fasta")
 		summary_rows.append({
 			"lineage": lineage,
 			"count": len(recs),
+			"unique_count": len(unique_recs),
 			"output": output_path,
+			"unique_output": unique_output_path,
 		})
 
 	ignored_path = os.path.join(OUTPUT_DIR, f"ignored_over_max{MAX_MUTATIONS}.fasta")
 	SeqIO.write(ignored_records, ignored_path, "fasta")
+	ignored_unique_path = os.path.join(
+		OUTPUT_DIR,
+		f"ignored_over_max{MAX_MUTATIONS}_unique.fasta",
+	)
+	ignored_unique_records = deduplicate_records(ignored_records)
+	SeqIO.write(ignored_unique_records, ignored_unique_path, "fasta")
 
 	summary_df = pd.DataFrame(summary_rows)
 	summary_df.to_csv(
@@ -386,6 +409,9 @@ def main() -> None:
 	print("Done.")
 	print(summary_df)
 	print(f"Ignored (>{MAX_MUTATIONS} mutations): {len(ignored_records)}")
+	print(
+		f"Ignored unique (>{MAX_MUTATIONS} mutations): {len(ignored_unique_records)}"
+	)
 	print(f"Anchor accession used for coordinate padding: {ALIGN_ACCESSION}")
 	print(f"Exported translated cluster proteins: {translated_cluster_path}")
 	print(f"Exported unique translated proteins: {dedup_translated_cluster_path}")

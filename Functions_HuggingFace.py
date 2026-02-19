@@ -219,7 +219,7 @@ def translate_mat_proteins_with_genbank(sequence,ref):
 #####################################################################################
 ## ESM Embedding Functions ##########################################################
 def embed_sequence(sequence, model, device, model_layers, batch_converter, alphabet):
-    """Embed a protein sequence with a HuggingFace ESM model.
+    """Embed a protein sequence with either FAIR-ESM or HuggingFace-style ESM APIs.
 
     Args:
         sequence (str): Amino-acid sequence with no padding tokens.
@@ -245,27 +245,73 @@ def embed_sequence(sequence, model, device, model_layers, batch_converter, alpha
         batch_tokens = batch_tokens.to(device=device, non_blocking=True)
 
     with torch.no_grad():
-        # FIX: Use output_hidden_states instead of repr_layers
-        results = model(batch_tokens, output_hidden_states=True)
-    del batch_tokens
+        # Choose compatible forward kwargs based on model.forward signature.
+        # This avoids passing unsupported args such as output_hidden_states to FAIR-style models.
+        forward_params = set()
+        try:
+            forward_fn = getattr(model, "forward", None)
+            if forward_fn is not None:
+                forward_params = set(forward_fn.__code__.co_varnames)
+        except Exception:
+            forward_params = set()
 
-    # FIX: Handle Layer Indexing
-    # HF hidden_states is a tuple: (embeddings, layer_1, ... layer_N)
-    # Length is num_layers + 1.
-    # If model_layers is too high (e.g. 33 for a 30-layer model), default to the last layer (-1).
-    
-    try:
-        token_representation = results.hidden_states[model_layers][0]
-    except IndexError:
-        print(f"Warning: Requested layer {model_layers} is out of bounds for this model. Using last layer.")
-        token_representation = results.hidden_states[-1][0]
+        results = None
+
+        # FAIR-ESM style API
+        if "repr_layers" in forward_params:
+            fair_kwargs = {"repr_layers": [model_layers]}
+            if "return_contacts" in forward_params:
+                fair_kwargs["return_contacts"] = False
+            results = model(batch_tokens, **fair_kwargs)
+
+            token_representation = results["representations"][model_layers][0]
+            logits_tensor = results["logits"][0]
+
+        else:
+            # HuggingFace-style API (or wrappers): pass only supported kwargs.
+            hf_kwargs = {}
+            if "output_hidden_states" in forward_params:
+                hf_kwargs["output_hidden_states"] = True
+
+            results = model(batch_tokens, **hf_kwargs)
+
+            hidden_states = getattr(results, "hidden_states", None)
+            if hidden_states is None and isinstance(results, dict):
+                hidden_states = results.get("hidden_states", None)
+
+            if hidden_states is not None and len(hidden_states) > 0:
+                if model_layers < len(hidden_states):
+                    token_representation = hidden_states[model_layers][0]
+                else:
+                    print(
+                        f"Warning: Requested layer {model_layers} is out of bounds for this model. "
+                        "Using last layer."
+                    )
+                    token_representation = hidden_states[-1][0]
+            else:
+                # Fallback for outputs exposing last_hidden_state only.
+                if hasattr(results, "last_hidden_state"):
+                    token_representation = results.last_hidden_state[0]
+                elif isinstance(results, dict) and "last_hidden_state" in results:
+                    token_representation = results["last_hidden_state"][0]
+                else:
+                    raise ValueError(
+                        "Model output does not include representations/hidden_states/last_hidden_state."
+                    )
+
+            if hasattr(results, "logits"):
+                logits_tensor = results.logits[0]
+            elif isinstance(results, dict) and "logits" in results:
+                logits_tensor = results["logits"][0]
+            else:
+                raise ValueError("Model output does not include logits.")
+    del batch_tokens
 
     full_embedding = token_representation[1:batch_len - 1].cpu()
     base_mean_embedding = token_representation[1 : batch_len - 1].mean(0).cpu()
 
-    # FIX: Access logits directly
     lsoftmax = torch.nn.LogSoftmax(dim=1)
-    base_logits = lsoftmax((results.logits[0]).to(device="cpu"))
+    base_logits = lsoftmax(logits_tensor.to(device="cpu"))
     
     return results, base_logits, base_mean_embedding, full_embedding
 

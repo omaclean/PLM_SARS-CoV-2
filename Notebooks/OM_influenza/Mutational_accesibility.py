@@ -774,7 +774,11 @@ else:
 # %%
 import glob
 import re
+import os
 from pathlib import Path
+from Bio import pairwise2
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 import esm
 import torch
@@ -784,10 +788,19 @@ from Functions_HuggingFace import get_mutation_prob_matrix
 
 
 RUN_LINEAGE_PANEL = True
-
+TEST_MODE = False
+TEST_MAX_LINEAGES = 3
 LINEAGE_CLUSTER_FASTA = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/OM_list_cluster_nuc_plus.fa"
 LINEAGE_DIVERSITY_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/alignment_based_16feb26_dryrun"
 LINEAGE_PANEL_OUTDIR = "/home3/oml4h/PLM_SARS-CoV-2/Results/test/lineage_panel_mutability_vs_plm"
+# Flexible input selector for diversity FASTAs.
+# Examples:
+# - "H3N2_*_max5.fasta"
+# - "H3N2_*_max10.fasta"
+# - "H3N2_*_max_unique.fasta"
+# - "H3N2_*_max*.fasta"  (all max variants)
+# 
+LINEAGE_DIVERSITY_FILE_PATTERN = "H3N2_*_max5.fasta"
 
 MODEL_RUNS = [
     {
@@ -809,15 +822,41 @@ MODEL_RUNS = [
 
 ALPHA_GRID = np.round(np.arange(-1.0, 1.01, 0.1), 2)
 PSEUDOCOUNT = 1e-12
+ALPHA_SWEEP_PARALLEL = True
+ALPHA_SWEEP_MIN_GRID = 8
+ALPHA_SWEEP_MAX_WORKERS = None
+METHOD2_SCATTER_ALPHAS = [-1.0, 0.0, 1.0]
+METHOD2_SCATTER_MAX_POINTS = 200000
 
 # Keep consistent with lineage handling in build_lineage_subalignments.py
 LINEAGE_ALIAS = {
     "J.2.4.1": "K",
 }
 
+IGNORE_ALIGNMENT_CHARS = {"-", "*", "."}
+
 
 def _safe_label(label: str) -> str:
     return label.strip().replace(" ", "_").replace("/", "-")
+
+
+def _clean_pattern_tag(file_pattern: str) -> str:
+    tag = file_pattern.replace("*", "")
+    tag = tag.replace(".fasta", "")
+    tag = re.sub(r"_+", "_", tag).strip("_")
+    return _safe_label(tag) if tag else "pattern"
+
+
+RUN_MODE_TAG = "test" if TEST_MODE else "full"
+DIVERSITY_PATTERN_TAG = _clean_pattern_tag(LINEAGE_DIVERSITY_FILE_PATTERN)
+OUTPUT_TAG = f"{RUN_MODE_TAG}_{DIVERSITY_PATTERN_TAG}"
+
+
+def _tag_output_name(filename: str) -> str:
+    stem, ext = os.path.splitext(filename)
+    if TEST_MODE:
+        return f"test_{stem}_{DIVERSITY_PATTERN_TAG}{ext}"
+    return f"{stem}_{OUTPUT_TAG}{ext}"
 
 
 def _is_probably_nucleotide(seq: str) -> bool:
@@ -861,18 +900,20 @@ def parse_lineage_references(cluster_fasta: str):
     return refs
 
 
-def load_lineage_diversity_fastas(diversity_dir: str):
+def load_lineage_diversity_fastas(diversity_dir: str, file_pattern: str):
     lineage_files = {}
-    pattern = os.path.join(diversity_dir, "H3N2_*_max*.fasta")
+    pattern = os.path.join(diversity_dir, file_pattern)
     for path in glob.glob(pattern):
         filename = os.path.basename(path)
-        m = re.match(r"H3N2_(.+)_max\d+\.fasta$", filename)
+        m = re.match(r"H3N2_(.+)_(max[^.]*)\.fasta$", filename)
         if not m:
             continue
         lineage_key = m.group(1)
+        diversity_tag = m.group(2)
         records = list(SeqIO.parse(path, "fasta"))
         lineage_files[lineage_key] = {
             "path": path,
+            "diversity_tag": diversity_tag,
             "records": records,
         }
     return lineage_files
@@ -928,6 +969,134 @@ def compute_observed_diversity_profile(records, reference_protein: str):
     return freqs, valid_depth
 
 
+def _build_lineage_consensus_and_column_map(records):
+    if len(records) == 0:
+        return "", [], 0
+
+    aligned_sequences = [str(record.seq).upper() for record in records]
+    aln_len = max(len(seq) for seq in aligned_sequences)
+    seq_array = np.array([list(seq.ljust(aln_len, "-")) for seq in aligned_sequences])
+
+    aa_order = sorted(list(aa_to_codons.keys()))
+    valid_aas = set(aa_order)
+
+    consensus_chars = []
+    consensus_to_alignment_col = []
+
+    for col_idx in range(aln_len):
+        col_vals = seq_array[:, col_idx]
+        valid_vals = [aa for aa in col_vals if (aa not in IGNORE_ALIGNMENT_CHARS and aa in valid_aas)]
+        if len(valid_vals) == 0:
+            continue
+        residues, counts = np.unique(valid_vals, return_counts=True)
+        consensus_aa = residues[np.argmax(counts)]
+        consensus_chars.append(consensus_aa)
+        consensus_to_alignment_col.append(col_idx + 1)  # 1-based
+
+    return "".join(consensus_chars), consensus_to_alignment_col, aln_len
+
+
+def build_reference_to_alignment_column_map(reference_protein: str, records):
+    consensus_seq, consensus_to_alignment_col, aln_len = _build_lineage_consensus_and_column_map(records)
+    if not consensus_seq:
+        return {}, aln_len, 0
+
+    alignments = pairwise2.align.globalms(
+        reference_protein,
+        consensus_seq,
+        2.0,
+        -1.0,
+        -10.0,
+        -0.5,
+        one_alignment_only=True,
+    )
+    if len(alignments) == 0:
+        return {}, aln_len, 0
+
+    ref_aln, cons_aln = alignments[0].seqA, alignments[0].seqB
+
+    ref_pos = 0
+    cons_pos = 0
+    mapping = {}
+    matched_pairs = 0
+    for ref_char, cons_char in zip(ref_aln, cons_aln):
+        if ref_char != "-":
+            ref_pos += 1
+        if cons_char != "-":
+            cons_pos += 1
+
+        if ref_char != "-" and cons_char != "-":
+            if 1 <= cons_pos <= len(consensus_to_alignment_col):
+                mapping[ref_pos] = consensus_to_alignment_col[cons_pos - 1]
+                matched_pairs += 1
+
+    return mapping, aln_len, matched_pairs
+
+
+def compute_observed_diversity_profile_fast(records, reference_protein: str, ref_to_aln_col: dict, aln_len: int):
+    n_pos = len(reference_protein)
+    aa_order = sorted(list(aa_to_codons.keys()))
+    counts = pd.DataFrame(0.0, index=aa_order, columns=list(range(1, n_pos + 1)))
+    valid_depth = pd.Series(0.0, index=list(range(1, n_pos + 1)), dtype=float)
+
+    if len(records) == 0 or aln_len <= 0:
+        return counts, valid_depth, {
+            "mapped_sites": 0,
+            "compared_sites": 0,
+            "differing_sites": 0,
+            "fixed_differing_sites": 0,
+            "alignment_length": int(aln_len),
+        }
+
+    seq_array = np.array([list(str(record.seq).upper().ljust(aln_len, "-")) for record in records])
+
+    differing_sites = 0
+    fixed_differing_sites = 0
+    compared_sites = 0
+    valid_aas = set(aa_order)
+
+    for pos1 in range(1, n_pos + 1):
+        aln_col = ref_to_aln_col.get(pos1)
+        if aln_col is None or aln_col < 1 or aln_col > aln_len:
+            continue
+
+        residues = seq_array[:, aln_col - 1]
+        residues = np.array([aa for aa in residues if aa not in IGNORE_ALIGNMENT_CHARS and aa in valid_aas])
+        depth = int(len(residues))
+        valid_depth[pos1] = depth
+        if depth == 0:
+            continue
+
+        compared_sites += 1
+        ref_aa = reference_protein[pos1 - 1]
+        has_any_difference = bool(np.any(residues != ref_aa))
+        has_fixed_difference = bool(np.all(residues != ref_aa))
+        if has_any_difference:
+            differing_sites += 1
+        if has_fixed_difference:
+            fixed_differing_sites += 1
+
+        uniq, cnt = np.unique(residues, return_counts=True)
+        for aa, c in zip(uniq, cnt):
+            counts.loc[aa, pos1] = float(c)
+
+    freqs = counts.copy()
+    for pos1 in freqs.columns:
+        depth = valid_depth[pos1]
+        if depth > 0:
+            freqs[pos1] = freqs[pos1] / depth
+        else:
+            freqs[pos1] = 0.0
+
+    stats = {
+        "mapped_sites": int(len(ref_to_aln_col)),
+        "compared_sites": int(compared_sites),
+        "differing_sites": int(differing_sites),
+        "fixed_differing_sites": int(fixed_differing_sites),
+        "alignment_length": int(aln_len),
+    }
+    return freqs, valid_depth, stats
+
 def softmax_from_log_scores(log_scores: np.ndarray) -> np.ndarray:
     shifted = log_scores - np.nanmax(log_scores)
     ex = np.exp(shifted)
@@ -937,80 +1106,113 @@ def softmax_from_log_scores(log_scores: np.ndarray) -> np.ndarray:
     return ex / denom
 
 
-def evaluate_alpha_sweep(combined_df: pd.DataFrame, alpha_grid: np.ndarray) -> pd.DataFrame:
-    alpha_results = []
-    for alpha in alpha_grid:
-        working = combined_df.copy()
-        working["log_plm"] = np.log(working["plm_prob"].clip(lower=PSEUDOCOUNT))
-        working["log_mut"] = np.log(working["mut_prob"].clip(lower=PSEUDOCOUNT))
-        working["combined_log_score"] = working["log_plm"] + alpha * working["log_mut"]
+def _extract_corr_pvalue(result):
+    """Return (correlation, pvalue) from scipy result object or tuple."""
+    try:
+        return float(result[0]), float(result[1])
+    except Exception:
+        corr = getattr(result, "correlation", getattr(result, "statistic", np.nan))
+        pval = getattr(result, "pvalue", np.nan)
+        return float(corr), float(pval)
 
-        global_spearman = spearmanr(working["combined_log_score"], working["obs_freq"])
-        global_pearson = pearsonr(working["combined_log_score"], working["obs_freq"])
 
-        # scipy API compatibility across versions
-        if hasattr(global_spearman, "correlation"):
-            sp_r = global_spearman.correlation
-            sp_p = global_spearman.pvalue
-        elif hasattr(global_spearman, "statistic"):
-            sp_r = global_spearman.statistic
-            sp_p = global_spearman.pvalue
-        else:
-            sp_r, sp_p = global_spearman
+def _evaluate_single_alpha(alpha: float, base_df: pd.DataFrame) -> dict:
+    working = base_df.copy()
+    working["combined_log_score"] = working["log_plm"] + alpha * working["log_mut"]
 
-        if hasattr(global_pearson, "correlation"):
-            pr_r = global_pearson.correlation
-            pr_p = global_pearson.pvalue
-        elif hasattr(global_pearson, "statistic"):
-            pr_r = global_pearson.statistic
-            pr_p = global_pearson.pvalue
-        else:
-            pr_r, pr_p = global_pearson
+    global_spearman = spearmanr(working["combined_log_score"], working["obs_freq"])
+    global_pearson = pearsonr(working["combined_log_score"], working["obs_freq"])
+    sp_r, sp_p = _extract_corr_pvalue(global_spearman)
+    pr_r, pr_p = _extract_corr_pvalue(global_pearson)
 
-        top_frac = 0.05
-        n_top = max(1, int(len(working) * top_frac))
-        ranked = working.sort_values("combined_log_score", ascending=False)
-        top_hits = ranked.head(n_top)
-        baseline_prevalence = float(working["obs_present"].mean()) if len(working) > 0 else np.nan
-        top_prevalence = float(top_hits["obs_present"].mean()) if len(top_hits) > 0 else np.nan
-        top_enrichment = top_prevalence / baseline_prevalence if baseline_prevalence and baseline_prevalence > 0 else np.nan
+    top_frac = 0.05
+    n_top = max(1, int(len(working) * top_frac))
+    ranked = working.sort_values("combined_log_score", ascending=False)
+    top_hits = ranked.head(n_top)
+    baseline_prevalence = float(working["obs_present"].mean()) if len(working) > 0 else np.nan
+    top_prevalence = float(top_hits["obs_present"].mean()) if len(top_hits) > 0 else np.nan
+    top_enrichment = top_prevalence / baseline_prevalence if baseline_prevalence and baseline_prevalence > 0 else np.nan
 
-        site_nlls = []
-        site_rhos = []
-        grouped = working.groupby(["lineage", "position", "ref_aa"], sort=False)
-        for (_, _, _), site_df in grouped:
-            obs_vec = site_df["obs_freq"].to_numpy(dtype=float)
-            score_vec = site_df["combined_log_score"].to_numpy(dtype=float)
-            if np.nansum(obs_vec) <= 0:
-                continue
+    site_view = (
+        working.groupby(["lineage", "position", "ref_aa"], as_index=False)
+        .agg(
+            site_pred_score=("combined_log_score", "max"),
+            site_obs_burden=("obs_freq", "sum"),
+            site_mutated=("obs_present", "max"),
+        )
+    )
 
-            obs_norm = obs_vec / np.nansum(obs_vec)
-            pred_prob = softmax_from_log_scores(score_vec)
-            nll = -np.nansum(obs_norm * np.log(pred_prob.clip(min=PSEUDOCOUNT)))
-            site_nlls.append(float(nll))
+    site_spearman = (
+        spearmanr(site_view["site_pred_score"], site_view["site_obs_burden"])
+        if len(site_view) > 1
+        else (np.nan, np.nan)
+    )
+    site_sp_r, site_sp_p = _extract_corr_pvalue(site_spearman)
 
-            if np.nanstd(obs_vec) > 0 and np.nanstd(score_vec) > 0:
-                rho_result = spearmanr(score_vec, obs_vec)
-                if hasattr(rho_result, "correlation"):
-                    rho = rho_result.correlation
-                elif hasattr(rho_result, "statistic"):
-                    rho = rho_result.statistic
-                else:
-                    rho = rho_result[0]
-                if np.isfinite(rho):
-                    site_rhos.append(float(rho))
+    site_top_frac = 0.10
+    n_site_top = max(1, int(len(site_view) * site_top_frac)) if len(site_view) > 0 else 0
+    top_site_hits = site_view.sort_values("site_pred_score", ascending=False).head(n_site_top) if n_site_top > 0 else site_view.head(0)
+    site_top_precision = float(top_site_hits["site_mutated"].mean()) if len(top_site_hits) > 0 else np.nan
+    site_baseline = float(site_view["site_mutated"].mean()) if len(site_view) > 0 else np.nan
+    site_top_enrichment = site_top_precision / site_baseline if site_baseline and site_baseline > 0 else np.nan
 
-        alpha_results.append({
-            "alpha": float(alpha),
-            "global_spearman_r": float(sp_r) if np.isfinite(sp_r) else np.nan,
-            "global_spearman_p": float(sp_p) if np.isfinite(sp_p) else np.nan,
-            "global_pearson_r": float(pr_r) if np.isfinite(pr_r) else np.nan,
-            "global_pearson_p": float(pr_p) if np.isfinite(pr_p) else np.nan,
-            "top5pct_enrichment": float(top_enrichment) if np.isfinite(top_enrichment) else np.nan,
-            "mean_site_nll": float(np.mean(site_nlls)) if len(site_nlls) > 0 else np.nan,
-            "median_site_spearman": float(np.median(site_rhos)) if len(site_rhos) > 0 else np.nan,
-            "n_sites_used": int(len(site_nlls)),
-        })
+    site_nlls = []
+    site_rhos = []
+    grouped = working.groupby(["lineage", "position", "ref_aa"], sort=False)
+    for (_, _, _), site_df in grouped:
+        obs_vec = site_df["obs_freq"].to_numpy(dtype=float)
+        score_vec = site_df["combined_log_score"].to_numpy(dtype=float)
+        if np.nansum(obs_vec) <= 0:
+            continue
+
+        obs_norm = obs_vec / np.nansum(obs_vec)
+        pred_prob = softmax_from_log_scores(score_vec)
+        nll = -np.nansum(obs_norm * np.log(pred_prob.clip(min=PSEUDOCOUNT)))
+        site_nlls.append(float(nll))
+
+        if np.nanstd(obs_vec) > 0 and np.nanstd(score_vec) > 0:
+            rho_result = spearmanr(score_vec, obs_vec)
+            rho, _ = _extract_corr_pvalue(rho_result)
+            if np.isfinite(rho):
+                site_rhos.append(float(rho))
+
+    return {
+        "alpha": float(alpha),
+        # Method B: mutation-level flattened ranking (19xN entries)
+        "mut_flat_global_spearman_r": float(sp_r) if np.isfinite(sp_r) else np.nan,
+        "mut_flat_global_spearman_p": float(sp_p) if np.isfinite(sp_p) else np.nan,
+        "mut_flat_global_pearson_r": float(pr_r) if np.isfinite(pr_r) else np.nan,
+        "mut_flat_global_pearson_p": float(pr_p) if np.isfinite(pr_p) else np.nan,
+        "mut_flat_top5pct_enrichment": float(top_enrichment) if np.isfinite(top_enrichment) else np.nan,
+        "mut_flat_mean_site_nll": float(np.mean(site_nlls)) if len(site_nlls) > 0 else np.nan,
+        "mut_flat_median_site_spearman": float(np.median(site_rhos)) if len(site_rhos) > 0 else np.nan,
+        # Method A: site-level ranking (N entries)
+        "site_rank_spearman_r": float(site_sp_r) if np.isfinite(site_sp_r) else np.nan,
+        "site_rank_spearman_p": float(site_sp_p) if np.isfinite(site_sp_p) else np.nan,
+        "site_top10pct_mutated_precision": float(site_top_precision) if np.isfinite(site_top_precision) else np.nan,
+        "site_top10pct_mutated_enrichment": float(site_top_enrichment) if np.isfinite(site_top_enrichment) else np.nan,
+        "n_sites_used": int(len(site_nlls)),
+    }
+
+
+def evaluate_alpha_sweep(
+    combined_df: pd.DataFrame,
+    alpha_grid: np.ndarray,
+    parallel: bool = False,
+    max_workers: Optional[int] = None,
+) -> pd.DataFrame:
+    base_df = combined_df.copy()
+    base_df["log_plm"] = np.log(base_df["plm_prob"].clip(lower=PSEUDOCOUNT))
+    base_df["log_mut"] = np.log(base_df["mut_prob"].clip(lower=PSEUDOCOUNT))
+
+    alpha_values = [float(alpha) for alpha in alpha_grid]
+    if parallel and len(alpha_values) >= ALPHA_SWEEP_MIN_GRID:
+        workers = max_workers if max_workers is not None else min(len(alpha_values), max(1, os.cpu_count() or 1))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            alpha_results = list(executor.map(lambda alpha: _evaluate_single_alpha(alpha, base_df), alpha_values))
+    else:
+        alpha_results = [_evaluate_single_alpha(alpha, base_df) for alpha in alpha_values]
+
     return pd.DataFrame(alpha_results).sort_values("alpha")
 
 
@@ -1024,7 +1226,10 @@ if RUN_LINEAGE_PANEL:
 
     print("Loading lineage references and circulating diversity...")
     lineage_refs = parse_lineage_references(LINEAGE_CLUSTER_FASTA)
-    lineage_diversity = load_lineage_diversity_fastas(LINEAGE_DIVERSITY_DIR)
+    lineage_diversity = load_lineage_diversity_fastas(
+        LINEAGE_DIVERSITY_DIR,
+        LINEAGE_DIVERSITY_FILE_PATTERN,
+    )
 
     available_lineages = []
     for lineage in lineage_refs:
@@ -1033,6 +1238,12 @@ if RUN_LINEAGE_PANEL:
             available_lineages.append(lineage)
 
     print(f"Lineages with both ref+diversity data: {available_lineages}")
+    print(f"Diversity FASTA selector pattern: {LINEAGE_DIVERSITY_FILE_PATTERN}")
+    print(f"Output tag: {OUTPUT_TAG}")
+
+    if TEST_MODE:
+        available_lineages = available_lineages[:TEST_MAX_LINEAGES]
+        print(f"TEST_MODE enabled: limiting to first {len(available_lineages)} lineage(s)")
 
     # cache lineage-level non-PLM components once
     lineage_cache = {}
@@ -1046,7 +1257,23 @@ if RUN_LINEAGE_PANEL:
             print(f"Skipping {lineage}: empty translated protein")
             continue
         mut_profile = compute_lineage_mutation_profile(reference_nt, reference_protein)
-        obs_freq, obs_depth = compute_observed_diversity_profile(records, reference_protein)
+        ref_to_aln_col, aln_len, matched_pairs = build_reference_to_alignment_column_map(reference_protein, records)
+        obs_freq, obs_depth, diversity_stats = compute_observed_diversity_profile_fast(
+            records,
+            reference_protein,
+            ref_to_aln_col,
+            aln_len,
+        )
+
+        print(
+            f"[ALIGNMENT DIFF] {lineage}: any_differing_sites={diversity_stats['differing_sites']}, "
+            f"fixed_differing_sites={diversity_stats['fixed_differing_sites']} "
+            f"/ compared_sites={diversity_stats['compared_sites']} "
+            f"(mapped_ref_sites={diversity_stats['mapped_sites']}/{len(reference_protein)}, "
+            f"matched_pairs={matched_pairs}, alignment_len={diversity_stats['alignment_length']}; "
+            "ignoring gaps/stops)"
+        )
+
         lineage_cache[lineage] = {
             "lineage_key": lineage_key,
             "records": records,
@@ -1054,11 +1281,15 @@ if RUN_LINEAGE_PANEL:
             "mut_profile": mut_profile,
             "obs_freq": obs_freq,
             "obs_depth": obs_depth,
+            "ref_to_aln_col": ref_to_aln_col,
+            "alignment_diff_stats": diversity_stats,
             "diversity_path": lineage_diversity[lineage_key]["path"],
+            "diversity_tag": lineage_diversity[lineage_key]["diversity_tag"],
         }
 
     all_alpha_frames = []
     model_status_rows = []
+    per_lineage_best_rows = []
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -1070,24 +1301,15 @@ if RUN_LINEAGE_PANEL:
         model_outdir = os.path.join(LINEAGE_PANEL_OUTDIR, model_tag)
         os.makedirs(model_outdir, exist_ok=True)
 
-        try:
-            print(f"\nLoading model config: {model_tag}")
-            model_raw, alphabet = esm.pretrained.load_model_and_alphabet(run_cfg["base_model"])
-            model_raw.eval()
-            batch_converter = alphabet.get_batch_converter()
-
-            if run_cfg["mode"] == "finetuned":
-                loaded = EsmForMaskedLM.from_pretrained(run_cfg["checkpoint_dir"])
-                model = loaded[0] if isinstance(loaded, tuple) else loaded
-            else:
-                model = model_raw
-
-            model = model.eval().to(device)
-            model_status_rows.append({"model": model_tag, "status": "loaded", "reason": ""})
-        except Exception as exc:
-            print(f"Skipping {model_tag}: failed to load in this environment. Reason: {exc}")
-            model_status_rows.append({"model": model_tag, "status": "skipped", "reason": str(exc)})
-            continue
+        model = None
+        alphabet = None
+        batch_converter = None
+        model_ready = False
+        used_cached_plm = False
+        model_load_attempted = False
+        model_load_failed_reason = ""
+        model_runtime_failed = False
+        model_runtime_failed_reason = ""
 
         combined_rows = []
         per_lineage_summaries = []
@@ -1096,20 +1318,71 @@ if RUN_LINEAGE_PANEL:
             reference_protein = data["reference_protein"]
             print(f"Processing lineage {lineage} with {model_tag}: n_seq={len(data['records'])}, ref_len={len(reference_protein)}")
 
-            plm_out = get_mutation_prob_matrix(
-                reference_protein,
-                model,
-                run_cfg["layer"],
-                device,
-                batch_converter,
-                alphabet,
+            plm_profile_path = os.path.join(
+                model_outdir,
+                _tag_output_name(f"{data['lineage_key']}_plm_probability_profile.csv"),
             )
 
-            plm_matrix = pd.DataFrame(
-                plm_out["mutation_matrix"],
-                index=plm_out["amino_acids"],
-                columns=plm_out["positions"],
-            )
+            plm_matrix = None
+            if os.path.exists(plm_profile_path):
+                try:
+                    plm_matrix = pd.read_csv(plm_profile_path, index_col=0)
+                    used_cached_plm = True
+                    print(f"Using existing PLM matrix: {plm_profile_path}")
+                except Exception as exc:
+                    print(f"Failed to load existing PLM matrix for {lineage} ({plm_profile_path}): {exc}")
+                    print("Recomputing PLM matrix for this lineage.")
+
+            if plm_matrix is None:
+                if not model_ready and not model_load_attempted:
+                    model_load_attempted = True
+                    try:
+                        print(f"\nLoading model config: {model_tag}")
+                        model_raw, alphabet_local = esm.pretrained.load_model_and_alphabet(run_cfg["base_model"])
+                        model_raw.eval()
+                        batch_converter_local = alphabet_local.get_batch_converter()
+
+                        if run_cfg["mode"] == "finetuned":
+                            loaded = EsmForMaskedLM.from_pretrained(run_cfg["checkpoint_dir"])
+                            model_local = loaded[0] if isinstance(loaded, tuple) else loaded
+                        else:
+                            model_local = model_raw
+
+                        model = model_local.eval().to(device)
+                        alphabet = alphabet_local
+                        batch_converter = batch_converter_local
+                        model_ready = True
+                    except Exception as exc:
+                        model_load_failed_reason = str(exc)
+                        print(f"Skipping PLM generation for {model_tag}: failed to load in this environment. Reason: {exc}")
+
+                if not model_ready:
+                    continue
+
+                try:
+                    plm_out = get_mutation_prob_matrix(
+                        reference_protein,
+                        model,
+                        run_cfg["layer"],
+                        device,
+                        batch_converter,
+                        alphabet,
+                    )
+
+                    plm_matrix = pd.DataFrame(
+                        plm_out["mutation_matrix"],
+                        index=plm_out["amino_acids"],
+                        columns=plm_out["positions"],
+                    )
+                    plm_matrix.to_csv(plm_profile_path)
+                except Exception as exc:
+                    model_runtime_failed = True
+                    model_runtime_failed_reason = str(exc)
+                    print(f"Skipping model {model_tag}: runtime failure during PLM generation on lineage {lineage}. Reason: {exc}")
+                    break
+
+            if model_runtime_failed:
+                break
 
             for pos_label in plm_matrix.columns:
                 try:
@@ -1143,13 +1416,10 @@ if RUN_LINEAGE_PANEL:
                     })
 
             data["mut_profile"].to_csv(
-                os.path.join(model_outdir, f"{data['lineage_key']}_mutation_accessibility_profile.csv")
-            )
-            plm_matrix.to_csv(
-                os.path.join(model_outdir, f"{data['lineage_key']}_plm_probability_profile.csv")
+                os.path.join(model_outdir, _tag_output_name(f"{data['lineage_key']}_mutation_accessibility_profile.csv"))
             )
             data["obs_freq"].to_csv(
-                os.path.join(model_outdir, f"{data['lineage_key']}_observed_diversity_profile.csv")
+                os.path.join(model_outdir, _tag_output_name(f"{data['lineage_key']}_observed_diversity_profile.csv"))
             )
 
             per_lineage_summaries.append({
@@ -1157,8 +1427,27 @@ if RUN_LINEAGE_PANEL:
                 "lineage": lineage,
                 "n_sequences": len(data["records"]),
                 "reference_length": len(reference_protein),
+                "mapped_ref_sites": int(data["alignment_diff_stats"]["mapped_sites"]),
+                "compared_sites_non_gap_non_stop": int(data["alignment_diff_stats"]["compared_sites"]),
+                "differing_sites_vs_reference_non_gap_non_stop": int(data["alignment_diff_stats"]["differing_sites"]),
+                "fixed_differing_sites_vs_reference_non_gap_non_stop": int(data["alignment_diff_stats"]["fixed_differing_sites"]),
                 "diversity_fasta": data["diversity_path"],
+                "diversity_tag": data["diversity_tag"],
+                "plm_profile": plm_profile_path,
             })
+
+        if model_runtime_failed:
+            combined_rows = []
+            per_lineage_summaries = []
+            model_status_rows.append({"model": model_tag, "status": "skipped", "reason": f"runtime failure: {model_runtime_failed_reason}"})
+            continue
+
+        if model_ready:
+            model_status_rows.append({"model": model_tag, "status": "loaded", "reason": "used for PLM generation"})
+        elif used_cached_plm:
+            model_status_rows.append({"model": model_tag, "status": "cached_only", "reason": "all PLM profiles reused from disk"})
+        elif model_load_attempted:
+            model_status_rows.append({"model": model_tag, "status": "skipped", "reason": model_load_failed_reason})
 
         combined_df = pd.DataFrame(combined_rows)
         if combined_df.empty:
@@ -1166,24 +1455,112 @@ if RUN_LINEAGE_PANEL:
             continue
 
         combined_df.to_csv(
-            os.path.join(model_outdir, "lineage_combined_long_table.csv"),
+            os.path.join(model_outdir, _tag_output_name("lineage_combined_long_table.csv")),
             index=False,
         )
 
         lineage_meta_df = pd.DataFrame(per_lineage_summaries)
         lineage_meta_df.to_csv(
-            os.path.join(model_outdir, "lineage_panel_metadata.tsv"),
+            os.path.join(model_outdir, _tag_output_name("lineage_panel_metadata.tsv")),
             sep="\t",
             index=False,
         )
 
-        alpha_df = evaluate_alpha_sweep(combined_df, ALPHA_GRID)
+        use_parallel_alpha = ALPHA_SWEEP_PARALLEL and len(ALPHA_GRID) >= ALPHA_SWEEP_MIN_GRID
+        if use_parallel_alpha:
+            print(f"Running alpha sweep in parallel for {model_tag} (n_alpha={len(ALPHA_GRID)})")
+
+        alpha_df = evaluate_alpha_sweep(
+            combined_df,
+            ALPHA_GRID,
+            parallel=use_parallel_alpha,
+            max_workers=ALPHA_SWEEP_MAX_WORKERS,
+        )
         alpha_df["model"] = model_tag
         alpha_df.to_csv(
-            os.path.join(model_outdir, "alpha_sweep_fit_metrics.tsv"),
+            os.path.join(model_outdir, _tag_output_name("alpha_sweep_fit_metrics.tsv")),
             sep="\t",
             index=False,
         )
+
+        alpha_grid_set = {round(float(a), 6) for a in ALPHA_GRID}
+        scatter_alphas = [a for a in METHOD2_SCATTER_ALPHAS if round(float(a), 6) in alpha_grid_set]
+        if len(scatter_alphas) == 0 and len(ALPHA_GRID) > 0:
+            candidate_alphas = [float(ALPHA_GRID[0]), float(ALPHA_GRID[len(ALPHA_GRID) // 2]), float(ALPHA_GRID[-1])]
+            scatter_alphas = list(dict.fromkeys(candidate_alphas))
+
+        scatter_df = combined_df[["obs_freq", "plm_prob", "mut_prob"]].copy()
+        if len(scatter_df) > METHOD2_SCATTER_MAX_POINTS:
+            scatter_df = scatter_df.sample(METHOD2_SCATTER_MAX_POINTS, random_state=0)
+
+        if len(scatter_alphas) > 0 and len(scatter_df) > 0:
+            fig_sc, axes_sc = plt.subplots(1, len(scatter_alphas), figsize=(6 * len(scatter_alphas), 5), sharey=True)
+            if len(scatter_alphas) == 1:
+                axes_sc = [axes_sc]
+
+            for ax, alpha_value in zip(axes_sc, scatter_alphas):
+                x_vals = np.log10(
+                    scatter_df["plm_prob"].clip(lower=PSEUDOCOUNT)
+                    * np.power(scatter_df["mut_prob"].clip(lower=PSEUDOCOUNT), alpha_value)
+                )
+                y_vals = np.log10(scatter_df["obs_freq"].clip(lower=PSEUDOCOUNT))
+
+                sns.scatterplot(
+                    x=x_vals,
+                    y=y_vals,
+                    ax=ax,
+                    s=8,
+                    alpha=0.25,
+                    edgecolor=None,
+                )
+
+                corr_result = spearmanr(x_vals, y_vals)
+                corr_r, _ = _extract_corr_pvalue(corr_result)
+                ax.set_title(
+                    "Method B (mutation-level flattened)\n"
+                    f"alpha={alpha_value:.2f}, Spearman={corr_r:.3f}"
+                )
+                ax.set_xlabel("log10(PLM probability × mutation accessibility^alpha)")
+                ax.set_ylabel("log10(observed mutation frequency in lineage alignment)")
+                ax.grid(alpha=0.25)
+
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(model_outdir, _tag_output_name("method2_obsfreq_vs_plm_mut_scatter.png")),
+                dpi=300,
+            )
+            plt.show()
+
+        # Per-lineage best-alpha extraction for explicit Method A vs Method B overlays
+        for lineage_name, lineage_df in combined_df.groupby("lineage"):
+            lineage_alpha = evaluate_alpha_sweep(
+                lineage_df,
+                ALPHA_GRID,
+                parallel=use_parallel_alpha,
+                max_workers=ALPHA_SWEEP_MAX_WORKERS,
+            )
+            if lineage_alpha.empty:
+                continue
+
+            idx_a = lineage_alpha["site_top10pct_mutated_enrichment"].idxmax()
+            idx_b = lineage_alpha["mut_flat_global_spearman_r"].idxmax()
+
+            per_lineage_best_rows.append({
+                "model": model_tag,
+                "lineage": lineage_name,
+                "method": "Method A (Site-level)",
+                "criterion": "max site_top10pct_mutated_enrichment",
+                "best_alpha": float(lineage_alpha.loc[idx_a, "alpha"]),
+                "best_value": float(lineage_alpha.loc[idx_a, "site_top10pct_mutated_enrichment"]),
+            })
+            per_lineage_best_rows.append({
+                "model": model_tag,
+                "lineage": lineage_name,
+                "method": "Method B (Mutation-level flattened)",
+                "criterion": "max mut_flat_global_spearman_r",
+                "best_alpha": float(lineage_alpha.loc[idx_b, "alpha"]),
+                "best_value": float(lineage_alpha.loc[idx_b, "mut_flat_global_spearman_r"]),
+            })
 
         all_alpha_frames.append(alpha_df)
 
@@ -1191,7 +1568,7 @@ if RUN_LINEAGE_PANEL:
 
     status_df = pd.DataFrame(model_status_rows)
     status_df.to_csv(
-        os.path.join(LINEAGE_PANEL_OUTDIR, "model_run_status.tsv"),
+        os.path.join(LINEAGE_PANEL_OUTDIR, _tag_output_name("model_run_status.tsv")),
         sep="\t",
         index=False,
     )
@@ -1199,18 +1576,24 @@ if RUN_LINEAGE_PANEL:
     if len(all_alpha_frames) > 0:
         alpha_all_df = pd.concat(all_alpha_frames, ignore_index=True)
         alpha_all_df.to_csv(
-            os.path.join(LINEAGE_PANEL_OUTDIR, "alpha_sweep_fit_metrics_all_models.tsv"),
+            os.path.join(LINEAGE_PANEL_OUTDIR, _tag_output_name("alpha_sweep_fit_metrics_all_models.tsv")),
             sep="\t",
             index=False,
         )
 
+        print(
+            "Method A (site-level) context: each site gets a single score from the max mutation-level score at that site; "
+            "site precision = fraction of top-scored sites (top 10%) that have any observed mutation in the lineage set."
+        )
+
         # Cross-model overlay plots
         metric_cols = [
-            "global_spearman_r",
-            "global_pearson_r",
-            "median_site_spearman",
-            "mean_site_nll",
-            "top5pct_enrichment",
+            "site_top10pct_mutated_enrichment",
+            "site_top10pct_mutated_precision",
+            "site_rank_spearman_r",
+            "mut_flat_global_spearman_r",
+            "mut_flat_global_pearson_r",
+            "mut_flat_mean_site_nll",
         ]
         fig, axes = plt.subplots(2, 3, figsize=(18, 9), sharex=True)
         axes = axes.flatten()
@@ -1218,29 +1601,110 @@ if RUN_LINEAGE_PANEL:
             ax = axes[i]
             for model_tag, sub in alpha_all_df.groupby("model"):
                 ax.plot(sub["alpha"], sub[metric_col], marker="o", label=model_tag)
-            ax.set_title(metric_col)
-            ax.set_xlabel("alpha")
+            title_map = {
+                "site_top10pct_mutated_enrichment": "Method A (site-level): enrichment of mutated sites in top 10% scored sites",
+                "site_top10pct_mutated_precision": "Method A (site-level): fraction of top 10% scored sites that are observed mutated",
+                "site_rank_spearman_r": "Method A (site-level): Spearman(site score vs observed site mutation burden)",
+                "mut_flat_global_spearman_r": "Method B (mutation-level): Spearman(pred score vs observed mutation frequency)",
+                "mut_flat_global_pearson_r": "Method B (mutation-level): Pearson(pred score vs observed mutation frequency)",
+                "mut_flat_mean_site_nll": "Method B (mutation-level): mean site-level NLL of observed residue distribution",
+            }
+            ylabel_map = {
+                "site_top10pct_mutated_enrichment": "Enrichment ratio (top-10% sites / baseline)",
+                "site_top10pct_mutated_precision": "Precision (fraction of top-10% sites with any observed mutation)",
+                "site_rank_spearman_r": "Spearman correlation coefficient",
+                "mut_flat_global_spearman_r": "Spearman correlation coefficient",
+                "mut_flat_global_pearson_r": "Pearson correlation coefficient",
+                "mut_flat_mean_site_nll": "Mean site-level negative log-likelihood (lower is better)",
+            }
+            ax.set_title(title_map.get(metric_col, metric_col))
+            ax.set_xlabel("Alpha weight on mutation accessibility in log-space combination")
+            ax.set_ylabel(ylabel_map.get(metric_col, "Metric value"))
             ax.grid(alpha=0.3)
             if i == 0:
                 ax.legend()
 
-        # panel 6: best-alpha summary by metric and model (text)
-        axes[5].axis("off")
-        best_lines = []
-        for model_tag, sub in alpha_all_df.groupby("model"):
-            if sub.empty:
-                continue
-            best_sp = sub.loc[sub["global_spearman_r"].idxmax(), "alpha"]
-            best_nll = sub.loc[sub["mean_site_nll"].idxmin(), "alpha"]
-            best_lines.append(f"{model_tag}: best Spearman alpha={best_sp:.1f}, best NLL alpha={best_nll:.1f}")
-        axes[5].text(0.02, 0.98, "\n".join(best_lines), va="top")
-
         plt.tight_layout()
         plt.savefig(
-            os.path.join(LINEAGE_PANEL_OUTDIR, "alpha_sweep_model_comparison.png"),
+            os.path.join(LINEAGE_PANEL_OUTDIR, _tag_output_name("alpha_sweep_model_comparison.png")),
             dpi=300,
         )
         plt.show()
+
+        # Explicit two-method best-alpha summary table
+        best_rows = []
+        for model_tag, sub in alpha_all_df.groupby("model"):
+            if sub.empty:
+                continue
+            best_rows.append({
+                "model": model_tag,
+                "method": "Method A (Site-level)",
+                "criterion": "max site_top10pct_mutated_enrichment",
+                "best_alpha": float(sub.loc[sub["site_top10pct_mutated_enrichment"].idxmax(), "alpha"]),
+            })
+            best_rows.append({
+                "model": model_tag,
+                "method": "Method B (Mutation-level flattened)",
+                "criterion": "max mut_flat_global_spearman_r",
+                "best_alpha": float(sub.loc[sub["mut_flat_global_spearman_r"].idxmax(), "alpha"]),
+            })
+            best_rows.append({
+                "model": model_tag,
+                "method": "Method B (Mutation-level flattened)",
+                "criterion": "min mut_flat_mean_site_nll",
+                "best_alpha": float(sub.loc[sub["mut_flat_mean_site_nll"].idxmin(), "alpha"]),
+            })
+        pd.DataFrame(best_rows).to_csv(
+            os.path.join(LINEAGE_PANEL_OUTDIR, _tag_output_name("best_alpha_two_methods.tsv")),
+            sep="\t",
+            index=False,
+        )
+
+        if len(per_lineage_best_rows) > 0:
+            per_lineage_best_df = pd.DataFrame(per_lineage_best_rows)
+            per_lineage_best_df.to_csv(
+                os.path.join(LINEAGE_PANEL_OUTDIR, _tag_output_name("best_alpha_per_lineage_two_methods.tsv")),
+                sep="\t",
+                index=False,
+            )
+
+            fig_overlay, axes_overlay = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
+            method_order = ["Method A (Site-level)", "Method B (Mutation-level flattened)"]
+
+            for i, method_name in enumerate(method_order):
+                ax = axes_overlay[i]
+                subset = per_lineage_best_df[per_lineage_best_df["method"] == method_name].copy()
+                if subset.empty:
+                    ax.set_title(f"{method_name} (no data)")
+                    ax.axis("off")
+                    continue
+
+                sns.stripplot(
+                    data=subset,
+                    x="lineage",
+                    y="best_alpha",
+                    hue="model",
+                    dodge=True,
+                    jitter=0.15,
+                    size=7,
+                    ax=ax,
+                )
+                ax.axhline(0.0, linestyle="--", color="black", alpha=0.6)
+                ax.set_title(f"Per-lineage best alpha overlay\n{method_name}")
+                ax.set_xlabel("Lineage")
+                ax.set_ylabel("Best alpha")
+                ax.grid(alpha=0.25, axis="y")
+                if i > 0:
+                    ax.get_legend().remove()
+
+            handles, labels = axes_overlay[0].get_legend_handles_labels()
+            fig_overlay.legend(handles, labels, loc="upper center", ncol=max(1, len(labels)))
+            plt.tight_layout(rect=[0, 0, 1, 0.92])
+            plt.savefig(
+                os.path.join(LINEAGE_PANEL_OUTDIR, _tag_output_name("best_alpha_per_lineage_overlay.png")),
+                dpi=300,
+            )
+            plt.show()
 
         print("\nLineage panel complete.")
         print(f"Saved outputs in: {LINEAGE_PANEL_OUTDIR}")
@@ -1249,3 +1713,4 @@ if RUN_LINEAGE_PANEL:
         print("No model runs completed successfully. Check model_run_status.tsv for details.")
 
     
+    # %%
