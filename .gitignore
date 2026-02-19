@@ -2,3 +2,6 @@ __pycache__
 Results
 Results/*
 Results/test/*
+Sequences/gisaid_data
+Sequences/gisaid_data/*
+Sequences/om_list_cluster_db*
