@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import pandas as pd
+from Bio import Align
 from Bio import SeqIO
-from Bio import pairwise2
 from Bio.Seq import Seq
 
 
@@ -39,6 +39,8 @@ LINEAGE_ALIAS = {
 
 ALIGN_OPEN_GAP_SCORE = -10
 ALIGN_EXTEND_GAP_SCORE = -0.5
+ALIGN_MATCH_SCORE = 2
+ALIGN_MISMATCH_SCORE = -1
 
 TEST_MODE = False #True #False
 TEST_SAMPLE_SIZE = 20000
@@ -77,11 +79,37 @@ def to_protein_sequence(seq: str) -> str:
 	cleaned = seq.replace("-", "").replace(".", "").upper()
 	if not cleaned:
 		return ""
-	trimmed = cleaned[: (len(cleaned) // 3) * 3]
-	if not trimmed:
-		return ""
-	protein = str(Seq(trimmed).translate(to_stop=False))
-	return protein.replace("*", "")
+
+	best_orf = ""
+	best_has_start = False
+
+	for frame in range(3):
+		frame_seq = cleaned[frame:]
+		trimmed = frame_seq[: (len(frame_seq) // 3) * 3]
+		if not trimmed:
+			continue
+
+		translated = str(Seq(trimmed).translate(to_stop=False))
+		for peptide in translated.split("*"):
+			if not peptide:
+				continue
+
+			m_index = peptide.find("M")
+			has_start = m_index != -1
+			candidate = peptide[m_index:] if has_start else peptide
+
+			if not candidate:
+				continue
+
+			if (
+				not best_orf
+				or (has_start and not best_has_start)
+				or (has_start == best_has_start and len(candidate) > len(best_orf))
+			):
+				best_orf = candidate
+				best_has_start = has_start
+
+	return best_orf
 
 
 def parse_cluster_references(cluster_path: str) -> List[ClusterRef]:
@@ -120,24 +148,34 @@ def build_anchor_aligned_sequence(records: List, accession: str) -> str:
 def pad_cluster_to_anchor_alignment(
 	cluster_seq: str,
 	anchor_alignment: str,
-	match_score: float = 2,
-	mismatch_score: float = -1,
+	match_score: float = ALIGN_MATCH_SCORE,
+	mismatch_score: float = ALIGN_MISMATCH_SCORE,
 	gap_open: float = -10,
 	gap_extend: float = -0.5,
 ) -> str:
 	anchor_ungapped = anchor_alignment.replace("-", "")
-	globalms = getattr(pairwise2.align, "globalms")
-	alignment = globalms(
-		anchor_ungapped,
-		cluster_seq,
-		match_score,
-		mismatch_score,
-		gap_open,
-		gap_extend,
-		one_alignment_only=True,
-	)[0]
-	aligned_anchor = alignment.seqA
-	aligned_cluster = alignment.seqB
+	aligner = Align.PairwiseAligner()
+	aligner.mode = "global"
+	aligner.match_score = match_score
+	aligner.mismatch_score = mismatch_score
+	aligner.open_gap_score = gap_open
+	aligner.extend_gap_score = gap_extend
+	# Semiglobal/overlap-like behavior: avoid over-penalizing unmatched ends
+	# when references are partial relative to the anchor.
+	aligner.target_end_gap_score = 0.0
+	aligner.query_end_gap_score = 0.0
+	alignment = aligner.align(anchor_ungapped, cluster_seq)[0]
+
+	aligned_fasta = alignment.format("fasta")
+	aligned_lines = [
+		line.strip()
+		for line in aligned_fasta.splitlines()
+		if line.strip() and not line.startswith(">")
+	]
+	if len(aligned_lines) < 2:
+		raise ValueError("Failed to reconstruct pairwise alignment strings.")
+	aligned_anchor = aligned_lines[0]
+	aligned_cluster = aligned_lines[1]
 
 	cluster_by_anchor_pos: List[str] = []
 	for anchor_char, cluster_char in zip(aligned_anchor, aligned_cluster):
@@ -269,7 +307,12 @@ def main() -> None:
 
 	aligned_cluster_refs: List[ClusterRef] = []
 	for ref in cluster_refs:
-		padded_seq = pad_cluster_to_anchor_alignment(ref.sequence, anchor_alignment)
+		padded_seq = pad_cluster_to_anchor_alignment(
+			ref.sequence,
+			anchor_alignment,
+			gap_open=ALIGN_OPEN_GAP_SCORE,
+			gap_extend=ALIGN_EXTEND_GAP_SCORE,
+		)
 		aligned_cluster_refs.append(
 			ClusterRef(
 				record_id=ref.record_id,
