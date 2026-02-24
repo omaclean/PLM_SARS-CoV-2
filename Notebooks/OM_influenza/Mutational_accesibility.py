@@ -333,6 +333,248 @@ for codon_from in test_codons:
         diff = np.abs(raw_val - matrix_val)
         print(f"  {codon_from} → {aa}: raw={raw_val:.3e}, matrix={matrix_val:.3e}, |Δ|={diff:.3e}")
 
+# %%
+# Information loss from codon-level (64x20) -> amino-acid-level (20x20) aggregation
+#
+# Build a 20x20 transition matrix by averaging codon->AA probabilities across all
+# codons encoding each source amino acid. Then ask: how much variance in the original
+# codon-level 64x20 table is retained by this amino-acid-level compression?
+aa20 = [aa for aa in target_aas if aa != "*"]
+codon_to_aa_20 = codon_to_aa_matrix.loc[ordered_codons, aa20].copy()
+
+def _build_aa20_average_and_reconstruction(codon_to_aa_20_df: pd.DataFrame):
+    aa20_transition = pd.DataFrame(np.nan, index=aa20, columns=aa20, dtype=float)
+    source_counts = {}
+
+    for source_aa in aa20:
+        source_codons = [codon for codon in ordered_codons if genetic_code.get(codon) == source_aa]
+        source_counts[source_aa] = len(source_codons)
+        if len(source_codons) == 0:
+            continue
+        aa20_transition.loc[source_aa, :] = codon_to_aa_20_df.loc[source_codons, :].mean(axis=0, skipna=True)
+
+    reconstructed = pd.DataFrame(np.nan, index=ordered_codons, columns=aa20, dtype=float)
+    for codon in ordered_codons:
+        source_aa = genetic_code.get(codon)
+        if source_aa in aa20_transition.index:
+            reconstructed.loc[codon, :] = aa20_transition.loc[source_aa, :]
+
+    return aa20_transition, reconstructed, source_counts
+
+
+def _flattened_fit_metrics(observed_df: pd.DataFrame, predicted_df: pd.DataFrame):
+    obs_vals = observed_df.to_numpy(dtype=float).ravel()
+    pred_vals = predicted_df.to_numpy(dtype=float).ravel()
+    valid_mask = np.isfinite(obs_vals) & np.isfinite(pred_vals)
+
+    if not np.any(valid_mask):
+        return {
+            "n_entries": 0,
+            "total_var": np.nan,
+            "residual_var": np.nan,
+            "retained_pct": np.nan,
+            "corr": np.nan,
+            "rmse": np.nan,
+            "mae": np.nan,
+        }
+
+    obs_valid = obs_vals[valid_mask]
+    pred_valid = pred_vals[valid_mask]
+
+    total_var = float(np.var(obs_valid))
+    residuals = obs_valid - pred_valid
+    residual_var = float(np.var(residuals))
+    retained_pct = float(100.0 * (1.0 - residual_var / total_var)) if total_var > 0 else np.nan
+
+    corr_matrix = np.corrcoef(obs_valid, pred_valid)
+    corr_val = float(corr_matrix[0, 1]) if corr_matrix.shape == (2, 2) else np.nan
+    rmse = float(np.sqrt(np.mean(np.square(residuals))))
+    mae = float(np.mean(np.abs(residuals)))
+
+    return {
+        "n_entries": int(valid_mask.sum()),
+        "total_var": total_var,
+        "residual_var": residual_var,
+        "retained_pct": retained_pct,
+        "corr": corr_val,
+        "rmse": rmse,
+        "mae": mae,
+    }
+
+
+aa20_transition_avg, codon_to_aa_20_reconstructed, source_codon_counts = _build_aa20_average_and_reconstruction(codon_to_aa_20)
+flu_self_metrics = _flattened_fit_metrics(codon_to_aa_20, codon_to_aa_20_reconstructed)
+
+print("\n--- Codon->AA compression analysis (flu-specific 64x20 -> 20x20) ---")
+print("Methodological setup:")
+print("  1) Construct target matrix Y (flu 64x20): rows=source codons, columns=target amino acids (excluding stop).")
+print("  2) Construct compressed matrix A (20x20): for each source amino acid, average Y across synonymous source codons.")
+print("  3) Reconstruct codon-level predictor Y_hat (64x20): assign each codon row the corresponding amino-acid row from A.")
+print("  4) Compare Y vs Y_hat entry-wise over finite cells only (self-mutation NaNs excluded).")
+print("  5) Report variance decomposition + fit metrics.")
+print("Metric definitions used:")
+print("  total_var = Var(Y)")
+print("  residual_var = Var(Y - Y_hat)")
+print("  retained_variation_percent = 100 * (1 - residual_var / total_var)")
+print("  flattened_correlation_r = Corr(Y, Y_hat)")
+print("  RMSE = sqrt(mean((Y - Y_hat)^2)); MAE = mean(abs(Y - Y_hat))")
+print(f"Finite entries compared: {flu_self_metrics['n_entries']}")
+print(f"Total variance in original 64x20 table: {flu_self_metrics['total_var']:.6e}")
+print(f"Residual variance after 20x20 compression: {flu_self_metrics['residual_var']:.6e}")
+print(f"Variation retained by 20x20 aggregation: {flu_self_metrics['retained_pct']:.2f}%")
+print(f"Flattened correlation (original vs reconstructed): r={flu_self_metrics['corr']:.4f}")
+print(f"RMSE between original and reconstructed entries: {flu_self_metrics['rmse']:.6e}")
+print(f"MAE between original and reconstructed entries: {flu_self_metrics['mae']:.6e}")
+
+# Generic baseline model: Kimura-80-like nucleotide process
+# - AT content ~50% (uniform A/C/G/T frequencies in this simple implementation)
+# - transition:transversion bias = 2:1
+transition_pairs = {("A", "G"), ("G", "A"), ("C", "T"), ("T", "C")}
+row_total_mut_rate = float(np.mean(np.sum(h3n2_transitions, axis=1)))
+
+kimura80_transitions = np.zeros((4, 4), dtype=float)
+for i, src_base in enumerate(bases):
+    weights = {}
+    weight_sum = 0.0
+    for j, dst_base in enumerate(bases):
+        if i == j:
+            continue
+        weight = 2.0 if (src_base, dst_base) in transition_pairs else 1.0
+        weights[j] = weight
+        weight_sum += weight
+    for j, weight in weights.items():
+        kimura80_transitions[i, j] = row_total_mut_rate * (weight / weight_sum)
+
+kimura80_probs = kimura80_transitions.copy()
+for i in range(4):
+    kimura80_probs[i, i] = 1.0 - np.sum(kimura80_transitions[i, :])
+
+# Build codon->codon and codon->AA matrices for Kimura80 generic baseline
+codon_mutation_matrix_k80 = np.zeros((n_codons, n_codons), dtype=float)
+for i, codon_from in enumerate(codons):
+    for j, codon_to in enumerate(codons):
+        prob = 1.0
+        for k in range(3):
+            idx_from = bases.index(codon_from[k])
+            idx_to = bases.index(codon_to[k])
+            prob *= kimura80_probs[idx_from, idx_to]
+        codon_mutation_matrix_k80[i, j] = prob
+
+codon_mutation_df_k80 = pd.DataFrame(codon_mutation_matrix_k80, index=codons, columns=codons)
+
+codon_to_aa_matrix_k80 = pd.DataFrame(0.0, index=ordered_codons, columns=target_aas)
+for codon_from in ordered_codons:
+    for aa in target_aas:
+        total_prob = 0.0
+        for codon_to in aa_to_codons_all[aa]:
+            total_prob += codon_mutation_df_k80.loc[codon_from, codon_to]
+        codon_to_aa_matrix_k80.loc[codon_from, aa] = total_prob
+
+for codon_from in ordered_codons:
+    own_aa = genetic_code.get(codon_from)
+    if own_aa in codon_to_aa_matrix_k80.columns:
+        codon_to_aa_matrix_k80.loc[codon_from, own_aa] = np.nan
+
+codon_to_aa_20_k80 = codon_to_aa_matrix_k80.loc[ordered_codons, aa20].copy()
+aa20_transition_avg_k80, codon_to_aa_20_reconstructed_k80, _ = _build_aa20_average_and_reconstruction(codon_to_aa_20_k80)
+
+generic_self_metrics = _flattened_fit_metrics(codon_to_aa_20_k80, codon_to_aa_20_reconstructed_k80)
+generic_to_flu_metrics = _flattened_fit_metrics(codon_to_aa_20, codon_to_aa_20_reconstructed_k80)
+aa20_flu_vs_k80_metrics = _flattened_fit_metrics(aa20_transition_avg, aa20_transition_avg_k80)
+
+if np.isfinite(generic_to_flu_metrics["residual_var"]) and generic_to_flu_metrics["residual_var"] > 0:
+    error_reduction_pct = 100.0 * (
+        (generic_to_flu_metrics["residual_var"] - flu_self_metrics["residual_var"])
+        / generic_to_flu_metrics["residual_var"]
+    )
+else:
+    error_reduction_pct = np.nan
+
+print("\n--- Generic Kimura-80 baseline vs flu-specific matrix ---")
+print("Methodological setup:")
+print("  1) Build generic nucleotide model Q_K80 with AT=50% and Ti:Tv=2:1.")
+print("  2) Match its total per-row mutation load to the mean flu H3N2 row-sum for scale comparability.")
+print("  3) Generate generic codon->codon probabilities (64x64) by independent per-site multiplication.")
+print("  4) Aggregate to generic codon->AA matrix Y_K80 (64x20), then compress to A_K80 (20x20), reconstruct Y_hat_K80.")
+print("  5) Evaluate two tests against the flu target Y_flu:")
+print("     - within-model compression test: Y_K80 vs Y_hat_K80")
+print("     - cross-model approximation test: Y_flu vs Y_hat_K80")
+print("  6) Quantify gain from flu-specific model using residual-variance reduction:")
+print("     gain_percent = 100 * (resid_var(Y_flu vs Y_hat_K80) - resid_var(Y_flu vs Y_hat_flu)) / resid_var(Y_flu vs Y_hat_K80)")
+print(
+    f"Generic model retained variation in its own 64x20->20x20 compression: "
+    f"{generic_self_metrics['retained_pct']:.2f}%"
+)
+print(
+    f"How much of flu 64x20 variation is captured by generic 20x20 reconstruction: "
+    f"{generic_to_flu_metrics['retained_pct']:.2f}%"
+)
+print(
+    f"Flu-specific 20x20 error reduction vs generic 20x20 (against flu 64x20 target): "
+    f"{error_reduction_pct:.2f}%"
+)
+print(
+    f"Flu vs generic 20x20 matrix similarity (flattened r): "
+    f"{aa20_flu_vs_k80_metrics['corr']:.4f}"
+)
+
+compression_summary = pd.DataFrame([
+    {
+        "comparison": "flu64_to_flu20_reconstruction",
+        "finite_entries_compared": flu_self_metrics["n_entries"],
+        "total_variance": flu_self_metrics["total_var"],
+        "residual_variance": flu_self_metrics["residual_var"],
+        "retained_variation_percent": flu_self_metrics["retained_pct"],
+        "flattened_correlation_r": flu_self_metrics["corr"],
+        "rmse": flu_self_metrics["rmse"],
+        "mae": flu_self_metrics["mae"],
+    },
+    {
+        "comparison": "k80_64_to_k80_20_reconstruction",
+        "finite_entries_compared": generic_self_metrics["n_entries"],
+        "total_variance": generic_self_metrics["total_var"],
+        "residual_variance": generic_self_metrics["residual_var"],
+        "retained_variation_percent": generic_self_metrics["retained_pct"],
+        "flattened_correlation_r": generic_self_metrics["corr"],
+        "rmse": generic_self_metrics["rmse"],
+        "mae": generic_self_metrics["mae"],
+    },
+    {
+        "comparison": "flu64_to_k80_20_reconstruction",
+        "finite_entries_compared": generic_to_flu_metrics["n_entries"],
+        "total_variance": generic_to_flu_metrics["total_var"],
+        "residual_variance": generic_to_flu_metrics["residual_var"],
+        "retained_variation_percent": generic_to_flu_metrics["retained_pct"],
+        "flattened_correlation_r": generic_to_flu_metrics["corr"],
+        "rmse": generic_to_flu_metrics["rmse"],
+        "mae": generic_to_flu_metrics["mae"],
+    },
+    {
+        "comparison": "flu20_vs_k80_20",
+        "finite_entries_compared": aa20_flu_vs_k80_metrics["n_entries"],
+        "total_variance": aa20_flu_vs_k80_metrics["total_var"],
+        "residual_variance": aa20_flu_vs_k80_metrics["residual_var"],
+        "retained_variation_percent": aa20_flu_vs_k80_metrics["retained_pct"],
+        "flattened_correlation_r": aa20_flu_vs_k80_metrics["corr"],
+        "rmse": aa20_flu_vs_k80_metrics["rmse"],
+        "mae": aa20_flu_vs_k80_metrics["mae"],
+    },
+])
+
+gain_summary = pd.DataFrame([
+    {
+        "flu_specific_error_reduction_vs_generic_percent": error_reduction_pct,
+        "generic_model_assumption": "AT50_TiTv2to1",
+        "generic_row_total_mutation_rate": row_total_mut_rate,
+    }
+])
+
+compression_summary.to_csv(f"{outdir}/codon_to_aa_compression_summary.csv", index=False)
+gain_summary.to_csv(f"{outdir}/flu_vs_k80_gain_summary.csv", index=False)
+
+aa20_transition_avg.to_csv(f"{outdir}/aa20_transition_matrix_from_codon_averages.csv")
+aa20_transition_avg_k80.to_csv(f"{outdir}/aa20_transition_matrix_k80_generic.csv")
+
 # %% 
 # Get reference nucleotide sequence
 ref_nuc_seq = str(nuc_sequences[base_lineage_index].seq)
@@ -768,7 +1010,16 @@ else:
 
 
 # %%
-
+##
+##
+##
+##
+##
+##
+##
+##
+##
+##
 # %% [markdown]
 # # Lineage-wide mutation accessibility vs PLM probability panel
 # %%
@@ -791,7 +1042,14 @@ RUN_LINEAGE_PANEL = True
 TEST_MODE = False
 TEST_MAX_LINEAGES = 3
 LINEAGE_CLUSTER_FASTA = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/OM_list_cluster_nuc_plus.fa"
+
+
 LINEAGE_DIVERSITY_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/alignment_based_19feb26_"
+LINEAGE_DIVERSITY_FILE_PATTERN = "H3N2_*_max10.fasta"
+
+LINEAGE_DIVERSITY_DIR="/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/alignment_based_19feb26/hard"
+LINEAGE_DIVERSITY_FILE_PATTERN = 'H3N2*hard_nextle2_max10.fasta'
+
 LINEAGE_PANEL_OUTDIR = "/home3/oml4h/PLM_SARS-CoV-2/Results/test/lineage_panel_mutability_vs_plm/gisaidinc"
 # Flexible input selector for diversity FASTAs.
 # Examples:
@@ -800,7 +1058,7 @@ LINEAGE_PANEL_OUTDIR = "/home3/oml4h/PLM_SARS-CoV-2/Results/test/lineage_panel_m
 # - "H3N2_*_max10_unique.fasta"
 # - "H3N2_*_max*.fasta"  (all max variants)
 # 
-LINEAGE_DIVERSITY_FILE_PATTERN = "H3N2_*_max10.fasta"
+
 
 MODEL_RUNS = [
     {
@@ -1487,6 +1745,10 @@ if RUN_LINEAGE_PANEL:
 
         if len(scatter_alphas) > 0 and len(combined_df) > 0:
             lineage_names = sorted(combined_df["lineage"].dropna().unique().tolist())
+            lineage_seq_counts = {
+                lineage_name: len(lineage_cache.get(lineage_name, {}).get("records", []))
+                for lineage_name in lineage_names
+            }
             n_lineages = len(lineage_names)
             if n_lineages > 0:
                 nrows = n_lineages
@@ -1495,7 +1757,7 @@ if RUN_LINEAGE_PANEL:
                     nrows,
                     ncols,
                     figsize=(4.5 * ncols, 3.8 * nrows),
-                    sharex="row",
+                    sharex=None,
                     sharey="row",
                 )
 
@@ -1507,6 +1769,7 @@ if RUN_LINEAGE_PANEL:
                         axes_sc = axes_sc.reshape(-1, 1)
 
                 for row_idx, lineage_name in enumerate(lineage_names):
+                    n_seq_lineage = int(lineage_seq_counts.get(lineage_name, 0))
                     lineage_scatter_df = combined_df.loc[
                         combined_df["lineage"] == lineage_name,
                         ["obs_freq", "plm_prob", "mut_prob"],
@@ -1540,7 +1803,10 @@ if RUN_LINEAGE_PANEL:
 
                         corr_result = spearmanr(x_vals, y_vals)
                         corr_r, _ = _extract_corr_pvalue(corr_result)
-                        ax.set_title(f"alpha={alpha_value:.2f}\nρ={corr_r:.3f}, n={len(lineage_scatter_df)}")
+                        ax.set_title(
+                            f"alpha={alpha_value:.2f}\n"
+                            f"ρ={corr_r:.3f}, n_mut={len(lineage_scatter_df)}, n_seq={n_seq_lineage}"
+                        )
                         ax.grid(alpha=0.25)
 
                         if row_idx == nrows - 1:
