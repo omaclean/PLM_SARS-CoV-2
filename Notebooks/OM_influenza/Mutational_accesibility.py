@@ -59,9 +59,24 @@ outdir='/home3/oml4h/PLM_SARS-CoV-2/Results/test/J.2.4/prob_mutations_HA3_fine'
 
 import os
 os.makedirs(outdir, exist_ok=True)
+key_matrix_dir = os.path.join(outdir, "key_probability_matrices")
+os.makedirs(key_matrix_dir, exist_ok=True)
+
+
+def _save_key_matrix(matrix_like, filename, index=True):
+    if isinstance(matrix_like, pd.DataFrame):
+        matrix_like.to_csv(os.path.join(key_matrix_dir, filename), index=index)
+        return
+    if isinstance(matrix_like, np.ndarray):
+        pd.DataFrame(matrix_like).to_csv(os.path.join(key_matrix_dir, filename), index=index)
+        return
+    pd.DataFrame(matrix_like).to_csv(os.path.join(key_matrix_dir, filename), index=index)
+
+
 # import without header, have it as it's own row
 probability_matrix=pd.read_csv(probability_matrix_file, index_col=0, header=None)
 print("Probability matrix shape:", probability_matrix.shape)
+_save_key_matrix(probability_matrix, "plm_probability_matrix_raw_with_header_row.csv")
 
 print(probability_matrix.iloc[0,1:20])
 
@@ -209,6 +224,9 @@ h3n2_probs = h3n2_transitions.copy()
 for i in range(4):
     h3n2_probs[i, i] = 1.0 - np.sum(h3n2_transitions[i, :])
 
+_save_key_matrix(pd.DataFrame(h3n2_transitions, index=bases, columns=bases), "h3n2_nucleotide_transition_rates.csv")
+_save_key_matrix(pd.DataFrame(h3n2_probs, index=bases, columns=bases), "h3n2_nucleotide_transition_probabilities.csv")
+
 # Generate all 64 codons using bases ['A', 'C', 'G', 'T']
 codons = ["".join(trip) for trip in itertools.product(bases, repeat=3)]
 n_codons = len(codons)
@@ -231,6 +249,7 @@ for i, codon_from in enumerate(codons):
 # Convert to DataFrame
 codon_mutation_df = pd.DataFrame(codon_mutation_matrix, index=codons, columns=codons)
 codon_mutation_df.to_csv(f"{outdir}/codon_mutation_matrix.csv")
+_save_key_matrix(codon_mutation_df, "codon_mutation_matrix_h3n2.csv")
 
 print("Codon Mutation Matrix (H3N2) shape:", codon_mutation_df.shape)
 print("Example transitions:")
@@ -284,6 +303,8 @@ for codon_from in ordered_codons:
     own_aa = genetic_code.get(codon_from)
     if own_aa in codon_to_aa_matrix.columns:
         codon_to_aa_matrix.loc[codon_from, own_aa] = np.nan
+
+_save_key_matrix(codon_to_aa_matrix, "codon_to_aa_matrix_h3n2_with_stop.csv")
 
 plt.figure(figsize=(18, 10))
 ax = sns.heatmap(
@@ -341,6 +362,7 @@ for codon_from in test_codons:
 # codon-level 64x20 table is retained by this amino-acid-level compression?
 aa20 = [aa for aa in target_aas if aa != "*"]
 codon_to_aa_20 = codon_to_aa_matrix.loc[ordered_codons, aa20].copy()
+_save_key_matrix(codon_to_aa_20, "codon_to_aa_matrix_h3n2_aa20.csv")
 
 def _build_aa20_average_and_reconstruction(codon_to_aa_20_df: pd.DataFrame):
     aa20_transition = pd.DataFrame(np.nan, index=aa20, columns=aa20, dtype=float)
@@ -586,6 +608,7 @@ ref_nuc_seq = ref_nuc_seq.upper().replace('U', 'T')
 # probability_matrix was read with header=None, so row 0 is the sequence info
 plm_matrix = probability_matrix.iloc[1:, :].copy()
 plm_matrix = plm_matrix.apply(pd.to_numeric, errors='coerce')
+_save_key_matrix(plm_matrix, "plm_probability_matrix_numeric.csv")
 
 # Initialize Output Matrix
 # Index: Amino Acids (same as PLM matrix)
@@ -691,6 +714,7 @@ def validate_mutational_matrix(matrix):
 
 validate_mutational_matrix(mutational_prob_matrix)
 mutational_prob_matrix.to_csv(f"{outdir}/mutational_prob_matrix.csv")
+_save_key_matrix(mutational_prob_matrix, "mutational_probability_matrix_from_codon_model.csv")
 
 # %%
 # Calculate Combined Matrices
@@ -702,6 +726,8 @@ combined_prob_sqrt_matrix = plm_matrix * np.sqrt(mutational_prob_matrix)
 
 combined_prob_matrix.to_csv(f"{outdir}/combined_prob_matrix.csv")
 combined_prob_sqrt_matrix.to_csv(f"{outdir}/combined_prob_sqrt_matrix.csv")
+_save_key_matrix(combined_prob_matrix, "combined_probability_matrix_plm_times_mut.csv")
+_save_key_matrix(combined_prob_sqrt_matrix, "combined_probability_matrix_plm_times_sqrt_mut.csv")
 
 print("Combined Matrix Shape:", combined_prob_matrix.shape)
 print("Combined Sqrt Matrix Shape:", combined_prob_sqrt_matrix.shape)
