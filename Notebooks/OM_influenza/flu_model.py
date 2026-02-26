@@ -2,6 +2,7 @@
 import numpy as np
 import pandas as pd
 from scipy.integrate import odeint
+from scipy.optimize import root_scalar
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import os
@@ -15,9 +16,9 @@ PEAK_DAY = 200  # Jan 14th approx (relative to July 1st start)
 INFECTIOUS_PERIOD = 3.0
 LATENT_PERIOD = 2.0
 IMPORTATION_RATE = 10.0  # Constant daily importations (year-round)
-BETA_K = 0.65 # Higher baseline R0 for K lineage
-BETA_CF = 0.65  # Baseline R0 for counterfactual lineage
-PLANT_ESCAPE_SLOPE = 0.0147  # Adjusted slope for linear susceptibility function
+BETA_K = 0.5 # Higher baseline R0 for K lineage
+BETA_CF = 0.5  # Baseline R0 for counterfactual lineage
+PLANT_ESCAPE_SLOPE_INIT = 0.02  # Initial guess; calibrated at runtime to reproduce target Re gain
 POPULATION=67_000_000  # UK Population Approximation
 NAIVE=2_500_000  # Approximate naive population size
 # % H3N2 circulation by season (used to scale cohort sizes)
@@ -32,50 +33,65 @@ outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu_smea
 class AntigenicSeirModel:
     # ... [Previous Init and Susceptibility methods remain unchanged] ...
     
-    def __init__(self, historical_strains, population_size=67_000_000, current_year=2025.5):
+    def __init__(self, historical_strains, population_size=67_000_000, current_year=2025.5,
+                 escape_slope=PLANT_ESCAPE_SLOPE_INIT):
         self.history = historical_strains
         self.pop_size = population_size
         self.current_year = current_year
+        self.escape_slope = escape_slope
         self.epochs = sorted(list(self.history.keys()))
 
     # [Include _sigmoid_susceptibility and _linear_susceptibility here]
-    def _linear_susceptibility(self, distance, base_susceptibility=0.3, scaling_factor=PLANT_ESCAPE_SLOPE):
+    def _linear_susceptibility(self, distance, base_susceptibility=0.3, scaling_factor=None):
+        if scaling_factor is None:
+            scaling_factor = self.escape_slope
         return min(1.0, base_susceptibility + (scaling_factor * distance))
 
     def calculate_susceptibility(self, current_strain_coord, vaccine_coord=None):
-        # ... [Previous logic remains unchanged] ...
-        # (Copy your existing logic here for brevity)
         curr_coord = np.array(current_strain_coord)
         sigmas = [1.0] # Naive
         for year in self.epochs:
             hist_coord = np.array(self.history[year])
             dist = np.linalg.norm(curr_coord - hist_coord)
-            # Simple waning logic from your script
             years_elapsed = max(0, self.current_year - year)
             susc = self._linear_susceptibility(dist)
-            total_susc = 1.0 - ((1.0 - susc) * np.exp(-0.05 * years_elapsed))
+            total_susc = 1.0 - ((1.0 - susc) * np.exp(-0.16 * years_elapsed))
             sigmas.append(total_susc)
             
         if vaccine_coord is not None:
              v_dist = np.linalg.norm(np.array(vaccine_coord) - curr_coord)
              susc_v = self._linear_susceptibility(v_dist)
-             total_susc_v = 1.0 - ((1.0 - susc_v) * np.exp(-0.15 * 0.5))
-             sigmas.append(total_susc_v)
+             # CHANGED: Static waning removed. Only the baseline is appended.
+             sigmas.append(susc_v)
         else:
             sigmas.append(1.0)
         return np.array(sigmas)
 
-    def deriv(self, y, t, base_beta, sigma_vector, latent_period, infectious_period, 
+    def deriv(self, y, t, base_beta, base_sigma_vector, latent_period, infectious_period, 
               seasonal_amplitude, peak_day, importation_rate):
-        """
-        Modified deriv function to include importation.
-        importation_rate: Daily new cases arriving from outside (float)
-        """
+        
         # 1. Seasonal Beta Forcing
         forcing = 1 + seasonal_amplitude * np.cos(2 * np.pi * (t - peak_day) / 365.0)
         beta_t = base_beta * forcing
         
-        num_compartments = len(sigma_vector)
+        # 2. Dynamic Vaccine Waning (Ray et al. 2019)
+        sigma_t = np.array(base_sigma_vector, dtype=float)
+        vacc_idx = -1 # Vaccine is the last cohort
+        vax_day = 92.0 # Approx 1st October (assuming 1st July start)
+        
+        # 16% increase in susceptibility per 28 days
+        waning_rate_per_day = np.log(1.16) / 28.0 
+        
+        if t >= vax_day:
+            days_post_vax = t - vax_day
+            sigma_t[vacc_idx] = min(1.0, sigma_t[vacc_idx] * np.exp(waning_rate_per_day * days_post_vax))
+        else:
+            # To avoid a summer peak of unvaccinated individuals, we assume residual 
+            # cross-protection from the previous year holds them at a moderate baseline
+            # until the new vaccine is administered.
+            sigma_t[vacc_idx] = min(1.0, sigma_t[vacc_idx] * 1.5) 
+            
+        num_compartments = len(sigma_t)
         S_cohorts = y[:num_compartments]
         E = y[num_compartments]
         I = y[num_compartments + 1]
@@ -83,12 +99,8 @@ class AntigenicSeirModel:
         # Standard Force of Infection
         lam = beta_t * I / self.pop_size
         
-        dS_dt = -lam * sigma_vector * S_cohorts
-        
-        # New Infections = Internal transmission + IMPORTATION
-        # We add importation directly to the flow from S to E, or simply add to E
-        # Adding to E simulates people arriving in the latent phase or infecting locals
-        new_infections = np.sum(lam * sigma_vector * S_cohorts)
+        dS_dt = -lam * sigma_t * S_cohorts
+        new_infections = np.sum(lam * sigma_t * S_cohorts)
         
         dE_dt = new_infections - (1/latent_period) * E + importation_rate
         dI_dt = (1/latent_period) * E - (1/infectious_period) * I
@@ -126,6 +138,57 @@ class AntigenicSeirModel:
         df = pd.DataFrame(ret, columns=cols)
         df['time'] = t
         return df, sigmas
+
+
+def calibrate_escape_slope(model, pop_dist, cf_coord, k_coord, vacc_coord,
+                           target_re_increase=0.0147):
+    """
+    Solve for the PLANT_ESCAPE_SLOPE that yields a target per-unit-distance
+    relative Re increase between the counterfactual and the K lineage.
+
+    Parameters
+    ----------
+    model : AntigenicSeirModel
+        Model instance (its escape_slope will be updated in-place on success).
+    pop_dist : list[int]
+        Population distribution [Naive, ..., Vacc].
+    cf_coord, k_coord, vacc_coord : tuple
+        PLANT coordinates for counterfactual, K lineage, and vaccine strain.
+    target_re_increase : float
+        Desired *per-unit-distance* relative Re gain, i.e.
+        (S_eff_K / S_eff_CF − 1) / ‖K − CF‖ = target_re_increase.
+
+    Returns
+    -------
+    float
+        Calibrated escape slope.
+    """
+    dist_diff = np.linalg.norm(np.array(k_coord) - np.array(cf_coord))
+    target_ratio = 1.0 + (target_re_increase * dist_diff)
+
+    pop = np.array(pop_dist, dtype=float)
+
+    def objective(test_slope):
+        model.escape_slope = test_slope
+
+        sigmas_cf = model.calculate_susceptibility(cf_coord, vacc_coord)
+        sigmas_k  = model.calculate_susceptibility(k_coord,  vacc_coord)
+
+        S_eff_cf = np.sum(pop * sigmas_cf)
+        S_eff_k  = np.sum(pop * sigmas_k)
+
+        return (S_eff_k / S_eff_cf) - target_ratio
+
+    result = root_scalar(objective, bracket=[1e-6, 0.5], method='brentq')
+
+    if not result.converged:
+        raise ValueError("Could not converge on a valid escape slope.")
+
+    # Leave the model with the solved value
+    model.escape_slope = result.root
+    return result.root
+
+
 # ==========================================
 # 1. CONFIGURATION & DATA
 # ==========================================
@@ -160,24 +223,25 @@ for year in sorted(history.keys()):
 # %% 
 # Population Distribution [Naive, 2019...2024, Vacc]
 # Each year cohort is scaled by %H3N2 circulation for that season.
-
+#need to sanity check this infl A and B as demoninator
 H3N2_FRACTION_BY_YEAR = {
     2019: 0.30, #https://archive.cdc.gov/www_cdc_gov/flu/about/burden/2019-2020/archive-09292021.html#:~:text=seasonal%20influenza%20vaccination.-,2019%E2%80%932020%20Burden%20Estimates,by%20A(H1N1)pdm09%20viruses
     2020: 0.30,
-    2021: 0.90,
+    2021: 0.80, # https://www.gov.uk/government/statistics/annual-flu-reports/surveillance-of-influenza-and-other-seasonal-respiratory-viruses-in-winter-2021-to-2022 figure 15, online analysis
+    # of infl A it's 270/(44.7+270)=85.7%, infl A =(44.7+270+635)/(44.7+270+635+69.5)=93%=80%
     2022: 0.28, #https://www.ecdc.europa.eu/en/publications-data/seasonal-influenza-annual-epidemiological-report-20222023
     2023: 0.30, #https://www.rivm.nl/en/flu-and-flu-vaccine/facts-and-figures/annual-reporting-surveillance-2023-2024
     2024: 0.45, #https://www.rivm.nl/en/flu-and-flu-vaccine/facts-and-figures/annual-reporting-surveillance-2024-2025#:~:text=In%20all%20age%20groups%2C%20influenza,%2C%20Meijer%20et%20al.).
 }
-#citation for these estimates?
+#citation for these estimates? what about people who get infected in multiple years?
 BASE_COHORT_COUNTS = {
     2019: 12_000_000,
-    2020: 1_000_000,
-    2021: 5_000_000,
-    2022: 8_000_000,
-    2023: 10_000_000,
-    2024: 10_000_000,
-    "Vacc": 15_000_000,
+    2020: 1_200_000,
+    2021: 6_000_000,
+    2022: 12_000_000, #12 million each? https://www.sciencedirect.com/science/article/pii/S2213260014700347?via%3Dihub 
+    2023: 12_000_000,
+    2024: 12_000_000,
+    "Vacc": 15_000_000, #https://assets.publishing.service.gov.uk/media/663e246cae748c43d3793925/AB-24-026_Immunisation_Schedule.pdf
 }
 # 2. Identify which years are explicit (2019-2024) and which are imputed (2014-2018)
 history_years = sorted(history.keys())
@@ -260,15 +324,34 @@ for year in sorted(history.keys()):
 
     dist = np.linalg.norm(np.array(history[year]) - np.array(k_coord ))
     print(f"Distance from K lineage to {year}: {dist:.2f} units")
+
+# B. Counterfactual: No Mutation I160K
+# Distance from 2024 is ~1.0 unit -> Within 2.0 threshold (protected)
+cf_coord = (3.011719, 3.59375, -0.34155) # (3.693,3.424,-0.073) # Approx PLANT coord on just first branch with I160K only
+
+# ---- Calibrate the escape slope so 1.47 %/unit Re gain is emergent ----
+TARGET_RE_GAIN_PER_UNIT = 0.0147   # target: 1.47 % Re increase per PLANT-distance unit
+calibrated_slope = calibrate_escape_slope(
+    model, pop_dist, cf_coord, k_coord, vacc_coord,
+    target_re_increase=TARGET_RE_GAIN_PER_UNIT,
+)
+dist_kc = np.linalg.norm(np.array(k_coord) - np.array(cf_coord))
+print(f"\n--- CALIBRATION ---")
+print(f"Target Re gain per unit distance : {TARGET_RE_GAIN_PER_UNIT:.4f}")
+print(f"Calibrated escape slope          : {calibrated_slope:.6f}")
+print(f"Antigenic distance K ↔ CF        : {dist_kc:.3f} units")
+# Verify
+_sig_cf = model.calculate_susceptibility(cf_coord, vacc_coord)
+_sig_k  = model.calculate_susceptibility(k_coord,  vacc_coord)
+_ratio  = np.sum(np.array(pop_dist) * _sig_k) / np.sum(np.array(pop_dist) * _sig_cf)
+print(f"Achieved Re ratio S_eff_K/S_eff_CF : {_ratio:.6f}  "
+      f"(per-unit gain = {(_ratio - 1) / dist_kc:.4f})")
+
 # %% 
 # Vaccine mismatched
 
 
 res_k, sigmas_k = model.run(k_coord, vacc_coord, pop_dist, beta=BETA_K)
-
-# B. Counterfactual: No Mutation I160K
-# Distance from 2024 is ~1.0 unit -> Within 2.0 threshold (protected)
-cf_coord = (3.011719, 3.59375, -0.34155) # (3.693,3.424,-0.073) # Approx PLANT coord on just first branch with I160K only
 
 res_cf, sigmas_cf = model.run(cf_coord, vacc_coord, pop_dist, beta=BETA_CF)
 
@@ -305,24 +388,31 @@ print("Note: If Implied > Target, increase sigmoid midpoint or decrease steepnes
 # ==========================================
 
 # Helper function to calculate Rt (effective reproduction number) over time
-def calculate_Rt_over_time(df, beta, infectious_period, sigma_vector, pop_size, 
+def calculate_Rt_over_time(df, beta, infectious_period, base_sigma_vector, pop_size, 
                            seasonal_amplitude=SEASONAL_AMPLITUDE, peak_day=PEAK_DAY):
-    """Calculate Rt (time-varying reproduction number) at each timepoint accounting for seasonality and susceptibility depletion"""
     times = df['time'].values
     R0_vals = []
     
+    waning_rate_per_day = np.log(1.16) / 28.0
+    vax_day = 92.0
+    vacc_idx = -1
+    
     for t in times:
-        # Calculate seasonal forcing
         forcing = 1 + seasonal_amplitude * np.cos(2 * np.pi * (t - peak_day) / 365.0)
         beta_t = beta * forcing
         
-        # Calculate average susceptibility weighted by susceptible population
+        # Recreate dynamic sigma for this timestep
+        sigma_t = np.array(base_sigma_vector, dtype=float)
+        if t >= vax_day:
+            sigma_t[vacc_idx] = min(1.0, sigma_t[vacc_idx] * np.exp(waning_rate_per_day * (t - vax_day)))
+        else:
+            sigma_t[vacc_idx] = min(1.0, sigma_t[vacc_idx] * 1.5)
+            
         S_cohorts = df.iloc[int(t*4) if int(t*4) < len(df) else -1][
             [c for c in df.columns if c.startswith('S_')]
         ].values
-        avg_susceptibility = np.sum(S_cohorts * sigma_vector) / np.sum(S_cohorts)
         
-        # Rt = beta(t) * infectious_period * avg_susceptibility
+        avg_susceptibility = np.sum(S_cohorts * sigma_t) / np.sum(S_cohorts)
         Rt = beta_t * infectious_period * avg_susceptibility
         R0_vals.append(Rt)
     
@@ -338,9 +428,9 @@ def day_to_date(day, start_month=7, start_day=1):
 
 # Calculate Rt (time-varying reproduction number) for both scenarios
 Rt_k = calculate_Rt_over_time(res_k, BETA_K, infectious_period=INFECTIOUS_PERIOD, 
-                               sigma_vector=sigmas_k, pop_size=model.pop_size)
+                               base_sigma_vector=sigmas_k, pop_size=model.pop_size)
 Rt_cf = calculate_Rt_over_time(res_cf, BETA_CF, infectious_period=INFECTIOUS_PERIOD, 
-                                sigma_vector=sigmas_cf, pop_size=model.pop_size)
+                                base_sigma_vector=sigmas_cf, pop_size=model.pop_size)
 
 # Create comprehensive figure
 fig = plt.figure(figsize=(18, 14))
@@ -546,7 +636,7 @@ ax8.text(0.02, 0.98, f'Initial S_eff:\nK: {S_eff_k[0]:.1f}M\nCF: {S_eff_cf[0]:.1
 plt.tight_layout()
 
 
-regime=f"R0_shift_k_{R0_t_k.mean():.2f}_vs_{R0_t_cf.mean():.2f}_escape_param={PLANT_ESCAPE_SLOPE}"
+regime=f"R0_shift_k_{R0_t_k.mean():.2f}_vs_{R0_t_cf.mean():.2f}_escape_param={model.escape_slope:.6f}"
 output_path = os.path.join(outdir, f'flu_model_comprehensive_analysis_{regime}.png')
 
 plt.savefig(output_path, dpi=300, bbox_inches='tight')
