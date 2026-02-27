@@ -22,6 +22,12 @@ from IPython.display import display, HTML
 from Bio.PDB import PDBIO
 from io import StringIO
 import matplotlib.pyplot as plt
+from typing import Optional, List, Dict, Tuple, Any, Union, Iterable
+
+import glob
+import os
+import re
+from Bio import pairwise2
 
 
 ## Compression Functions ########################################################
@@ -2053,3 +2059,481 @@ def create_h3_numbering_map(query_input, reference_sequence, signal_peptide_leng
                 mapping_dict[current_query_pos] = "N-term-Insert"
 
     return mapping_dict
+
+
+def _tag_output_name(filename: str, test_mode: bool = False, diversity_pattern_tag: str = "", output_tag: str = "") -> str:
+    stem, ext = os.path.splitext(filename)
+    if test_mode:
+        return f"test_{stem}_{diversity_pattern_tag}{ext}"
+    return f"{stem}_{output_tag}{ext}"
+
+
+def _is_probably_nucleotide(seq: str) -> bool:
+    cleaned = seq.replace("-", "").replace(".", "").upper()
+    if not cleaned:
+        return False
+    nuc_chars = set("ACGTUN")
+    frac = sum(1 for char in cleaned if char in nuc_chars) / len(cleaned)
+    return frac >= 0.95
+
+
+def _translate_nt_to_protein(seq: str) -> str:
+    cleaned = seq.replace("-", "").replace(".", "").upper().replace("U", "T")
+    trimmed = cleaned[: (len(cleaned) // 3) * 3]
+    if not trimmed:
+        return ""
+    return str(Seq(trimmed).translate(to_stop=False)).replace("*", "")
+
+
+def parse_lineage_references(cluster_fasta: str, lineage_alias: Optional[dict] = None):
+    if lineage_alias is None:
+        lineage_alias = {}
+    refs = {}
+    for record in SeqIO.parse(cluster_fasta, "fasta"):
+        header = record.id.strip()
+        lineage_raw = header.split("|")[-1] if "|" in header else header
+        lineage = lineage_alias.get(lineage_raw, lineage_raw)
+
+        raw_seq = str(record.seq)
+        nt_seq = raw_seq.replace("-", "").replace(".", "").upper().replace("U", "T")
+        if _is_probably_nucleotide(raw_seq):
+            protein_seq = _translate_nt_to_protein(raw_seq)
+        else:
+            protein_seq = raw_seq.replace("-", "")
+
+        if lineage not in refs:
+            refs[lineage] = {
+                "header": header,
+                "lineage": lineage,
+                "nucleotide": nt_seq,
+                "protein": protein_seq,
+            }
+    return refs
+
+
+def load_lineage_diversity_fastas(diversity_dir: str, file_pattern: str):
+    lineage_files = {}
+    pattern = os.path.join(diversity_dir, file_pattern)
+    for path in glob.glob(pattern):
+        filename = os.path.basename(path)
+        m = re.match(r"H3N2_(.+)_(max[^.]*)\.fasta$", filename)
+        if not m:
+            continue
+        lineage_key = m.group(1)
+        diversity_tag = m.group(2)
+        records = list(SeqIO.parse(path, "fasta"))
+        lineage_files[lineage_key] = {
+            "path": path,
+            "diversity_tag": diversity_tag,
+            "records": records,
+        }
+    return lineage_files
+
+
+def compute_lineage_mutation_profile(reference_nt: str, reference_protein: str, aa_to_codons: dict, codon_mutation_df: pd.DataFrame):
+    profile = pd.DataFrame(
+        0.0,
+        index=list(aa_to_codons.keys()),
+        columns=list(range(1, len(reference_protein) + 1)),
+    )
+
+    for pos1 in range(1, len(reference_protein) + 1):
+        codon = reference_nt[(pos1 - 1) * 3 : pos1 * 3]
+        if len(codon) != 3 or codon not in codon_mutation_df.index:
+            continue
+        for target_aa, target_codons in aa_to_codons.items():
+            total = 0.0
+            for tc in target_codons:
+                if tc in codon_mutation_df.columns:
+                    total += float(codon_mutation_df.loc[codon, tc])
+            profile.loc[target_aa, pos1] = total
+
+    return profile
+
+
+def compute_observed_diversity_profile(records, reference_protein: str, aa_to_codons: dict):
+    aa_order = sorted(list(aa_to_codons.keys()))
+    n_pos = len(reference_protein)
+
+    counts = pd.DataFrame(0, index=aa_order, columns=list(range(1, n_pos + 1)))
+    valid_depth = pd.Series(0, index=list(range(1, n_pos + 1)), dtype=float)
+
+    for record in records:
+        seq = str(record.seq)
+        seq = seq[:n_pos] if len(seq) >= n_pos else seq + ("-" * (n_pos - len(seq)))
+        for pos1 in range(1, n_pos + 1):
+            aa = seq[pos1 - 1]
+            if aa == "-":
+                continue
+            if aa in counts.index:
+                counts.loc[aa, pos1] += 1
+            valid_depth[pos1] += 1
+
+    freqs = counts.copy().astype(float)
+    for pos1 in freqs.columns:
+        depth = valid_depth[pos1]
+        if depth > 0:
+            freqs[pos1] = freqs[pos1] / depth
+        else:
+            freqs[pos1] = 0.0
+
+    return freqs, valid_depth
+
+
+def _build_lineage_consensus_and_column_map(records, aa_to_codons: dict, ignore_chars: set):
+    if len(records) == 0:
+        return "", [], 0
+
+    aligned_sequences = [str(record.seq).upper() for record in records]
+    aln_len = max(len(seq) for seq in aligned_sequences)
+    seq_array = np.array([list(seq.ljust(aln_len, "-")) for seq in aligned_sequences])
+
+    aa_order = sorted(list(aa_to_codons.keys()))
+    valid_aas = set(aa_order)
+
+    consensus_chars = []
+    consensus_to_alignment_col = []
+
+    for col_idx in range(aln_len):
+        col_vals = seq_array[:, col_idx]
+        valid_vals = [aa for aa in col_vals if (aa not in ignore_chars and aa in valid_aas)]
+        if len(valid_vals) == 0:
+            continue
+        residues, counts = np.unique(valid_vals, return_counts=True)
+        consensus_aa = residues[np.argmax(counts)]
+        consensus_chars.append(consensus_aa)
+        consensus_to_alignment_col.append(col_idx + 1)  # 1-based
+
+    return "".join(consensus_chars), consensus_to_alignment_col, aln_len
+
+
+def build_reference_to_alignment_column_map(reference_protein: str, records, aa_to_codons: dict, ignore_chars: set):
+    consensus_seq, consensus_to_alignment_col, aln_len = _build_lineage_consensus_and_column_map(records, aa_to_codons, ignore_chars)
+    if not consensus_seq:
+        return {}, aln_len, 0
+
+    alignments = pairwise2.align.globalms(
+        reference_protein,
+        consensus_seq,
+        2.0,
+        -1.0,
+        -10.0,
+        -0.5,
+        one_alignment_only=True,
+    )
+    if len(alignments) == 0:
+        return {}, aln_len, 0
+
+    ref_aln, cons_aln = alignments[0].seqA, alignments[0].seqB
+
+    ref_pos = 0
+    cons_pos = 0
+    mapping = {}
+    matched_pairs = 0
+    for ref_char, cons_char in zip(ref_aln, cons_aln):
+        if ref_char != "-":
+            ref_pos += 1
+        if cons_char != "-":
+            cons_pos += 1
+
+        if ref_char != "-" and cons_char != "-":
+            if 1 <= cons_pos <= len(consensus_to_alignment_col):
+                mapping[ref_pos] = consensus_to_alignment_col[cons_pos - 1]
+                matched_pairs += 1
+
+    return mapping, aln_len, matched_pairs
+
+
+def compute_observed_diversity_profile_fast(records, reference_protein: str, ref_to_aln_col: dict, aln_len: int, aa_to_codons: dict, ignore_chars: set):
+    n_pos = len(reference_protein)
+    aa_order = sorted(list(aa_to_codons.keys()))
+    counts = pd.DataFrame(0.0, index=aa_order, columns=list(range(1, n_pos + 1)))
+    valid_depth = pd.Series(0.0, index=list(range(1, n_pos + 1)), dtype=float)
+
+    if len(records) == 0 or aln_len <= 0:
+        return counts, valid_depth, {
+            "mapped_sites": 0,
+            "compared_sites": 0,
+            "differing_sites": 0,
+            "fixed_differing_sites": 0,
+            "alignment_length": int(aln_len),
+        }
+
+    seq_array = np.array([list(str(record.seq).upper().ljust(aln_len, "-")) for record in records])
+
+    differing_sites = 0
+    fixed_differing_sites = 0
+    compared_sites = 0
+    valid_aas = set(aa_order)
+
+    for pos1 in range(1, n_pos + 1):
+        aln_col = ref_to_aln_col.get(pos1)
+        if aln_col is None or aln_col < 1 or aln_col > aln_len:
+            continue
+
+        residues = seq_array[:, aln_col - 1]
+        residues = np.array([aa for aa in residues if aa not in ignore_chars and aa in valid_aas])
+        depth = int(len(residues))
+        valid_depth[pos1] = depth
+        if depth == 0:
+            continue
+
+        compared_sites += 1
+        ref_aa = reference_protein[pos1 - 1]
+        has_any_difference = bool(np.any(residues != ref_aa))
+        has_fixed_difference = bool(np.all(residues != ref_aa))
+        if has_any_difference:
+            differing_sites += 1
+        if has_fixed_difference:
+            fixed_differing_sites += 1
+
+        uniq, cnt = np.unique(residues, return_counts=True)
+        for aa, c in zip(uniq, cnt):
+            counts.loc[aa, pos1] = float(c)
+
+    freqs = counts.copy()
+    for pos1 in freqs.columns:
+        depth = valid_depth[pos1]
+        if depth > 0:
+            freqs[pos1] = freqs[pos1] / depth
+        else:
+            freqs[pos1] = 0.0
+
+    stats = {
+        "mapped_sites": int(len(ref_to_aln_col)),
+        "compared_sites": int(compared_sites),
+        "differing_sites": int(differing_sites),
+        "fixed_differing_sites": int(fixed_differing_sites),
+        "alignment_length": int(aln_len),
+    }
+    return freqs, valid_depth, stats
+
+def softmax_from_log_scores(log_scores: np.ndarray) -> np.ndarray:
+    shifted = log_scores - np.nanmax(log_scores)
+    ex = np.exp(shifted)
+    denom = np.nansum(ex)
+    if denom <= 0:
+        return np.zeros_like(log_scores)
+    return ex / denom
+
+
+def _extract_corr_pvalue(result):
+    """Return (correlation, pvalue) from scipy result object or tuple."""
+    try:
+        return float(result[0]), float(result[1])
+    except Exception:
+        corr = getattr(result, "correlation", getattr(result, "statistic", np.nan))
+        pval = getattr(result, "pvalue", np.nan)
+        return float(corr), float(pval)
+
+
+def _evaluate_single_alpha(alpha: float, base_df: pd.DataFrame, pseudocount: float = 1e-6) -> dict:
+    working = base_df.copy()
+    working["combined_log_score"] = working["log_plm"] + alpha * working["log_mut"]
+
+    global_spearman = spearmanr(working["combined_log_score"], working["obs_freq"])
+    global_pearson = pearsonr(working["combined_log_score"], working["obs_freq"])
+    sp_r, sp_p = _extract_corr_pvalue(global_spearman)
+    pr_r, pr_p = _extract_corr_pvalue(global_pearson)
+
+    top_frac = 0.05
+    n_top = max(1, int(len(working) * top_frac))
+    ranked = working.sort_values("combined_log_score", ascending=False)
+    top_hits = ranked.head(n_top)
+    baseline_prevalence = float(working["obs_present"].mean()) if len(working) > 0 else np.nan
+    top_prevalence = float(top_hits["obs_present"].mean()) if len(top_hits) > 0 else np.nan
+    top_enrichment = top_prevalence / baseline_prevalence if baseline_prevalence and baseline_prevalence > 0 else np.nan
+
+    site_view = (
+        working.groupby(["lineage", "position", "ref_aa"], as_index=False)
+        .agg(
+            site_pred_score=("combined_log_score", "max"),
+            site_obs_burden=("obs_freq", "sum"),
+            site_mutated=("obs_present", "max"),
+        )
+    )
+
+    site_spearman = (
+        spearmanr(site_view["site_pred_score"], site_view["site_obs_burden"])
+        if len(site_view) > 1
+        else (np.nan, np.nan)
+    )
+    site_sp_r, site_sp_p = _extract_corr_pvalue(site_spearman)
+
+    site_top_frac = 0.10
+    n_site_top = max(1, int(len(site_view) * site_top_frac)) if len(site_view) > 0 else 0
+    top_site_hits = site_view.sort_values("site_pred_score", ascending=False).head(n_site_top) if n_site_top > 0 else site_view.head(0)
+    site_top_precision = float(top_site_hits["site_mutated"].mean()) if len(top_site_hits) > 0 else np.nan
+    site_baseline = float(site_view["site_mutated"].mean()) if len(site_view) > 0 else np.nan
+    site_top_enrichment = site_top_precision / site_baseline if site_baseline and site_baseline > 0 else np.nan
+
+    site_nlls = []
+    site_rhos = []
+    grouped = working.groupby(["lineage", "position", "ref_aa"], sort=False)
+    for (_, _, _), site_df in grouped:
+        obs_vec = site_df["obs_freq"].to_numpy(dtype=float)
+        score_vec = site_df["combined_log_score"].to_numpy(dtype=float)
+        if np.nansum(obs_vec) <= 0:
+            continue
+
+        obs_norm = obs_vec / np.nansum(obs_vec)
+        pred_prob = softmax_from_log_scores(score_vec)
+        nll = -np.nansum(obs_norm * np.log(pred_prob.clip(min=pseudocount)))
+        site_nlls.append(float(nll))
+
+        if np.nanstd(obs_vec) > 0 and np.nanstd(score_vec) > 0:
+            rho_result = spearmanr(score_vec, obs_vec)
+            rho, _ = _extract_corr_pvalue(rho_result)
+            if np.isfinite(rho):
+                site_rhos.append(float(rho))
+
+    return {
+        "alpha": float(alpha),
+        # Method B: mutation-level flattened ranking (19xN entries)
+        "mut_flat_global_spearman_r": float(sp_r) if np.isfinite(sp_r) else np.nan,
+        "mut_flat_global_spearman_p": float(sp_p) if np.isfinite(sp_p) else np.nan,
+        "mut_flat_global_pearson_r": float(pr_r) if np.isfinite(pr_r) else np.nan,
+        "mut_flat_global_pearson_p": float(pr_p) if np.isfinite(pr_p) else np.nan,
+        "mut_flat_top5pct_enrichment": float(top_enrichment) if np.isfinite(top_enrichment) else np.nan,
+        "mut_flat_mean_site_nll": float(np.mean(site_nlls)) if len(site_nlls) > 0 else np.nan,
+        "mut_flat_median_site_spearman": float(np.median(site_rhos)) if len(site_rhos) > 0 else np.nan,
+        # Method A: site-level ranking (N entries)
+        "site_rank_spearman_r": float(site_sp_r) if np.isfinite(site_sp_r) else np.nan,
+        "site_rank_spearman_p": float(site_sp_p) if np.isfinite(site_sp_p) else np.nan,
+        "site_top10pct_mutated_precision": float(site_top_precision) if np.isfinite(site_top_precision) else np.nan,
+        "site_top10pct_mutated_enrichment": float(site_top_enrichment) if np.isfinite(site_top_enrichment) else np.nan,
+        "n_sites_used": int(len(site_nlls)),
+    }
+
+
+def evaluate_alpha_sweep(
+    combined_df: pd.DataFrame,
+    alpha_grid: np.ndarray,
+    parallel: bool = False,
+    max_workers: Optional[int] = None,
+    alpha_sweep_min_grid: int = 10,
+    pseudocount: float = 1e-6,
+) -> pd.DataFrame:
+    base_df = combined_df.copy()
+    base_df["log_plm"] = np.log(base_df["plm_prob"].clip(lower=pseudocount))
+    base_df["log_mut"] = np.log(base_df["mut_prob"].clip(lower=pseudocount))
+
+    alpha_values = [float(alpha) for alpha in alpha_grid]
+    if parallel and len(alpha_values) >= alpha_sweep_min_grid:
+        workers = max_workers if max_workers is not None else min(len(alpha_values), max(1, os.cpu_count() or 1))
+        # Note: You'll need ThreadPoolExecutor imported if parallel=True is used
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            alpha_results = list(executor.map(lambda alpha: _evaluate_single_alpha(alpha, base_df, pseudocount), alpha_values))
+    else:
+        alpha_results = [_evaluate_single_alpha(alpha, base_df, pseudocount) for alpha in alpha_values]
+
+    return pd.DataFrame(alpha_results).sort_values("alpha")
+
+
+## Convenience helpers used by notebooks ---------------------------------------
+def load_plm_probability_matrix(path):
+    """Load a PLM probability matrix CSV in the flexible formats used by notebooks.
+
+    Returns the raw dataframe as read with index_col=0, header=None when possible.
+    """
+    try:
+        df = pd.read_csv(path, index_col=0, header=None)
+    except Exception:
+        df = pd.read_csv(path, index_col=0)
+    return df
+
+
+def calculate_mutational_accessibility(probability_matrix, codon_mutation_df, aa_to_codons, reference_nt=None):
+    """Given a PLM probability matrix (as read in the notebooks), produce a
+    codon->AA mutational probability matrix and combined PLM×mutational matrices.
+
+    Parameters
+    - probability_matrix: DataFrame (often read with header=None, index_col=0)
+    - codon_mutation_df: DataFrame 64x64 of codon->codon probabilities
+    - aa_to_codons: dict mapping amino-acid letter -> list of codons
+    - reference_nt: optional nucleotide reference sequence (string). If provided
+      it is used to map columns to codons; otherwise the function will attempt
+      to infer codons from the probability_matrix header row (first row).
+
+    Returns dict with keys: mutational_prob_matrix (DataFrame), plm_matrix (DataFrame),
+    combined_prob_matrix (DataFrame), combined_prob_sqrt_matrix (DataFrame)
+    """
+    # Detect header-row sequence (common notebook format: first row contains sequence)
+    pm = probability_matrix.copy()
+    plm_matrix = None
+    # If first row contains non-numeric values and more rows exist, treat it as header
+    first_row = pm.iloc[0, :]
+    if first_row.apply(lambda x: isinstance(x, str)).any() and pm.shape[0] > 1:
+        # numeric part starts at row 1
+        try:
+            plm_matrix = pm.iloc[1:, :].apply(pd.to_numeric, errors="coerce")
+        except Exception:
+            plm_matrix = pm.iloc[1:, :]
+    else:
+        # assume whole df is numeric PLM matrix
+        plm_matrix = pm.apply(pd.to_numeric, errors="coerce")
+
+    # If reference_nt provided, build codon list from it
+    if reference_nt is not None:
+        ref = reference_nt.upper().replace("U", "T").replace(" ", "")
+        ncols = plm_matrix.shape[1]
+        codons = []
+        for i in range(ncols):
+            start = i * 3
+            cod = ref[start : start + 3]
+            codons.append(cod)
+    else:
+        # try to infer codons from original probability_matrix header row
+        header_seq = pm.iloc[0, :].astype(str).tolist()
+        # if header_seq looks like a sequence string concatenated, try split by characters
+        if len(header_seq) >= plm_matrix.shape[1] and all(len(s) == 1 for s in header_seq[: plm_matrix.shape[1]]):
+            # join and take triplets
+            seq = "".join(header_seq[: plm_matrix.shape[1]])
+            codons = [seq[i * 3 : i * 3 + 3] for i in range(plm_matrix.shape[1])]
+        else:
+            # fallback: cannot determine codons; use placeholder 'NNN'
+            codons = ["NNN"] * plm_matrix.shape[1]
+
+    # Build mutational probability matrix: rows AA, columns positions (column labels copied from plm_matrix)
+    aas = sorted(aa_to_codons.keys())
+    mut_prob_df = pd.DataFrame(0.0, index=aas, columns=plm_matrix.columns)
+
+    for col_idx, col_label in enumerate(plm_matrix.columns):
+        cod = codons[col_idx] if col_idx < len(codons) else "NNN"
+        if cod not in codon_mutation_df.index:
+            # leave zeros
+            continue
+        for aa in aas:
+            total = 0.0
+            for tc in aa_to_codons.get(aa, []):
+                if tc in codon_mutation_df.columns:
+                    total += float(codon_mutation_df.loc[cod, tc])
+            mut_prob_df.loc[aa, col_label] = total
+
+    combined = plm_matrix.copy() * mut_prob_df
+    combined_sqrt = plm_matrix.copy() * np.sqrt(mut_prob_df)
+
+    return {
+        "mutational_prob_matrix": mut_prob_df,
+        "plm_matrix": plm_matrix,
+        "combined_prob_matrix": combined,
+        "combined_prob_sqrt_matrix": combined_sqrt,
+    }
+
+
+def plot_mutational_accessibility_heatmap(matrix_df, outpath=None, figsize=(14, 8), cmap="viridis"):
+    """Plot and optionally save a heatmap for a mutational accessibility DataFrame.
+
+    matrix_df: DataFrame (rows AA, columns positions)
+    outpath: optional Path to save PNG
+    """
+    plt.figure(figsize=figsize)
+    ax = sns.heatmap(matrix_df, cmap=cmap, cbar_kws={"label": "Probability"})
+    ax.set_xlabel("Position")
+    ax.set_ylabel("Amino Acid")
+    plt.tight_layout()
+    if outpath is not None:
+        plt.savefig(str(outpath), dpi=300)
+    plt.show()
+
