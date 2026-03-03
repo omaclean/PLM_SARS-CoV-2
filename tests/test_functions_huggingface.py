@@ -570,6 +570,24 @@ class TestAlignmentFunctions:
         # Should have labels like '3A', '3B' for insertions after position 3
         assert any('A' in v for v in values) or any('B' in v for v in values)
 
+    def test_create_h3_numbering_map_with_pre_gapped_inputs(self):
+        """Pre-gapped/alignment-style inputs should still map cleanly by residue."""
+        # Both query and reference contain alignment gap symbols.
+        reference_seq = "AR-ND"
+        query_seq = "A-RNXD"
+
+        h3_map = create_h3_numbering_map(
+            query_seq,
+            reference_seq,
+            signal_peptide_length=0
+        )
+
+        # Ungapped query has 5 residues: A R N X D
+        assert len(h3_map) == 5
+        assert set(h3_map.keys()) == set(range(5))
+        # Insertion residue should receive an insertion-style label.
+        assert any(label.endswith('A') for label in h3_map.values())
+
 
 # ============================================================================
 # Model-Dependent Functions Tests (with Mocking)
