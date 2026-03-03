@@ -1961,8 +1961,15 @@ def create_h3_numbering_map(query_input, reference_sequence, signal_peptide_leng
         query_seq_str = str(query_input.seq)
     else:
         query_seq_str = str(query_input)
-        
+
     ref_seq_str = str(reference_sequence)
+
+    # Remove explicit alignment gap symbols so pairwise alignment treats indels correctly.
+    query_seq_str = re.sub(r"[-.\s]", "", query_seq_str)
+    ref_seq_str = re.sub(r"[-.\s]", "", ref_seq_str)
+
+    if len(query_seq_str) == 0 or len(ref_seq_str) == 0:
+        return {}
 
     # 2. Configure Aligner (Modern Biopython)
     aligner = Align.PairwiseAligner()
@@ -1973,90 +1980,84 @@ def create_h3_numbering_map(query_input, reference_sequence, signal_peptide_leng
     # Perform alignment
     alignments = aligner.align(ref_seq_str, query_seq_str)
     best_alignment = alignments[0]
-    
-    # Extract aligned strings (includes dashes)
-    # pattern: target is ref, query is input sequence
-    try:
-        aligned_ref = best_alignment.target
-        aligned_query = best_alignment.query
-    except AttributeError:
-        aligned_ref = best_alignment[0]
-        aligned_query = best_alignment[1]
 
     # 3. Build the Mapping
     mapping_dict = {}
-    
+
     # Counters
     # H3 numbering usually starts at 1 after the signal peptide. 
     # Positions in the SP are negative or labelled SP.
     h3_counter = 1 - signal_peptide_length 
     query_pos = 0  # Track position in ungapped query sequence (0-based)
+    ref_pos = 0  # Track position in ungapped reference sequence (0-based)
     ha2_counter = 1  # Counter for HA2 region
-    
-    for ref_res, query_res in zip(aligned_ref, aligned_query):
-        
-        # We only care about mapping residues that actually exist in the query
-        if query_res == '-':
-            # If query has a gap, we just advance the reference counter (if ref has no gap)
-            if ref_res != '-':
-                h3_counter += 1
-            continue
 
-        # Save current query index (0-based)
-        current_query_pos = query_pos
-        query_pos += 1
-        
-        # Scenario A: Reference has a residue (Match or Mismatch)
-        # We assign the current H3 number.
-        if ref_res != '-':
-            # Check if we're entering HA2 region (based on reference position)
-            if HA2_start is not None and h3_counter >= HA2_start:
-                # We're in HA2 region - use HA2 numbering
-                label = f"HA2:{ha2_counter}"
-                mapping_dict[current_query_pos] = label
-                ha2_counter += 1
-                h3_counter += 1
-            elif h3_counter < 1:
-                # Signal peptide region
-                label = f"SP{h3_counter}"
-                mapping_dict[current_query_pos] = label
-                h3_counter += 1
-            else:
-                # Mature peptide region (HA1)
-                label = str(h3_counter)
-                mapping_dict[current_query_pos] = label
-                h3_counter += 1
-            
-        # Scenario B: Reference has a gap (Insertion in Query)
-        # We must assign an insertion code (e.g., 158A, 158B) based on the *previous* H3 number.
+    last_anchor_label = None
+    insertion_counts = {}
+
+    def _next_main_label():
+        nonlocal h3_counter, ha2_counter
+        if HA2_start is not None and h3_counter >= HA2_start:
+            label = f"HA2:{ha2_counter}"
+            ha2_counter += 1
+        elif h3_counter < 1:
+            label = f"SP{h3_counter}"
         else:
-            if mapping_dict:
-                # Retrieve the last assigned label
-                last_label = list(mapping_dict.values())[-1]
-                
-                # Handle different label formats
-                if last_label.startswith('HA2:'):
-                    # HA2 insertion: HA2:49 -> HA2:49A, HA2:49B, etc.
-                    base = last_label.rstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-                elif last_label.startswith('SP'):
-                    # Signal peptide insertion: SP-15 -> SP-15A, SP-15B, etc.
-                    base = last_label.rstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-                else:
-                    # Regular HA1 insertion: 158 -> 158A, 158B, etc.
-                    base = last_label.rstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-                
-                # Calculate how deep into the insertion we are
-                # Count how many times this base has appeared recently
-                insertion_count = sum(1 for v in mapping_dict.values() 
-                                    if v.startswith(base) and v != base)
-                
-                # Generate suffix: 0->A, 1->B, etc.
-                suffix = chr(ord('A') + insertion_count)
-                label = f"{base}{suffix}"
-                mapping_dict[current_query_pos] = label
-            else:
-                # Edge case: Insertion at the very start of the sequence before any reference alignment
-                mapping_dict[current_query_pos] = "N-term-Insert"
+            label = str(h3_counter)
+        h3_counter += 1
+        return label
+
+    def _next_insertion_label(anchor_label):
+        if anchor_label is None:
+            base = "N-term-Insert"
+        else:
+            base = anchor_label.rstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+
+        insertion_counts[base] = insertion_counts.get(base, 0) + 1
+        suffix_index = insertion_counts[base] - 1
+
+        # A, B, ..., Z, AA, AB ... for very long insertion runs
+        suffix = ""
+        n = suffix_index
+        while True:
+            suffix = chr(ord('A') + (n % 26)) + suffix
+            n = n // 26 - 1
+            if n < 0:
+                break
+        return f"{base}{suffix}"
+
+    # Use PairwiseAligner block coordinates for robust indel handling.
+    ref_blocks, query_blocks = best_alignment.aligned
+
+    for (ref_start, ref_end), (query_start, query_end) in zip(ref_blocks, query_blocks):
+        # Handle gaps before the current aligned block.
+        while ref_pos < ref_start or query_pos < query_start:
+            if ref_pos < ref_start:
+                # Deletion in query relative to reference.
+                _next_main_label()
+                ref_pos += 1
+            elif query_pos < query_start:
+                # Insertion in query relative to reference.
+                mapping_dict[query_pos] = _next_insertion_label(last_anchor_label)
+                query_pos += 1
+
+        # Handle aligned residues (match or mismatch, but no gap).
+        block_len = min(ref_end - ref_start, query_end - query_start)
+        for _ in range(block_len):
+            label = _next_main_label()
+            mapping_dict[query_pos] = label
+            last_anchor_label = label
+            ref_pos += 1
+            query_pos += 1
+
+    # Handle trailing region after last aligned block.
+    while ref_pos < len(ref_seq_str) or query_pos < len(query_seq_str):
+        if ref_pos < len(ref_seq_str):
+            _next_main_label()
+            ref_pos += 1
+        elif query_pos < len(query_seq_str):
+            mapping_dict[query_pos] = _next_insertion_label(last_anchor_label)
+            query_pos += 1
 
     return mapping_dict
 

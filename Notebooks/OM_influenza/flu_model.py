@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 from scipy.integrate import odeint
-from scipy.optimize import root_scalar
+from scipy.optimize import root_scalar, minimize_scalar
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import os
@@ -28,6 +28,7 @@ outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu_naiv
 
 outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu_smear_rest/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
 
+outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results_new_cf/H3N2_partial_flu_smear_rest/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
 
 #%% 
 class AntigenicSeirModel:
@@ -179,14 +180,48 @@ def calibrate_escape_slope(model, pop_dist, cf_coord, k_coord, vacc_coord,
 
         return (S_eff_k / S_eff_cf) - target_ratio
 
-    result = root_scalar(objective, bracket=[1e-6, 0.5], method='brentq')
+    # Try a small bracket first
+    a, b = 1e-6, 0.5
+    fa = objective(a)
+    fb = objective(b)
 
-    if not result.converged:
-        raise ValueError("Could not converge on a valid escape slope.")
+    if fa * fb < 0:
+        result = root_scalar(objective, bracket=[a, b], method='brentq')
+        if not result.converged:
+            raise ValueError("Could not converge on a valid escape slope.")
+        model.escape_slope = result.root
+        return result.root
 
-    # Leave the model with the solved value
-    model.escape_slope = result.root
-    return result.root
+    # If no sign change in the simple bracket, search a wider range for a sign change
+    slopes = np.linspace(1e-8, 5.0, 500)
+    fvals = [objective(s) for s in slopes]
+    bracket_found = None
+    for i in range(len(fvals) - 1):
+        if fvals[i] == 0:
+            bracket_found = (slopes[i], slopes[i])
+            break
+        if fvals[i] * fvals[i + 1] < 0:
+            bracket_found = (slopes[i], slopes[i + 1])
+            break
+
+    if bracket_found is not None:
+        a, b = bracket_found
+        # If a==b then we've hit an exact zero in the sample
+        if a == b:
+            model.escape_slope = a
+            return a
+        result = root_scalar(objective, bracket=[a, b], method='brentq')
+        if result.converged:
+            model.escape_slope = result.root
+            return result.root
+
+    # Fallback: minimize the absolute objective over a wide bound and return the best-fit slope
+    res = minimize_scalar(lambda s: abs(objective(s)), bounds=(1e-8, 5.0), method='bounded')
+    if not res.success:
+        raise ValueError(f"Could not find escape slope (fa={fa:.3e}, fb={fb:.3e}).")
+    model.escape_slope = res.x
+    print(f"Warning: No sign change found; using minimize_scalar fallback, slope={res.x:.6e}, objective={objective(res.x):.3e}")
+    return res.x
 
 
 # ==========================================
@@ -312,9 +347,22 @@ model = AntigenicSeirModel(history, population_size=67_000_000, current_year=202
 
 # A. Actual Scenario: K Lineage (High Drift)
 # [cite_start]Distance from 2024 (3.2, 2.2) is ~2.2 units -> Crosses the 2.0 threshold [cite: 147]
+# name,year,subclade,X,Y,Z,Distance_to_Ref
+# EPI4748783|HA|A/England/01837755/2025|EPI_ISL_20210731|J.2.4.1,2025,K,3.4980469,3.5703125,0.4946289,0.96760744
+# EPI3791586|HA|A/England/2024|J.2.2Eng24,2024,J.2.2Eng24,3.046875,3.5292969,-0.5493164,0.22035405
+# EPI4908143|HA|A/Columbia_vaccine/2023|J.2,2023,J.2.vaccine_column,3.0117188,3.59375,-0.34155273,0.0
+
 k_coord = (3.498047, 3.57003, 0.4946) 
 
-vacc_coord = (3.011719, 3.59375, -0.34155) 
+#EPI4908143|HA|A/Columbia_vaccine/2023|J.2 root .. the Croatia one was for eggs and has D186A on J.2 root
+vacc_coord = (3.0117188,3.59375,-0.34155273) 
+
+cf_coord = (3.011719, 3.59375, -0.34155) # (3.693,3.424,-0.073) # Approx PLANT coord on just first branch with I160K only
+# croatia onw 
+#counterfactual coords of the Eng 24 virus circulating in 2024
+cf_coord =(3.046875,3.5292969,-0.5493164 )
+
+cf_name="Eng24(J.2.2..)"
 
 #print distance from vaccine to K
 v_dist = np.linalg.norm(np.array(k_coord) - np.array(vacc_coord))
@@ -327,7 +375,6 @@ for year in sorted(history.keys()):
 
 # B. Counterfactual: No Mutation I160K
 # Distance from 2024 is ~1.0 unit -> Within 2.0 threshold (protected)
-cf_coord = (3.011719, 3.59375, -0.34155) # (3.693,3.424,-0.073) # Approx PLANT coord on just first branch with I160K only
 
 # ---- Calibrate the escape slope so 1.47 %/unit Re gain is emergent ----
 TARGET_RE_GAIN_PER_UNIT = 0.0147   # target: 1.47 % Re increase per PLANT-distance unit
@@ -513,7 +560,7 @@ ax4.fill_between(times, 0, base_R0_cf, alpha=0.08, color='lightgray', label='Bas
 ax4.fill_between(times, 0, R0_t_k_line, alpha=0.12, color='purple', label='R₀(t) (K)')
 ax4.fill_between(times, 0, R0_t_cf_line, alpha=0.12, color='violet', label='R₀(t) (CF)')
 ax4.plot(times, Rt_k, color='#d62728', lw=2.5, label='Rₜ (K lineage)', zorder=10)
-ax4.plot(times, Rt_cf, color='#1f77b4', lw=2.5, ls='--', label='Rₜ (Counterfactual)', zorder=10)
+ax4.plot(times, Rt_cf, color='#1f77b4', lw=2.5, ls='--', label=f'Rₜ (Counterfactual {cf_name})', zorder=10)
 
 ax4.set_title('From R₀ to Rₜ: Decomposition', fontsize=11, fontweight='bold')
 ax4.set_xlabel('Days')
@@ -538,7 +585,7 @@ ax5.axvline(x=PEAK_DAY, color='purple', linestyle='--', alpha=0.5, label='Peak S
 # Plot infections
 ax5.plot(times, res_k['I'] / 1e6, label='K Lineage Infections', 
          color='#d62728', lw=2.5)
-ax5.plot(times, res_cf['I'] / 1e6, label='Counterfactual Infections', 
+ax5.plot(times, res_cf['I'] / 1e6, label=f'Counterfactual {cf_name} Infections', 
          color='#1f77b4', lw=2.5, ls='--')
 
 ax5.set_title('Epidemic Curve on Calendar', fontsize=12, fontweight='bold')
@@ -572,7 +619,7 @@ x = np.arange(len(cohort_labels))
 width = 0.35
 
 ax6.bar(x - width/2, sigmas_k, width, label='Actual K', color='#d62728', alpha=0.7)
-ax6.bar(x + width/2, sigmas_cf, width, label='Counterfactual', color='#1f77b4', alpha=0.7)
+ax6.bar(x + width/2, sigmas_cf, width, label='Counterfactual '+cf_name, color='#1f77b4', alpha=0.7)
 ax6.set_xticks(x)
 ax6.set_xticklabels(cohort_labels, rotation=45)
 ax6.set_title('Susceptibility by Immunity Cohort', fontsize=12, fontweight='bold')
@@ -621,7 +668,7 @@ for idx in range(len(res_k)):
     S_eff_cf.append(np.sum(S_cohorts_cf * sigmas_cf) / 1e6)
 
 ax8.fill_between(res_k['time'], S_eff_k, alpha=0.3, color='#d62728', label='K Lineage')
-ax8.fill_between(res_cf['time'], S_eff_cf, alpha=0.3, color='#1f77b4', label='Counterfactual')
+ax8.fill_between(res_cf['time'], S_eff_cf, alpha=0.3, color='#1f77b4', label=f'Counterfactual {cf_name}')
 ax8.plot(res_k['time'], S_eff_k, color='#d62728', lw=2)
 ax8.plot(res_cf['time'], S_eff_cf, color='#1f77b4', lw=2, ls='--')
 ax8.set_title('Effective Susceptible Population (Why Rₜ Differs)', fontsize=12, fontweight='bold')

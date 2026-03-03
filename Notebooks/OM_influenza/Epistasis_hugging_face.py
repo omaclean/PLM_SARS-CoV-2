@@ -19,6 +19,7 @@ import pandas as pd
 import numpy as np
 import torch
 from adjustText import adjust_text
+import subprocess
 
 
 import seaborn as sns
@@ -48,11 +49,15 @@ batch_converter = alphabet.get_batch_converter()
 sub_mod='ESM2-HA80'
 # sub_mod="ESM_C_600M" <- doesn't work with old esm libs
 
-query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
+#query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
 
 reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 
-base_lineage_index=3
+base_lineage_index=0
+
+#query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/K_rev_rev_cds_HA.fas"
+query_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/PX445235NodeTrace_dedup.fasta"
+out_base="/home3/oml4h/PLM_SARS-CoV-2/Results/test/Joseph_node_scan/"
 
 modnam="/home3/oml4h/hugging_face_downloads/model_weights_topublish/{}".format(sub_mod)
 
@@ -87,13 +92,9 @@ base_sequence_name=seq_keys[base_lineage_index]
 backbone_id=base_sequence_name
 base_lineage=base_sequence_name.split("|")[-1]
 print("Base lineage:",base_lineage)
-out='/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/'.format(base_lineage)
+out=os.path.join(out_base,base_lineage)
 
 os.makedirs(out, exist_ok=True)
-# 1. Read the reference sequence (Assuming single sequence in file)
-# We use 'next' to get the first item from the iterator
-ref_record = next(SeqIO.parse(reference_path, "fasta"))
-ref_seq_str = str(ref_record.seq)
 
 
 # %%
@@ -101,6 +102,10 @@ ref_seq_str = str(ref_record.seq)
 # We parse the file and pick the first one as a test case
 query_iterator = SeqIO.parse(query_path, "fasta")
 first_query_record = next(query_iterator)
+# 1. Read the reference sequence (Assuming single sequence in file)
+# We use 'next' to get the first item from the iterator
+ref_record = next(SeqIO.parse(reference_path, "fasta"))
+ref_seq_str = str(ref_record.seq)
 
 h3_map_with_ha2 = create_h3_numbering_map(first_query_record, ref_seq_str, HA2_start=330)
 
@@ -520,9 +525,9 @@ else:
 abs_shifts = shifts
 log_abs_shifts = np.log10(abs_shifts.replace(0, np.nan))
 
-# Plot 1: Absolute Shifts
+# Plot 1: Absolute Shifts — use viridis for consistency
 plt.figure(figsize=(14, 10))
-sns.heatmap(abs_shifts, annot=True, fmt=".2f", cmap='RdBu', center=0, annot_kws={"size": 8})
+sns.heatmap(abs_shifts, annot=True, fmt=".2f", cmap='viridis', annot_kws={"size": 8})
 plt.title(f'Absolute Probability Shifts vs Reference {base_lineage} ({sub_mod})')
 plt.xlabel('Focal Mutation')
 plt.ylabel('Backbone')
@@ -745,19 +750,25 @@ for i, name in enumerate(mut_names):
     shift_matrix = all_shift_matrices[i]
     
     # Find indices of interest
-    # 1. Sites with shift > 0.3
+    # 1. Sites with shift > 0.3 (fallback to 0.18 if none exceed 0.3)
     with np.errstate(invalid='ignore'):
         high_shift_indices = np.where(shifts > 0.3)[0]
-    
+
     target_indices = list(high_shift_indices)
-    
+
+    # If none pass 0.3, relax threshold to 0.18 and take those (if available)
+    if len(target_indices) == 0:
+        with np.errstate(invalid='ignore'):
+            high_shift_indices = np.where(shifts > 0.18)[0]
+        target_indices = list(high_shift_indices)
+
     # 2. If fewer than 2 sites, add top sites until we have at least 2
     if len(target_indices) < 2:
         # Get indices sorted by shift value (descending), ignoring NaNs
         # Replace NaNs with -1 for sorting
         shifts_clean = np.nan_to_num(shifts, nan=-1.0)
         sorted_indices = np.argsort(shifts_clean)[::-1]
-        
+
         for idx in sorted_indices:
             if idx not in target_indices and shifts_clean[idx] >= 0: # Ensure we don't pick masked sites
                 target_indices.append(idx)
@@ -814,32 +825,42 @@ for i in range(num_plots):
     # Plot the epistatic shifts (focal sites masked)
     ax.plot(positions, masked_shifts_list[i], linewidth=1)
     
-    # Annotate sites with shift > 0.3
+    # Annotate sites with shift > 0.3 (if none, relax to 0.18)
     shifts = masked_shifts_list[i]
     with np.errstate(invalid='ignore'):
         high_shift_indices = np.where(shifts > 0.3)[0]
-        
+
+    if len(high_shift_indices) == 0:
+        with np.errstate(invalid='ignore'):
+            high_shift_indices = np.where(shifts > 0.18)[0]
+
     for k, idx in enumerate(high_shift_indices):
         val = shifts[idx]
         pos = positions[idx]
-        
+
         # Get canonical label
         if 'h3_map_with_ha2' in locals():
             label = h3_map_with_ha2.get(idx, str(pos))
         else:
             label = str(pos)
-            
-        # Stagger text height to avoid overlap
-        stagger = 0.02 #+ (0.06 * (k % 3))
-        
-        ax.text(pos, val + stagger, label, 
-                rotation=90, fontsize=5, ha='center', va='bottom')
+
+        # Stagger text height to avoid overlap; scale by observed global max
+        stagger_scale = max(global_max, 1.0)
+        stagger = 0.02 * stagger_scale + (0.02 * (k % 3))
+
+        ax.text(pos, val + stagger, label,
+                rotation=90, fontsize=8, ha='center', va='bottom')
     
     # Plot vertical lines for focal sites
     for focal_pos in focal_positions_list[i]:
         ax.axvline(x=focal_pos, color='orange', alpha=0.5, linewidth=2)
         
     ax.set_title(mut_names[i])
+    # Add a little top buffer so annotation text isn't clipped
+    try:
+        ax.set_ylim(bottom=0, top=(global_max * 1.12))
+    except Exception:
+        pass
     # Only set labels on outer edges since we share axes
     if i >= num_plots - cols:
         ax.set_xlabel('Position')
@@ -853,6 +874,8 @@ for i in range(num_plots, len(axes_flat)):
 plt.suptitle(f'Mutation Probability Shifts on Backbone {backbone_id}\n(Focal mutation sites marked with vertical lines)')
 plt.tight_layout()
 plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_shifts_{backbone_lineage}.png"), dpi=300)
+# save as pdf
+plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_shifts_{backbone_lineage}.pdf"))
 
 # %%
 backbone=backbone_id
@@ -1147,7 +1170,7 @@ for i, pos in enumerate(positions):
 mutation_prob_matrix = np.nan_to_num(mutation_prob_matrix, nan=0.0)
 # replace np.nan with zero for visualisation
 
-seaborn.heatmap(mutation_prob_matrix, xticklabels=positions, yticklabels=amino_acids)
+seaborn.heatmap(mutation_prob_matrix, xticklabels=positions, yticklabels=amino_acids, cmap='viridis')
 plt.xticks(ticks=np.arange(0, len(positions), 10), labels=np.array(positions)[::10])
 plt.title(f"{sub_mod} Mutation Probabilities (Reference masked)")
 plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_heatmap.png"), dpi=300)
@@ -1272,6 +1295,32 @@ print(f"Probability matrix exported to: {output_file}")
 print(f"Matrix shape: {prob_df.shape}")
 prob_df.head()
 
+
+
+# %%
+
+# %%
+
+K_indexed_muts = [m for m in get_mutations(sequences[base_sequence_name],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
+# Convert your mutations to canonical numbering
+canonical_mutations = mutations_to_canonical(K_indexed_muts, h3_map_with_ha2)
+print("K->J mutations")
+# Quick callout to the slim plot script for debugging: run early so outputs are visible
+try:
+    mutation_slim_script = os.path.join(os.path.dirname(__file__), "plot_mutation_slim_min.py")
+    mutation_slim_script = os.path.join(os.path.dirname(__file__), "plot_mutation_slim.py")
+    cmd = [sys.executable, mutation_slim_script,
+           "--query_path", query_path,
+           "--reference_path", reference_path,
+           "--seq1_index", str(base_lineage_index),
+           "--seq2_index", "1",
+           "--outdir_base", out,
+           "--epistasis_dir",out_base,
+           ]
+    print("Calling:", " ".join(cmd))
+    subprocess.run(cmd, check=False)
+except Exception as e:
+    print("Warning: failed to call plot_mutation_slim_min.py:", e)
 
 
 # %%

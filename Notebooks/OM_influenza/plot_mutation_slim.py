@@ -21,6 +21,7 @@ from Bio import PDB, Align
 from Bio.SeqUtils import seq1
 import os
 from collections import defaultdict
+import argparse
 
 # Global plotting style for larger text
 import matplotlib as mpl
@@ -152,20 +153,84 @@ def flag_outside_mutations(mutation_list, alignment_maps):
 # %%
 # mutations = K_indexed_muts # e.g. ['A145K', 'G158E']
 # pdb_path = "4FNK.pdb" # Ensure this file is in your directory
-pdb_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE4_assembly.pdb"
+pdb_path_default="/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE4_assembly.pdb"
 
 # view = visualize_mutations_on_pdb(pdb_path, user_k_seq, mutations)
 # view.show()
-sequences = read_sequences_to_dict('/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas')
-ids=list(sequences.keys())
+model_name_default="ESM2-HA80"
 
-print(get_mutations(sequences[ids[0]],sequences[ids[3]]))
+
+
+sequence_path_default="/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated_OM_synth_extra_steps.fas"
+reference_path_default="/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
+# Allow command-line overrides when executed as a script
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Visualise mutations on PDB: accepts paths and indices to automate from Epistasis script")
+    parser.add_argument("--pdb_path", help="Path to PDB/mmCIF file", default=pdb_path_default)
+    parser.add_argument("--query_path", help="Path to query fasta", default=None)
+    parser.add_argument("--reference_path", help="Path to reference fasta", default=None)
+    parser.add_argument("--seq1_index", help="Index of reference sequence (0-based)", type=int, default=0)
+    parser.add_argument("--seq2_index", help="Index of target sequence (0-based)", type=int, default=1)
+    parser.add_argument("--outdir_base", help="Base output directory to create a subdir in", default=None)
+    parser.add_argument("--subdir_name", help="Subdirectory name under outdir_base", default="mutation_slim")
+    parser.add_argument("--epistasis_dir", help="Directory containing epistasis outputs (probability/entropy/mut_info files)", default=None)
+    parser.add_argument("--model_name", help="Model name token to identify epistasis files (e.g. ESM2-HA80)", default=model_name_default)
+    
+    
+
+    args = parser.parse_args()
+
+    # Override defaults if provided
+    if args.pdb_path:
+        pdb_path = args.pdb_path
+    # prefer CLI-provided query_path; otherwise use default
+    if args.query_path:
+        query_path = args.query_path
+    else:
+        query_path = sequence_path_default
+        
+    sequences = read_sequences_to_dict(query_path)
+    ids = list(sequences.keys())
+    # prefer CLI-provided reference_path; otherwise use default
+    if args.reference_path:
+        reference_path = args.reference_path
+    else:
+        reference_path = reference_path_default
+
+    print(query_path)
+    
+    seq1_index = args.seq1_index
+    seq2_index = args.seq2_index
+    lineage_base=ids[seq1_index].split("|")[-1]
+    
+    model_name=args.model_name
+
+    if args.outdir_base:
+        outdir = os.path.join(args.outdir_base, args.subdir_name)
+        os.makedirs(outdir, exist_ok=True)
+    # optional epistasis outputs directory (from Epistasis_hugging_face)
+    if args.epistasis_dir:
+        epistasis_dir = args.epistasis_dir
+
+    # print a quick mutation summary using chosen indices
+    print(get_mutations(sequences[ids[seq1_index]], sequences[ids[seq2_index]]))
+else:
+    # when imported, preserve original behaviour but use safe defaults
+    print(get_mutations(sequences[ids[seq1_index]], sequences[ids[seq2_index]]))
+
+# Normalize CLI-selected reference/target IDs for the rest of the script
+try:
+    ref_id_cli = ids[seq1_index]
+    target_id_cli = ids[seq2_index]
+except Exception:
+    ref_id_cli = ids[0]
+    target_id_cli = ids[-1]
+
+print(f"Using reference id: {ref_id_cli}; target id: {target_id_cli}")
     
 # %%
 # import entropy and reference
-model_name="ESM2-H3"
-model_name="ESM2-HA80"
-lineage_base="J.2_int"
+
 
 #find first id in list with lineage base in 
 lineages=[str(x).split("|")[-1] for x in ids]
@@ -174,12 +239,13 @@ reference = next(id for id, lin in zip(ids, lineages) if lin == lineage_base)
 reference_lineage=lineage_base
 
 print(ids[2:(len(ids)-1)])
-K_indexed_muts = [m for m in get_mutations(sequences[reference],sequences[ids[len(ids)-1]]) if "del" not in m and '-' not in m  ] 
+# Use CLI-selected IDs for mutation comparisons
+K_indexed_muts = [m for m in get_mutations(sequences.get(ref_id_cli, sequences[reference]), sequences[target_id_cli]) if "del" not in m and '-' not in m]
 
 # Print aligned region summary and map mutations to PDB residues
 alignment_maps = summarize_pdb_alignment(
     pdb_path,
-    sequences[ids[len(ids)-1]],
+    sequences[target_id_cli],
     mutation_list=K_indexed_muts,
     threshold_score=50,
 )
@@ -190,13 +256,60 @@ print("Flagged mutations:", K_indexed_muts_flagged)
 
 
 
-outdir="/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/plot_mutation_stuff{}".format(lineage_base,model_name)
-os.makedirs(outdir, exist_ok=True)
-probability=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/{}_probability.csv".format(lineage_base,model_name))
-entropy=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/{}_entropy.csv".format(lineage_base,model_name))
 
-backbone_mut_probs=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/H3_epistasis_mutation_info_spyros_model_{}_rel_J.csv".format(lineage_base,model_name))
-mut_combos=pd.read_csv("/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/{}_mut_info_combos.csv".format(lineage_base,model_name))
+
+
+# Determine source directory for epistasis outputs
+ep_dir = None
+if 'epistasis_dir' in globals() and epistasis_dir:
+    ep_dir = epistasis_dir
+
+if ep_dir:
+    # Use user-provided epistasis output directory
+    # flexible file discovery: search ep_dir for files containing tokens
+    def find_file_with_tokens(directory, tokens, ext='.csv'):
+        # Prefer files matching tokens and extension; fall back to any match without ext
+        for root, _, files in os.walk(directory):
+            for fn in files:
+                if ext and not fn.lower().endswith(ext):
+                    continue
+                if all(t in fn for t in tokens):
+                    return os.path.join(root, fn)
+        # fallback: ignore extension
+        for root, _, files in os.walk(directory):
+            for fn in files:
+                if all(t in fn for t in tokens):
+                    return os.path.join(root, fn)
+        return None
+
+    prob_file = find_file_with_tokens(ep_dir, [model_name, 'probability'], ext='.csv')
+    ent_file = find_file_with_tokens(ep_dir, [model_name, 'entropy'], ext='.csv')
+    mutinfo_file = find_file_with_tokens(ep_dir, [model_name, 'mut_info_combos'], ext='.csv') or find_file_with_tokens(ep_dir, ['mut_info_combos', model_name], ext='.csv')
+    backbone_file = find_file_with_tokens(ep_dir, ['H3_epistasis_mutation_info_spyros_model', model_name], ext='.csv') or find_file_with_tokens(ep_dir, ['H3_epistasis_mutation_info_spyros_model'], ext='.csv')
+
+    if not prob_file or not ent_file or not mutinfo_file or not backbone_file:
+        raise FileNotFoundError(f"Could not locate required epistasis files in {ep_dir}: found {prob_file}, {ent_file}, {mutinfo_file}, {backbone_file}")
+
+    probability = pd.read_csv(prob_file)
+    entropy = pd.read_csv(ent_file)
+    backbone_mut_probs = pd.read_csv(backbone_file)
+    mut_combos = pd.read_csv(mutinfo_file)
+    # If no explicit outdir was provided, use the epistasis dir for outputs
+    if 'outdir' not in globals():
+        outdir = ep_dir
+    os.makedirs(outdir, exist_ok=True)
+else:
+    try:
+        outdir
+    except NameError:
+        outdir = "/home3/oml4h/PLM_SARS-CoV-2/Results/test/{}/plot_mutation_stuff{}".format(lineage_base,model_name)
+        os.makedirs(outdir, exist_ok=True)
+    else:
+        os.makedirs(outdir, exist_ok=True)
+    probability = pd.read_csv(f"/home3/oml4h/PLM_SARS-CoV-2/Results/test/{lineage_base}/{model_name}_probability.csv")
+    entropy = pd.read_csv(f"/home3/oml4h/PLM_SARS-CoV-2/Results/test/{lineage_base}/{model_name}_entropy.csv")
+    backbone_mut_probs = pd.read_csv(f"/home3/oml4h/PLM_SARS-CoV-2/Results/test/{lineage_base}/H3_epistasis_mutation_info_spyros_model_{model_name}_rel_J.csv")
+    mut_combos = pd.read_csv(f"/home3/oml4h/PLM_SARS-CoV-2/Results/test/{lineage_base}/{model_name}_mut_info_combos.csv")
 
 # Backward-compatible grammar columns for older exports
 if 'focal_sequence_grammar' not in mut_combos.columns:
@@ -289,7 +402,7 @@ print(position_to_canon)
 print(mutation_to_canon)
 print( K_indexed_muts)
 
-view = visualise_mutations_on_pdb(pdb_path, sequences[ids[len(ids)-1]], 
+view = visualise_mutations_on_pdb(pdb_path, sequences[target_id_cli], 
                                   K_indexed_muts_flagged,
                                   canonical_map=position_to_canon, 
                                   title="{} {} mutations".format(model_name, reference_lineage))
@@ -310,7 +423,7 @@ probability_dict = {i+1: val for i, val in enumerate(probability.iloc[-1, 2:].va
 
 view = visualise_mutations_on_pdb(
     pdb_path, 
-    sequences[ids[len(ids)-1]], 
+    sequences[target_id_cli], 
     K_indexed_muts_flagged,
     background_values=probability_dict,
     canonical_map=mutation_to_canon,
@@ -327,7 +440,7 @@ probability_dict = {i+1:  np.log10(1-val) for i, val in enumerate(probability.il
 
 view = visualise_mutations_on_pdb(
     pdb_path, 
-    sequences[ids[len(ids)-1]], 
+    sequences[target_id_cli], 
     mutation_list=[], #K_indexed_muts,
     background_values=probability_dict,
     title=f"{model_name} log10 (1-Reference_Probability)"
@@ -351,7 +464,7 @@ entropy_dict = {i+1: val for i, val in enumerate(entropy.iloc[-1, 2:].values)}
 
 view = visualise_mutations_on_pdb(
     pdb_path, 
-    sequences[ids[len(ids)-1]], 
+    sequences[target_id_cli], 
     K_indexed_muts_flagged,
     background_values=entropy_dict,
     title=f"{model_name} Reference entropy"
@@ -367,7 +480,7 @@ entropy_dict = {i+1:  np.log10(val) for i, val in enumerate(entropy.iloc[-1, 2:]
 
 view = visualise_mutations_on_pdb(
     pdb_path, 
-    sequences[ids[len(ids)-1]], 
+    sequences[target_id_cli], 
     K_indexed_muts_flagged,
     background_values=entropy_dict,
     title=f"{model_name} Reference entropy (log10)"
@@ -379,9 +492,6 @@ with open(os.path.join(outdir, f"{lineage_base}_{model_name}_reference_log10_ent
 
 # %%
 from Bio import SeqIO
-
-query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/huH3N2_HA_CDS.translated.fas"
-reference_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/H3N2_canonical.fa"
 
 # 1. Read the reference sequence (Assuming single sequence in file)
 # We use 'next' to get the first item from the iterator
@@ -428,7 +538,7 @@ print(canonical_mutations[:10])  # Show first 10
 
 view = visualise_mutations_on_pdb(
     pdb_path, 
-    sequences[ids[len(ids)-1]], 
+    sequences[target_id_cli], 
     K_indexed_muts_flagged,
     background_values=entropy_dict,
     title=f"{model_name} Reference entropy (Canonical)",
@@ -736,7 +846,6 @@ cols = ['Reference'] + filtered_order
 rows = ['Reference'] + filtered_order  # Reference as first row too
 mut_combo_probability_matrix = mut_combo_probability_matrix.reindex(index=rows, columns=cols)
 mut_combo_grammar_matrix = mut_combo_grammar_matrix.reindex(index=rows, columns=cols)
-mut_combo_grammar_delta_matrix = mut_combo_grammar_delta_matrix.reindex(index=rows, columns=cols)
 # Plot Probability Matrix
 plt.figure(figsize=(12, 8))
 sns.heatmap(mut_combo_probability_matrix, annot=True, fmt='.3f', cmap='viridis', 
@@ -807,6 +916,12 @@ reference_backbone_grammar = mut_combos.loc[
 ].values[0]  # or use .iloc[0] or .item()
 
 mut_combo_grammar_delta_matrix = mut_combo_grammar_matrix.subtract(reference_backbone_grammar, axis=1)
+# Ensure same ordering (Reference first) as other matrices
+try:
+    mut_combo_grammar_delta_matrix = mut_combo_grammar_delta_matrix.reindex(index=rows, columns=cols)
+except NameError:
+    # If rows/cols not defined for some reason, skip reindex
+    pass
 
 # 3. Grammar Delta Matrix - Reference row/col in lower half, pairwise in upper half
 grammar_shift_matrix = mut_combo_grammar_delta_matrix.copy()
@@ -981,3 +1096,229 @@ print(epistasis_flat.tail(5))
 # %%
 print(outdir)
 # %%
+# Query-path ordered epistasis heatmaps + evolutionary flow checks
+
+def _extract_position_for_sort(mutation_name):
+    """Extract numeric position from canonical mutation names for plotting order."""
+    mutation_name = str(mutation_name)
+    if mutation_name.startswith('HA2:'):
+        match = re.search(r'HA2:[A-Z](\d+)', mutation_name)
+        if match:
+            return 10000 + int(match.group(1))
+    elif mutation_name.startswith('SP'):
+        match = re.search(r'SP-?(\d+)', mutation_name)
+        if match:
+            return -int(match.group(1))
+    match = re.search(r'[A-Z](\d+)', mutation_name)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+def _query_lineage_order_from_ids(id_list):
+    """Return unique lineage names preserving FASTA query order."""
+    ordered = []
+    seen = set()
+    for seq_id in id_list:
+        lineage = str(seq_id).split("|")[-1]
+        if lineage not in seen:
+            seen.add(lineage)
+            ordered.append(lineage)
+    return ordered
+
+
+query_lineage_order = _query_lineage_order_from_ids(ids)
+reference_backbone = query_lineage_order[0]
+print(f"Reference backbone (first in query): {reference_backbone}")
+print(f"Query lineage order: {query_lineage_order}")
+
+if 'lineage_backbone' not in backbone_mut_probs.columns and 'Backbone' in backbone_mut_probs.columns:
+    backbone_mut_probs['lineage_backbone'] = backbone_mut_probs['Backbone'].astype(str).str.split('|').str[-1]
+
+all_backbones = list(backbone_mut_probs['lineage_backbone'].dropna().unique())
+ordered_backbones = [x for x in query_lineage_order if x in all_backbones] + [x for x in all_backbones if x not in query_lineage_order]
+print(f"Backbones in data: {all_backbones}")
+print(f"Backbones ordered by query path: {ordered_backbones}")
+
+prob_pivot = backbone_mut_probs.pivot_table(
+    index='canon',
+    columns='lineage_backbone',
+    values='probability',
+    aggfunc='first'
+)
+prob_pivot = prob_pivot.reindex(columns=ordered_backbones)
+
+print(f"\nProbability pivot shape: {prob_pivot.shape}")
+print(prob_pivot.head())
+
+if reference_backbone in prob_pivot.columns:
+    prob_shifts = prob_pivot.copy()
+    gram_shifts = prob_pivot.copy()
+    ref_vals = prob_pivot[reference_backbone]
+
+    for col in prob_pivot.columns:
+        prob_shifts[f'{col}_shift'] = prob_pivot[col] - ref_vals
+        ratio = (prob_pivot[col] + 1e-12) / (ref_vals + 1e-12)
+        gram_shifts[f'{col}_shift'] = np.log10(ratio)
+
+    shift_cols = [f"{b}_shift" for b in ordered_backbones if f"{b}_shift" in prob_shifts.columns]
+    prob_shifts_only = prob_shifts[shift_cols].copy()
+    prob_shifts_only['max_abs_shift'] = prob_shifts_only[shift_cols].abs().max(axis=1, skipna=True)
+    prob_shifts_only['max_shift'] = prob_shifts_only[shift_cols].max(axis=1, skipna=True)
+    prob_shifts_only['min_shift'] = prob_shifts_only[shift_cols].min(axis=1, skipna=True)
+    prob_shifts_only['ref_probability'] = ref_vals
+
+    epistatic_ranking = prob_shifts_only[prob_shifts_only['max_abs_shift'].notna()].copy()
+
+    mutation_first_step = {}
+    for mutation in epistatic_ranking.index:
+        first_step = len(ordered_backbones)
+        for step_i, backbone in enumerate(ordered_backbones):
+            if backbone in prob_pivot.columns and pd.notna(prob_pivot.loc[mutation, backbone]):
+                first_step = step_i
+                break
+        mutation_first_step[mutation] = first_step
+
+    epistatic_ranking['first_seen_step'] = epistatic_ranking.index.map(mutation_first_step)
+
+    # Row order by mutation-introduction step along query-file sequence order.
+    # This intentionally avoids genomic-position ordering.
+    introduced_canon_order = []
+    seen_canon = set()
+    ordered_ids_for_introduction = [seq_id for seq_id in ids if str(seq_id).split('|')[-1] in ordered_backbones]
+    root_sequence_for_introduction = sequences[ordered_ids_for_introduction[0]] if ordered_ids_for_introduction else sequences[ids[0]]
+    for seq_id in ordered_ids_for_introduction:
+        step_muts = [
+            m for m in get_mutations(root_sequence_for_introduction, sequences[seq_id])
+            if "del" not in m and "-" not in m
+        ]
+        for mut in step_muts:
+            canon_mut = mutation_to_canon.get(mut, mut)
+            if canon_mut in epistatic_ranking.index and canon_mut not in seen_canon:
+                introduced_canon_order.append(canon_mut)
+                seen_canon.add(canon_mut)
+
+    remaining_mutations = [m for m in epistatic_ranking.index if m not in seen_canon]
+    ordered_mutations = introduced_canon_order + remaining_mutations
+    epistatic_ranking = epistatic_ranking.loc[ordered_mutations]
+    top_n = min(40, len(ordered_mutations))
+    top_mutations = ordered_mutations[:top_n]
+
+    print("\n=== Ordered Epistatic Mutations (introduction order from query file) ===")
+    print(epistatic_ranking.head(20))
+
+    top_prob_data = prob_pivot.loc[top_mutations, ordered_backbones]
+    plt.figure(figsize=(14, 10))
+    sns.heatmap(top_prob_data, annot=True, fmt='.2f', cmap='viridis',
+                center=top_prob_data.mean().mean(), cbar_kws={'label': 'Probability'},
+                mask=top_prob_data.isna(), annot_kws={'size': 14})
+    plt.title(f'{lineage_base}_{model_name} Probability Heatmap (Query-Ordered Backbones)')
+    plt.xlabel('Backbone Lineage (query order)')
+    plt.ylabel('Mutation (ordered by first appearance step)')
+    plt.tight_layout()
+    plt.yticks(rotation=0)
+    plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_epistatic_heatmap_query_ordered.png"), dpi=300)
+    plt.show()
+
+    shift_data = prob_shifts_only.loc[top_mutations, shift_cols]
+    plt.figure(figsize=(14, 10))
+    sns.heatmap(shift_data, annot=True, fmt='.3f', cmap='viridis',
+                center=0, cbar_kws={'label': f'Probability Shift from Reference {reference_backbone}'},
+                mask=shift_data.isna(), annot_kws={'size': 14})
+    plt.title(f'{lineage_base}_{model_name} Probability Shifts (Query-Ordered Backbones)')
+    plt.xlabel('Backbone Lineage (query order)')
+    plt.ylabel('Mutation (ordered by first appearance step)')
+    plt.tight_layout()
+    plt.yticks(rotation=0)
+    plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_epistatic_shifts_query_ordered.png"), dpi=300)
+    plt.show()
+
+    gram_data = gram_shifts.loc[top_mutations, shift_cols]
+    plt.figure(figsize=(14, 10))
+    sns.heatmap(gram_data, annot=True, fmt='.3f', cmap='viridis',
+                center=0, cbar_kws={'label': f'log10(Prob/RefProb) from {reference_backbone}'},
+                mask=gram_data.isna(), annot_kws={'size': 14})
+    plt.title(f'{lineage_base}_{model_name} Grammar-Like Shifts (Query-Ordered Backbones)')
+    plt.xlabel('Backbone Lineage (query order)')
+    plt.ylabel('Mutation (ordered by first appearance step)')
+    plt.tight_layout()
+    plt.yticks(rotation=0)
+    plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_epistatic_shifts_gram_query_ordered.png"), dpi=300)
+    plt.show()
+
+    epistatic_ranking.to_csv(os.path.join(outdir, f"{lineage_base}_{model_name}_epistatic_ranking_query_ordered.csv"))
+
+    # Extra plot: raw PLM probabilities at each node (no shift from reference).
+    full_prob_data = prob_pivot.loc[ordered_mutations, ordered_backbones]
+    plt.figure(figsize=(14, max(8, int(0.35 * len(ordered_mutations)))))
+    sns.heatmap(full_prob_data, annot=True, fmt='.2f', cmap='viridis',
+                cbar_kws={'label': 'Raw PLM Probability'},
+                mask=full_prob_data.isna(), annot_kws={'size': 14})
+    plt.title(f'{lineage_base}_{model_name} Raw PLM Probabilities by Node (Query Order)')
+    plt.xlabel('Node / Backbone (query order)')
+    plt.ylabel('Mutation (introduction order from query file)')
+    plt.tight_layout()
+    plt.yticks(rotation=0)
+    plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_raw_plm_probabilities_by_node.png"), dpi=300)
+    plt.show()
+
+else:
+    print(f"Error: Reference backbone '{reference_backbone}' not found in data")
+    print(f"Available backbones: {prob_pivot.columns.tolist()}")
+
+
+# Evolution flow checks: ensure mutations do not dead-end along query sequence order.
+print("\n=== Evolution Flow Check (query sequence order) ===")
+ordered_ids = ids
+root_id = ordered_ids[0]
+root_sequence = sequences[root_id]
+
+lineage_by_step = [str(x).split('|')[-1] for x in ordered_ids]
+mutation_sets_by_step = []
+for seq_id in ordered_ids:
+    seq_mutations = {
+        m for m in get_mutations(root_sequence, sequences[seq_id])
+        if "del" not in m and "-" not in m
+    }
+    mutation_sets_by_step.append(seq_mutations)
+
+dead_end_rows = []
+for step_i, muts_now in enumerate(mutation_sets_by_step[:-1]):
+    future_union = set().union(*mutation_sets_by_step[step_i + 1:])
+    dead_ends = sorted(m for m in muts_now if m not in future_union)
+    if dead_ends:
+        dead_end_rows.append({
+            'step_index': step_i,
+            'lineage': lineage_by_step[step_i],
+            'dead_end_mutations': ';'.join(dead_ends),
+            'count': len(dead_ends),
+        })
+
+if dead_end_rows:
+    dead_end_df = pd.DataFrame(dead_end_rows)
+    print("WARNING: dead-end mutations detected (present at a step but absent from all subsequent steps).")
+    print(dead_end_df[['step_index', 'lineage', 'count', 'dead_end_mutations']])
+    dead_end_df.to_csv(os.path.join(outdir, f"{lineage_base}_{model_name}_evolution_dead_end_warnings.csv"), index=False)
+else:
+    print("No dead-end mutations detected across the query sequence order.")
+
+flow_rows = []
+for step_i in range(1, len(mutation_sets_by_step)):
+    prev_muts = mutation_sets_by_step[step_i - 1]
+    curr_muts = mutation_sets_by_step[step_i]
+    gained = sorted(curr_muts - prev_muts)
+    lost = sorted(prev_muts - curr_muts)
+    flow_rows.append({
+        'from_step': step_i - 1,
+        'to_step': step_i,
+        'from_lineage': lineage_by_step[step_i - 1],
+        'to_lineage': lineage_by_step[step_i],
+        'gained_count': len(gained),
+        'lost_count': len(lost),
+        'gained_mutations': ';'.join(gained),
+        'lost_mutations': ';'.join(lost),
+    })
+
+flow_df = pd.DataFrame(flow_rows)
+flow_df.to_csv(os.path.join(outdir, f"{lineage_base}_{model_name}_evolution_flow_summary.csv"), index=False)
+print("Saved evolution flow summary.")
