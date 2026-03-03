@@ -9,6 +9,7 @@ import os
 from Bio import PDB, Align
 from Bio.SeqUtils import seq1
 import py3Dmol
+import argparse
 
 
 pdb_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/4WE4_assembly.pdb"
@@ -288,6 +289,31 @@ def flag_outside_mutations(mutation_list, alignment_maps):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Visualise mutations on PDB: accepts paths and indices to automate from Epistasis script")
+    parser.add_argument("--pdb_path", help="Path to PDB/mmCIF file", default=None)
+    parser.add_argument("--query_path", help="Path to query fasta", default=None)
+    parser.add_argument("--reference_path", help="Path to reference fasta", default=None)
+    parser.add_argument("--seq1_index", help="Index of reference sequence (0-based)", type=int, default=seq1_index)
+    parser.add_argument("--seq2_index", help="Index of target sequence (0-based)", type=int, default=seq2_index)
+    parser.add_argument("--outdir_base", help="Base output directory to create a subdir in", default=None)
+    parser.add_argument("--subdir_name", help="Subdirectory name under outdir_base", default="mutation_slim")
+    args = parser.parse_args()
+
+    # Override defaults if provided
+    if args.pdb_path:
+        pdb_path = args.pdb_path
+    if args.query_path:
+        sequences = read_sequences_to_dict(args.query_path)
+    if args.reference_path:
+        reference_path = args.reference_path
+
+    seq1_index = args.seq1_index
+    seq2_index = args.seq2_index
+
+    if args.outdir_base:
+        output_dir = os.path.join(args.outdir_base, args.subdir_name)
+        os.makedirs(output_dir, exist_ok=True)
+
     ids = list(sequences.keys())
     reference_id = ids[seq1_index]
     target_id = ids[seq2_index]
