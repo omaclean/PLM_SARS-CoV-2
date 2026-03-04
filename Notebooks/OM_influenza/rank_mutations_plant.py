@@ -12,10 +12,19 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from Bio import SeqIO
 
+import nbformat
+from Bio import Align
+
+
 # Add PLM_SARS-CoV-2 to path for Functions_HuggingFace
 sys.path.append("/home3/oml4h/PLM_SARS-CoV-2")
 try:
-    from Functions_HuggingFace import create_h3_numbering_map, mutations_to_canonical, get_mutations
+    from Functions_HuggingFace import (
+        create_h3_numbering_map,
+        mutations_to_canonical,
+        get_mutations,
+        plant_trim_to_target_length,
+    )
     print("Imported Functions_HuggingFace OK.")
 except ImportError:
     print("Could not import Functions_HuggingFace. Check path.")
@@ -88,7 +97,8 @@ VACCINE_COORD = (3.011719, 3.59375, -0.34155)
 TEST_SITES = [158, 159, 160] 
 
 # Reference Sequence for Trimming (from Plant.run.py)
-REFERENCE_SEQ = "QKIPGNDNSTATLCLGHHAVPNGTIVKTITNDRIEVTNATELVQNSSIGEICGSPHQILDGGNCTLIDALLGDPQCDGFQNKEWDLFVERSRANSNCYPYDVPGYASLRSLVASSGTLEFKNESFNWTGVKQNGTSSACIRGSSSSFFSRLNWLTSINNIYPAQNVTMPNKEQFDKLYIWGVHHPDTDKNQISLFAQSSGRITVSTKRSQQAVIPNIGSRPRIRDIPSRISIYWTIVKPGDILLINSTGNLIAPRGYFKIRNGKSSIMRSDAPIGRCKSECITPNGSIPNDKPFQNVNRITYGACPRYVKQSTLKLATGMRNVPEKQTR"
+# Use a J.2 reference sequence (329 aa) for alignment
+REFERENCE_SEQ = "QKIPGNDNSTATLCLGHHAVPNGTIVKTITNDRIEVTNATELVQNSSIGKICNSPHQILDGGNCTLIDALLGDPQCDGFQNKEWDLFVERSRANSSCYPYDVPDYASLRSLVASSGTLEFKDESFNWTGVKQNGKSSACKRGSSSSFFSRLNWLTSLNNIYPAQNVTMPNKEQFDKLYIWGVHHPDTDKNQFSLFAQSSGRITVSTTRSQQAVIPNIGSRPRVRDIPSRISIYWTIVKPGDILLINSTGNLIAPRGYFKIRSGKSSIMRSDAPIGECKSECITPNGSIPNDKPFQNVNRITYGACPRYVKQSTLKLATGMRNVPEKQTR"
 TARGET_LENGTH = 329
 
 # ==========================================
@@ -341,35 +351,8 @@ def load_plant_model(device):
     return model, tokenizer
 
 def trim_to_target_length(seq, reference=REFERENCE_SEQ, target_len=TARGET_LENGTH):
-    """
-    Trim sequences to match the target length.
-    Returns (trimmed_seq, start_index_in_original)
-    """
-    if pd.isna(seq) or not isinstance(seq, str):
-        return None, -1
-    
-    seq_len = len(seq)
-    
-    if seq_len == target_len:
-        return seq, 0
-    elif seq_len < target_len:
-        return None, -1
-    else:
-        # Longer than target - find where the HA1 region starts
-        best_score = 0
-        best_start = 0
-        
-        window = min(50, target_len)
-        ref_window = reference[:window]
-        
-        for i in range(seq_len - target_len + 1):
-            seq_window = seq[i:i+window]
-            score = sum(1 for a, b in zip(ref_window, seq_window) if a == b)
-            if score > best_score:
-                best_score = score
-                best_start = i
-        
-        return seq[best_start:best_start + target_len], best_start
+    """Wrapper around shared helper in Functions_HuggingFace."""
+    return plant_trim_to_target_length(seq, reference, target_len, return_start_pos=True)
 
 def generate_mutants(trimmed_sequence, start_pos_in_full, prob_matrix, aa_labels, target_sites, h3_map):
     """

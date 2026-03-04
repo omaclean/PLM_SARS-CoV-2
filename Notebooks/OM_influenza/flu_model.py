@@ -1,4 +1,4 @@
-#%% 
+# %% 
 import numpy as np
 import pandas as pd
 from scipy.integrate import odeint
@@ -22,6 +22,8 @@ PLANT_ESCAPE_SLOPE_INIT = 0.02  # Initial guess; calibrated at runtime to reprod
 POPULATION=67_000_000  # UK Population Approximation
 NAIVE=2_500_000  # Approximate naive population size
 # % H3N2 circulation by season (used to scale cohort sizes)
+
+CENTROID_FILE="/home3/oml4h/PLM_SARS-CoV-2/Results/PLANT_results/yearly_centroids.csv"
 
 outdir = "/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu"
 outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu_naive_rest/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
@@ -249,6 +251,8 @@ history = {
     
 }
 
+
+
 #go through each year and print the distances
 for year in sorted(history.keys()):
     if year == sorted(history.keys())[0]:
@@ -352,7 +356,7 @@ model = AntigenicSeirModel(history, population_size=67_000_000, current_year=202
 # EPI3791586|HA|A/England/2024|J.2.2Eng24,2024,J.2.2Eng24,3.046875,3.5292969,-0.5493164,0.22035405
 # EPI4908143|HA|A/Columbia_vaccine/2023|J.2,2023,J.2.vaccine_column,3.0117188,3.59375,-0.34155273,0.0
 
-k_coord = (3.498047, 3.57003, 0.4946) 
+k_coord = (3.4980469,3.5703125,0.4946289) 
 
 #EPI4908143|HA|A/Columbia_vaccine/2023|J.2 root .. the Croatia one was for eggs and has D186A on J.2 root
 vacc_coord = (3.0117188,3.59375,-0.34155273) 

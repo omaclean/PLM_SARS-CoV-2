@@ -42,8 +42,15 @@ repo_dir = "/home3/oml4h/hugging_face_downloads/PLANT_model/code"
 # %%
 
 sys.path.append("/home3/oml4h/hugging_face_downloads/PLANT_model/code/src")
+sys.path.append("/home3/oml4h/PLM_SARS-CoV-2")
 
 from plant import TextDataset, tokenize_sequences, semanticESM, set_encoders, embed_sequences
+from Functions_HuggingFace import (
+    plant_trim_to_target_length,
+    plant_sequence_identity,
+    plant_alignment_coverage_metrics,
+    plant_extract_year,
+)
 
 print("Imported plant module OK.")
 
@@ -140,94 +147,18 @@ ALIGN_REF_COVERAGE_WARN = 0.98
 ALIGN_REF_COVERAGE_FAIL = 0.95
 
 def trim_to_target_length(seq, reference=REFERENCE_SEQ, target_len=TARGET_LENGTH):
-    """
-    Build a target-length sequence by pairwise alignment to reference.
-    Uses local alignment to find the best matching region, then projects query
-    residues onto reference coordinates.
-
-    Returns:
-        str or None: aligned/trimmed target-length sequence.
-    """
-    if pd.isna(seq) or not isinstance(seq, str):
-        return None
-
-    query = str(seq).replace("-", "").replace(".", "").strip().upper()
-    ref = str(reference).replace("-", "").replace(".", "").strip().upper()
-    if len(query) == 0 or len(ref) == 0:
-        return None
-
-    aligner = Align.PairwiseAligner()
-    aligner.mode = "local"
-    aligner.match_score = 2.0
-    aligner.mismatch_score = -1.0
-    aligner.open_gap_score = -8.0
-    aligner.extend_gap_score = -0.5
-
-    alignment = aligner.align(ref, query)[0]
-
-    # Project query residues onto reference coordinates.
-    projected = list(ref)
-    ref_blocks, query_blocks = alignment.aligned
-
-    for (r0, r1), (q0, q1) in zip(ref_blocks, query_blocks):
-        block_len = min(r1 - r0, q1 - q0)
-        for k in range(block_len):
-            projected[r0 + k] = query[q0 + k]
-
-    trimmed = "".join(projected)
-
-    if len(trimmed) != target_len:
-        if len(trimmed) > target_len:
-            return trimmed[:target_len]
-        return None
-
-    return trimmed
+    """Wrapper around shared helper in Functions_HuggingFace."""
+    return plant_trim_to_target_length(seq, reference, target_len, return_start_pos=False)
 
 
 def sequence_identity(a, b):
-    """Simple positional identity between same-length sequences."""
-    if not isinstance(a, str) or not isinstance(b, str) or len(a) != len(b) or len(a) == 0:
-        return np.nan
-    matches = sum(x == y for x, y in zip(a, b))
-    return matches / len(a)
+    """Wrapper around shared helper in Functions_HuggingFace."""
+    return plant_sequence_identity(a, b)
 
 
 def alignment_coverage_metrics(seq, reference=REFERENCE_SEQ):
-    """Coverage metrics from best local pairwise alignment (raw seq vs reference)."""
-    if pd.isna(seq) or not isinstance(seq, str):
-        return {
-            "aligned_ref_coverage": np.nan,
-            "aligned_query_coverage": np.nan,
-            "alignment_score": np.nan,
-        }
-
-    query = str(seq).replace("-", "").replace(".", "").strip().upper()
-    ref = str(reference).replace("-", "").replace(".", "").strip().upper()
-    if len(query) == 0 or len(ref) == 0:
-        return {
-            "aligned_ref_coverage": np.nan,
-            "aligned_query_coverage": np.nan,
-            "alignment_score": np.nan,
-        }
-
-    aligner = Align.PairwiseAligner()
-    aligner.mode = "local"
-    aligner.match_score = 2.0
-    aligner.mismatch_score = -1.0
-    aligner.open_gap_score = -8.0
-    aligner.extend_gap_score = -0.5
-
-    alignment = aligner.align(ref, query)[0]
-    ref_blocks, query_blocks = alignment.aligned
-
-    aligned_ref_len = sum(r1 - r0 for r0, r1 in ref_blocks)
-    aligned_query_len = sum(q1 - q0 for q0, q1 in query_blocks)
-
-    return {
-        "aligned_ref_coverage": aligned_ref_len / len(ref),
-        "aligned_query_coverage": aligned_query_len / len(query),
-        "alignment_score": float(alignment.score),
-    }
+    """Wrapper around shared helper in Functions_HuggingFace."""
+    return plant_alignment_coverage_metrics(seq, reference)
 
 # Apply trimming
 print("\nTrimming sequences to 329 amino acids...")
@@ -400,6 +331,76 @@ fig_sub.update_layout(height=1500, width=1500)
 
 #savefig (as HTML to avoid needing Chrome)
 fig_sub.write_html(os.path.join(outdir, "PLANT_embedding_subclade.html"))
+
+# %%
+# colour specifically J.2.2Eng24 , K, J.2.vaccine_column and make them bigger to make it more obvious
+
+# Emphasized lineage view: highlight specified lineages, mute all others
+target_lineages = ["J.2.2Eng24", "K", "J.2.vaccine_column"]
+target_palette = {
+    "J.2.2Eng24": "#e41a1c",
+    "K": "#377eb8",
+    "J.2.vaccine_column": "#4daf4a",
+}
+
+df_emph = df.copy()
+df_emph["subclade_str"] = df_emph["subclade"].astype(str)
+df_targets = df_emph[df_emph["subclade_str"].isin(target_lineages)].copy()
+df_background = df_emph[~df_emph["subclade_str"].isin(target_lineages)].copy()
+
+missing_targets = [x for x in target_lineages if x not in set(df_targets["subclade_str"].unique())]
+if missing_targets:
+    print(f"Warning: requested highlighted lineages not found in data: {missing_targets}")
+
+fig_sub_emph = go.Figure()
+
+# Background points (muted)
+fig_sub_emph.add_trace(go.Scatter3d(
+    x=df_background["X"],
+    y=df_background["Y"],
+    z=df_background["Z"],
+    mode="markers",
+    marker=dict(size=3, color="#c7c7c7", opacity=0.22, symbol="circle"),
+    text=df_background.get("name", None),
+    customdata=df_background[["subclade"]].values if "subclade" in df_background.columns else None,
+    hovertemplate=(
+        "name: %{text}<br>"
+        "subclade: %{customdata[0]}<br>"
+        "X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}<extra>background</extra>"
+    ) if "subclade" in df_background.columns else None,
+    name="Other lineages",
+    showlegend=True,
+))
+
+# Highlighted lineages (larger)
+for lineage in target_lineages:
+    sub_df = df_targets[df_targets["subclade_str"] == lineage]
+    if len(sub_df) == 0:
+        continue
+    fig_sub_emph.add_trace(go.Scatter3d(
+        x=sub_df["X"],
+        y=sub_df["Y"],
+        z=sub_df["Z"],
+        mode="markers",
+        marker=dict(size=10, color=target_palette.get(lineage, "#ff7f00"), opacity=0.95, symbol="circle"),
+        text=sub_df.get("name", None),
+        customdata=sub_df[["subclade"]].values if "subclade" in sub_df.columns else None,
+        hovertemplate=(
+            "name: %{text}<br>"
+            "subclade: %{customdata[0]}<br>"
+            "X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}<extra>highlight</extra>"
+        ) if "subclade" in sub_df.columns else None,
+        name=lineage,
+        showlegend=True,
+    ))
+
+fig_sub_emph.update_layout(
+    title="PLANT embeddings (highlighted: J.2.2Eng24, K, J.2.vaccine_column)",
+    scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
+    height=1500,
+    width=1500,
+)
+fig_sub_emph.write_html(os.path.join(outdir, "PLANT_embedding_subclade_emphasized.html"))
                     
 
 # %%
@@ -424,16 +425,7 @@ fig_year.write_html(os.path.join(outdir, "PLANT_embedding_year.html"))
 background_df = pd.read_csv(BACKGROUND_CSV_PATH)
 
 def extract_year(val):
-    try:
-        s = str(val).strip()
-        if len(s) == 4 and s.isdigit():
-            # If only yyyy is given
-            return int(s)
-        else:
-            # yyyy/mm/dd format or others → convert to datetime and extract year
-            return pd.to_datetime(s, errors="coerce").year
-    except Exception:
-        return None
+    return plant_extract_year(val)
 
 background_df["year"] = background_df["collection date"].apply(extract_year)
 
