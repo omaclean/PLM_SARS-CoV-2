@@ -27,6 +27,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 import nbformat
+from Bio import Align
 
 import torch
 
@@ -129,48 +130,108 @@ print(f"\nInitial number of sequences: {len(df)}")
 seq_lengths = df["seq"].str.len()
 print(f"Sequence length distribution:\n{seq_lengths.value_counts().sort_index()}")
 
-# Use a reference sequence (329 aa) for alignment
-REFERENCE_SEQ = "QKIPVNDNSTATLCLGHHAVPNGTIVKTITNDRIEVTNATELVQNSSIGEICDSPHQILDGGNCTLIDALLGDPQCDGFQNKKWDLFVERSRAYSNCYPYDVPDYASLRSLVASSGTLEFKNESFNWAGVTQNGKSSSCIRGSSSSFFSRLNWLTHLNYTYPALNVTMPNKEQFDKLYIWGVHHPDTDKNQISLYAQPSGRITVSTKRSQQAVIPNIGSRXRIRDIPSRISIYWTIVKPGDILLINSTGNLIAPRGYFKIRSGKSSIMRSDAPIGKCKSECITPNGSIPNDKPFQNVNRITYGACPRYVKQSTLKLATGMRNVPEKQTR"
+# Use a J.2 reference sequence (329 aa) for alignment
+REFERENCE_SEQ = "QKIPGNDNSTATLCLGHHAVPNGTIVKTITNDRIEVTNATELVQNSSIGKICNSPHQILDGGNCTLIDALLGDPQCDGFQNKEWDLFVERSRANSSCYPYDVPDYASLRSLVASSGTLEFKDESFNWTGVKQNGKSSACKRGSSSSFFSRLNWLTSLNNIYPAQNVTMPNKEQFDKLYIWGVHHPDTDKNQFSLFAQSSGRITVSTTRSQQAVIPNIGSRPRVRDIPSRISIYWTIVKPGDILLINSTGNLIAPRGYFKIRSGKSSIMRSDAPIGECKSECITPNGSIPNDKPFQNVNRITYGACPRYVKQSTLKLATGMRNVPEKQTR"
 TARGET_LENGTH = 329
+
+ALIGN_IDENTITY_WARN = 0.90
+ALIGN_IDENTITY_FAIL = 0.80
+ALIGN_REF_COVERAGE_WARN = 0.98
+ALIGN_REF_COVERAGE_FAIL = 0.95
 
 def trim_to_target_length(seq, reference=REFERENCE_SEQ, target_len=TARGET_LENGTH):
     """
-    Trim sequences to match the target length.
-    For sequences longer than target, find the best alignment and extract the 329aa region.
-    For sequences shorter than target, return None (will be filtered out).
+    Build a target-length sequence by pairwise alignment to reference.
+    Uses local alignment to find the best matching region, then projects query
+    residues onto reference coordinates.
+
+    Returns:
+        str or None: aligned/trimmed target-length sequence.
     """
     if pd.isna(seq) or not isinstance(seq, str):
         return None
-    
-    seq_len = len(seq)
-    
-    if seq_len == target_len:
-        return seq
-    elif seq_len < target_len:
-        return None  # Too short, can't use
-    else:
-        # Longer than target - find where the HA1 region starts
-        # Try to find a good match to the reference start
-        best_score = 0
-        best_start = 0
-        
-        # Look for the start of HA1 (typically starts with QKIPG or similar)
-        # Slide a window and find best match to reference start
-        window = min(50, target_len)
-        ref_window = reference[:window]
-        
-        for i in range(seq_len - target_len + 1):
-            seq_window = seq[i:i+window]
-            # Simple match score
-            score = sum(1 for a, b in zip(ref_window, seq_window) if a == b)
-            if score > best_score:
-                best_score = score
-                best_start = i
-        
-        return seq[best_start:best_start + target_len]
+
+    query = str(seq).replace("-", "").replace(".", "").strip().upper()
+    ref = str(reference).replace("-", "").replace(".", "").strip().upper()
+    if len(query) == 0 or len(ref) == 0:
+        return None
+
+    aligner = Align.PairwiseAligner()
+    aligner.mode = "local"
+    aligner.match_score = 2.0
+    aligner.mismatch_score = -1.0
+    aligner.open_gap_score = -8.0
+    aligner.extend_gap_score = -0.5
+
+    alignment = aligner.align(ref, query)[0]
+
+    # Project query residues onto reference coordinates.
+    projected = list(ref)
+    ref_blocks, query_blocks = alignment.aligned
+
+    for (r0, r1), (q0, q1) in zip(ref_blocks, query_blocks):
+        block_len = min(r1 - r0, q1 - q0)
+        for k in range(block_len):
+            projected[r0 + k] = query[q0 + k]
+
+    trimmed = "".join(projected)
+
+    if len(trimmed) != target_len:
+        if len(trimmed) > target_len:
+            return trimmed[:target_len]
+        return None
+
+    return trimmed
+
+
+def sequence_identity(a, b):
+    """Simple positional identity between same-length sequences."""
+    if not isinstance(a, str) or not isinstance(b, str) or len(a) != len(b) or len(a) == 0:
+        return np.nan
+    matches = sum(x == y for x, y in zip(a, b))
+    return matches / len(a)
+
+
+def alignment_coverage_metrics(seq, reference=REFERENCE_SEQ):
+    """Coverage metrics from best local pairwise alignment (raw seq vs reference)."""
+    if pd.isna(seq) or not isinstance(seq, str):
+        return {
+            "aligned_ref_coverage": np.nan,
+            "aligned_query_coverage": np.nan,
+            "alignment_score": np.nan,
+        }
+
+    query = str(seq).replace("-", "").replace(".", "").strip().upper()
+    ref = str(reference).replace("-", "").replace(".", "").strip().upper()
+    if len(query) == 0 or len(ref) == 0:
+        return {
+            "aligned_ref_coverage": np.nan,
+            "aligned_query_coverage": np.nan,
+            "alignment_score": np.nan,
+        }
+
+    aligner = Align.PairwiseAligner()
+    aligner.mode = "local"
+    aligner.match_score = 2.0
+    aligner.mismatch_score = -1.0
+    aligner.open_gap_score = -8.0
+    aligner.extend_gap_score = -0.5
+
+    alignment = aligner.align(ref, query)[0]
+    ref_blocks, query_blocks = alignment.aligned
+
+    aligned_ref_len = sum(r1 - r0 for r0, r1 in ref_blocks)
+    aligned_query_len = sum(q1 - q0 for q0, q1 in query_blocks)
+
+    return {
+        "aligned_ref_coverage": aligned_ref_len / len(ref),
+        "aligned_query_coverage": aligned_query_len / len(query),
+        "alignment_score": float(alignment.score),
+    }
 
 # Apply trimming
 print("\nTrimming sequences to 329 amino acids...")
+df["seq_raw"] = df["seq"]
 df["seq_trimmed"] = df["seq"].apply(trim_to_target_length)
 
 # Remove sequences that couldn't be trimmed
@@ -191,6 +252,43 @@ df = df[~df["seq"].str.contains("X|B|\\*", regex=True).fillna(False)]
 df = df[df["seq"].str.len() == TARGET_LENGTH]
 df = df.reset_index(drop=True)
 print(f"Final number of sequences: {len(df)}")
+
+# Alignment quality check: identity to reference after alignment-based trimming
+df["identity_to_reference"] = df["seq"].apply(lambda s: sequence_identity(s, REFERENCE_SEQ))
+print("\nAlignment identity summary (vs reference):")
+print(df["identity_to_reference"].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]))
+
+low_identity = df[df["identity_to_reference"] < ALIGN_IDENTITY_WARN].copy()
+if len(low_identity) > 0:
+    print(f"WARNING: {len(low_identity)} sequences below {ALIGN_IDENTITY_WARN:.2f} identity.")
+    cols = [c for c in ["name", "subclade", "identity_to_reference"] if c in low_identity.columns]
+    print(low_identity[cols].sort_values("identity_to_reference").head(20))
+
+assert df["identity_to_reference"].min() >= ALIGN_IDENTITY_FAIL, (
+    f"Alignment QC failed: min identity {df['identity_to_reference'].min():.3f} < {ALIGN_IDENTITY_FAIL:.2f}. "
+    "Inspect low-identity rows before PLANT embedding."
+)
+
+# Explicit alignment QC on the raw (pre-trim) sequence vs reference before final CSV save.
+qc_df = df["seq_raw"].apply(lambda s: pd.Series(alignment_coverage_metrics(s)))
+df = pd.concat([df, qc_df], axis=1)
+
+print("\nAlignment coverage summary (raw sequence vs reference):")
+print(df[["aligned_ref_coverage", "aligned_query_coverage", "alignment_score"]].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]))
+
+low_ref_cov = df[df["aligned_ref_coverage"] < ALIGN_REF_COVERAGE_WARN].copy()
+if len(low_ref_cov) > 0:
+    print(f"WARNING: {len(low_ref_cov)} sequences below {ALIGN_REF_COVERAGE_WARN:.2f} reference coverage.")
+    cols = [c for c in ["name", "subclade", "aligned_ref_coverage", "aligned_query_coverage", "alignment_score"] if c in low_ref_cov.columns]
+    print(low_ref_cov[cols].sort_values("aligned_ref_coverage").head(20))
+
+assert df["aligned_ref_coverage"].min() >= ALIGN_REF_COVERAGE_FAIL, (
+    f"Alignment QC failed before save: min reference coverage {df['aligned_ref_coverage'].min():.3f} < {ALIGN_REF_COVERAGE_FAIL:.2f}. "
+    "Inspect low-coverage sequences before PLANT embedding."
+)
+
+# Keep CSV compact; drop raw helper column before writing.
+df = df.drop(columns=["seq_raw"])
 # %%
 
 df.to_csv(os.path.join(outdir, "PLANT_input_filtered.csv"), index=False)
