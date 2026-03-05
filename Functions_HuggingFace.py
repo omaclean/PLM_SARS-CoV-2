@@ -2102,7 +2102,7 @@ def plant_trim_to_target_length(
 
     alignment = aligner.align(ref, query)[0]
     ref_blocks, query_blocks = alignment.aligned
-    start_pos = query_blocks[0][0] if len(query_blocks) > 0 else 0
+    start_pos = int(query_blocks[0][0]) if len(query_blocks) > 0 else 0
 
     projected = list(ref)
     for (r0, r1), (q0, q1) in zip(ref_blocks, query_blocks):

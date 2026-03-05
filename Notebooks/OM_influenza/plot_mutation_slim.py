@@ -710,7 +710,7 @@ if reference_backbone in prob_pivot.columns:
     sns.heatmap(top_prob_data, annot=True, fmt='.3f', cmap='viridis', 
                 center=top_prob_data.mean().mean(), cbar_kws={'label': 'Probability'},
                 mask=top_prob_data.isna(), annot_kws={'size': 14})  # Mask NaN values
-    plt.title(f'{model_name} Top {top_n} Epistatic Mutations: Probabilities Across Backbones')
+    plt.title(f'{model_name} Top {top_n} Epistatis search: Probabilities Across Backbones')
     plt.xlabel('Backbone Lineage')
     plt.ylabel('Mutation-canon name')
     plt.tight_layout()
@@ -1209,7 +1209,7 @@ if reference_backbone in prob_pivot.columns:
 
     top_prob_data = prob_pivot.loc[top_mutations, ordered_backbones]
     plt.figure(figsize=(14, 10))
-    sns.heatmap(top_prob_data, annot=True, fmt='.2f', cmap='viridis',
+    sns.heatmap(top_prob_data, annot=True, fmt='.3f', cmap='viridis',
                 center=top_prob_data.mean().mean(), cbar_kws={'label': 'Probability'},
                 mask=top_prob_data.isna(), annot_kws={'size': 14})
     plt.title(f'{lineage_base}_{model_name} Probability Heatmap (Query-Ordered Backbones)')
@@ -1251,7 +1251,7 @@ if reference_backbone in prob_pivot.columns:
     # Extra plot: raw PLM probabilities at each node (no shift from reference).
     full_prob_data = prob_pivot.loc[ordered_mutations, ordered_backbones]
     plt.figure(figsize=(14, max(8, int(0.35 * len(ordered_mutations)))))
-    sns.heatmap(full_prob_data, annot=True, fmt='.2f', cmap='viridis',
+    sns.heatmap(full_prob_data, annot=True, fmt='.3f', cmap='viridis',
                 cbar_kws={'label': 'Raw PLM Probability'},
                 mask=full_prob_data.isna(), annot_kws={'size': 14})
     plt.title(f'{lineage_base}_{model_name} Raw PLM Probabilities by Node (Query Order)')

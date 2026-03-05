@@ -4,6 +4,7 @@ import pandas as pd
 from scipy.integrate import odeint
 from scipy.optimize import root_scalar, minimize_scalar
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
 import math
@@ -24,6 +25,7 @@ NAIVE=2_500_000  # Approximate naive population size
 # % H3N2 circulation by season (used to scale cohort sizes)
 
 CENTROID_FILE="/home3/oml4h/PLM_SARS-CoV-2/Results/PLANT_results/yearly_centroids.csv"
+PLANT_EMBEDDINGS_FILE="/home3/oml4h/PLM_SARS-CoV-2/Results/PLANT_results/PLANT_embeddings_with_distance.csv"
 
 outdir = "/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu"
 outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu_naive_rest/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
@@ -226,6 +228,98 @@ def calibrate_escape_slope(model, pop_dist, cf_coord, k_coord, vacc_coord,
     return res.x
 
 
+def plot_antigenic_map_with_highlights(
+    history,
+    k_coord,
+    cf_coord,
+    vacc_coord,
+    output_html_path,
+    background_embeddings_csv=PLANT_EMBEDDINGS_FILE,
+):
+    """Create a 3D antigenic map with muted background and highlighted key points."""
+    fig = go.Figure()
+
+    # Background: all PLANT embeddings as small, muted dots
+    if os.path.exists(background_embeddings_csv):
+        bg_df = pd.read_csv(background_embeddings_csv)
+        required_cols = {"X", "Y", "Z"}
+        if required_cols.issubset(bg_df.columns):
+            fig.add_trace(
+                go.Scatter3d(
+                    x=bg_df["X"],
+                    y=bg_df["Y"],
+                    z=bg_df["Z"],
+                    mode="markers",
+                    marker=dict(size=2, color="#c7c7c7", opacity=0.18),
+                    name="Background (all PLANT points)",
+                    hoverinfo="skip",
+                    showlegend=True,
+                )
+            )
+        else:
+            print(
+                f"Warning: {background_embeddings_csv} missing X/Y/Z columns; background points skipped."
+            )
+    else:
+        print(
+            f"Warning: background embeddings file not found at {background_embeddings_csv}; background points skipped."
+        )
+
+    # Historical centroids (highlighted, but less dominant than vaccine/K/CF)
+    history_years = sorted(history.keys())
+    history_xyz = np.array([history[y] for y in history_years], dtype=float)
+    fig.add_trace(
+        go.Scatter3d(
+            x=history_xyz[:, 0],
+            y=history_xyz[:, 1],
+            z=history_xyz[:, 2],
+            mode="markers+text",
+            marker=dict(size=8, color="#4d4d4d", opacity=1.0, symbol="diamond"),
+            text=[str(y) for y in history_years],
+            textposition="top center",
+            name="Historic centroids",
+            hovertemplate="year: %{text}<br>X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}<extra></extra>",
+            showlegend=True,
+        )
+    )
+
+    # Key highlighted points (large, dark, obvious)
+    key_points = [
+        ("Vaccine", vacc_coord, "#006400", 15),
+        ("K lineage", k_coord, "#8B0000", 15),
+        ("Counterfactual", cf_coord, "#00008B", 15),
+    ]
+    for name, coord, color, size in key_points:
+        fig.add_trace(
+            go.Scatter3d(
+                x=[coord[0]],
+                y=[coord[1]],
+                z=[coord[2]],
+                mode="markers+text",
+                marker=dict(size=size, color=color, opacity=1.0, symbol="circle"),
+                text=[name],
+                textposition="top center",
+                name=name,
+                hovertemplate=f"{name}<br>X: %{{x:.3f}}<br>Y: %{{y:.3f}}<br>Z: %{{z:.3f}}<extra></extra>",
+                showlegend=True,
+            )
+        )
+
+    fig.update_layout(
+        title="Antigenic Map: Highlighted Vaccine, K, Counterfactual, and Historic Centroids",
+        scene=dict(
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z",
+        ),
+        legend=dict(itemsizing="constant"),
+        width=1400,
+        height=1100,
+    )
+    fig.write_html(output_html_path)
+    print(f"Saved 3D antigenic map: {output_html_path}")
+
+
 # ==========================================
 # 1. CONFIGURATION & DATA
 # ==========================================
@@ -367,6 +461,15 @@ cf_coord = (3.011719, 3.59375, -0.34155) # (3.693,3.424,-0.073) # Approx PLANT c
 cf_coord =(3.046875,3.5292969,-0.5493164 )
 
 cf_name="Eng24(J.2.2..)"
+
+antigenic_map_output_path = os.path.join(outdir, "flu_antigenic_map_highlighted.html")
+plot_antigenic_map_with_highlights(
+    history=history,
+    k_coord=k_coord,
+    cf_coord=cf_coord,
+    vacc_coord=vacc_coord,
+    output_html_path=antigenic_map_output_path,
+)
 
 #print distance from vaccine to K
 v_dist = np.linalg.norm(np.array(k_coord) - np.array(vacc_coord))
