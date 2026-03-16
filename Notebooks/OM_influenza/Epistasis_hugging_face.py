@@ -1,8 +1,11 @@
 # %%
-%load_ext autoreload
-%autoreload 2
+# %load_ext autoreload
+# %autoreload 2
 import sys
-sys.path.append('../../')
+
+from pathlib import Path
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(repo_root))
 import os
 import importlib
 module_name = "Functions"
@@ -58,6 +61,9 @@ base_lineage_index=0
 #query_path = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/K_rev_rev_cds_HA.fas"
 query_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/PX445235NodeTrace_dedup_OM_names.fasta"
 out_base="/home3/oml4h/PLM_SARS-CoV-2/Results/test/Joseph_node_scan_new_names/"
+
+query_path="/home3/oml4h/PLM_SARS-CoV-2/Sequences/PX445235NodeTrace_ancestral.fasta"
+out_base="/home3/oml4h/PLM_SARS-CoV-2/Results/test/Joseph_mega_node_scan_crap_names/"
 
 modnam="/home3/oml4h/hugging_face_downloads/model_weights_topublish/{}".format(sub_mod)
 

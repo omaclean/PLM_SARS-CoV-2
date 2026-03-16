@@ -159,6 +159,25 @@ h3n2_transitions = np.array([
 ])
 
 # ------------------------------------------------------------------
+# SARS-CoV-2 (SC2) TRANSITION MATRIX
+# ------------------------------------------------------------------
+# Data source:  De Maio (2021) Table 1 https://pmc.ncbi.nlm.nih.gov/articles/PMC8135539/pdf/evab087.pdf
+# Base order remains: A, C, G, T
+sc2_transitions = np.array([
+    # From A: [ A->A,  A->C,  A->G,  A->T ]
+    [          0.0,    0.039, 0.310, 0.123 ],
+
+    # From C: [ C->A,  C->C,  C->G,  C->T ]
+    [          0.140,  0.0,   0.022, 3.028 ],
+
+    # From G: [ G->A,  G->C,  G->G,  G->T ]
+    [          0.747,  0.113, 0.0,   2.953 ],
+
+    # From T(U): [ T->A, T->C, T->G, T->T ]
+    [          0.056,  0.261, 0.036, 0.0   ]
+])
+
+# ------------------------------------------------------------------
 # VERIFICATION PRINT
 # ------------------------------------------------------------------
 print(f"H1N1 Matrix Shape: {h1n1_transitions.shape}")
