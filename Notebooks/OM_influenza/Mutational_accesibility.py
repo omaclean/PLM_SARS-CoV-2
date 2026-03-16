@@ -163,7 +163,7 @@ h3n2_transitions = np.array([
 # ------------------------------------------------------------------
 # Data source:  De Maio (2021) Table 1 https://pmc.ncbi.nlm.nih.gov/articles/PMC8135539/pdf/evab087.pdf
 # Base order remains: A, C, G, T
-sc2_transitions = np.array([
+SC2_transitions = np.array([
     # From A: [ A->A,  A->C,  A->G,  A->T ]
     [          0.0,    0.039, 0.310, 0.123 ],
 
