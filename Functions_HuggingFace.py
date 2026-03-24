@@ -1,3 +1,4 @@
+
 from Bio import SeqIO
 from Bio.Seq import Seq
 import pandas as pd
@@ -12,6 +13,7 @@ from numpy import dot
 from numpy.linalg import norm
 from Bio import SeqIO
 from scipy.special import softmax
+from scipy.stats import spearmanr, pearsonr
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 import py3Dmol
@@ -29,6 +31,69 @@ import os
 import re
 from Bio import pairwise2
 
+
+###################################################################################
+# Transition Matrix Definitions (for mutational accessibility)
+###################################################################################
+# Labels for reference
+bases = ['A', 'C', 'G', 'T']
+
+# H1N1 TRANSITION MATRIX
+# Data source: Table S1 (Pauly et al., (14)) - H1N1 Column
+h1n1_transitions = np.array([
+    [           0.0,    1.5e-5,  2.0e-4,  1.8e-5 ],
+    [           7.7e-6, 0.0,     5.1e-6,  2.7e-5 ],
+    [           3.1e-5, 5.4e-5,  0.0,     3.5e-5 ],
+    [           1.4e-5, 2.3e-4,  3.5e-5,  0.0    ]
+])
+
+# H3N2 TRANSITION MATRIX
+# Data source: Table S1 (Pauly et al., (14)) - H3N2 Column
+h3n2_transitions = np.array([
+    [           0.0,    3.4e-5,  3.0e-4,  1.3e-5 ],
+    [           1.7e-5, 0.0,     9.7e-6,  4.6e-5 ],
+    [           7.2e-5, 2.8e-5,  0.0,     6.0e-5 ],
+    [           4.5e-6, 3.1e-4,  3.6e-5,  0.0    ]
+])
+
+# SARS-CoV-2 (SC2) TRANSITION MATRIX
+# Data source:  De Maio (2021) Table 1 https://pmc.ncbi.nlm.nih.gov/articles/PMC8135539/pdf/evab087.pdf
+SC2_transitions = np.array([
+    # [          0.0,    0.039, 0.310, 0.123 ],
+    # [          0.140,  0.0,   0.022, 3.028 ],
+    # [          0.747,  0.113, 0.0,   2.953 ],
+    # [          0.056,  0.261, 0.036, 0.0   ]
+    [           0.0,    3.19e-8,  2.54e-7,  1.01e-7 ],
+    [       1.15e-7,        0.0,  1.80e-8,  2.48e-6 ],
+    [       6.11e-7,    9.25e-8,      0.0,  2.42e-6 ],
+    [       4.58e-8,    2.14e-7,  2.95e-8,      0.0 ]
+])
+# normalised by 1.3 × 10−6 from https://pmc.ncbi.nlm.nih.gov/articles/PMC8996265/ 
+# (f_A = 0.299, f_C = 0.184, f_G = 0.196, f_U = 0.321)
+#E = (0.299 * 0.472) + (0.184 *3.190) + (0.196 * 3.813) + (0.321 * 0.353)= 1.5778 mean per site
+# and SARS-CoV-2 reference genome composition (~29.9% A, 18.4% C, 19.6% G, 32.1% U) 
+# .. scaling factor of 8.186* 10^-7
+
+TRANSITION_MATRICES = {
+    "SC2": {
+        "display_name": "SARS-CoV-2 (SC2)",
+        "tag": "sc2",
+        "source": "De Maio (2021) Table 1",
+        "matrix": SC2_transitions,
+    },
+    "H1N1": {
+        "display_name": "Influenza H1N1",
+        "tag": "h1n1",
+        "source": "Pauly et al. (14) Table S1",
+        "matrix": h1n1_transitions,
+    },
+    "H3N2": {
+        "display_name": "Influenza H3N2",
+        "tag": "h3n2",
+        "source": "Pauly et al. (14) Table S1",
+        "matrix": h3n2_transitions,
+    },
+}
 
 ## Compression Functions ########################################################
 import bz2
@@ -2453,6 +2518,7 @@ def _extract_corr_pvalue(result):
 
 
 def _evaluate_single_alpha(alpha: float, base_df: pd.DataFrame, pseudocount: float = 1e-6) -> dict:
+    from scipy.stats import spearmanr, pearsonr
     working = base_df.copy()
     working["combined_log_score"] = working["log_plm"] + alpha * working["log_mut"]
 
@@ -2540,8 +2606,8 @@ def evaluate_alpha_sweep(
     pseudocount: float = 1e-6,
 ) -> pd.DataFrame:
     base_df = combined_df.copy()
-    base_df["log_plm"] = np.log(base_df["plm_prob"].clip(lower=pseudocount))
-    base_df["log_mut"] = np.log(base_df["mut_prob"].clip(lower=pseudocount))
+    base_df["log_plm"] = np.log(base_df["plm_prob"].replace(0, 1e-32))
+    base_df["log_mut"] = np.log(base_df["mut_prob"].replace(0, 1e-32))
 
     alpha_values = [float(alpha) for alpha in alpha_grid]
     if parallel and len(alpha_values) >= alpha_sweep_min_grid:

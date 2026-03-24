@@ -255,6 +255,10 @@ alignment_maps = summarize_pdb_alignment(
 K_indexed_muts_flagged = flag_outside_mutations(K_indexed_muts, alignment_maps)
 print("Flagged mutations:", K_indexed_muts_flagged)
 
+# Scale plot sizes relative to the number of mutations (baseline = 8 mutations → multiplier = 1)
+plot_size_multiplier = max(1.0, len(K_indexed_muts) / 8)
+print(f"Plot size multiplier: {plot_size_multiplier:.2f} ({len(K_indexed_muts)} mutations)")
+
 
 
 
@@ -370,7 +374,7 @@ print(f"Found {len(mutated_positions)} positions with mutations in backbone_mut_
 colors = ['red' if (i+1) in mutated_positions else 'blue' for i in range(len(entropy_vals))]
 
 # Create scatter plot with colors
-plt.figure(figsize=(12, 8))
+plt.figure(figsize=(12 * plot_size_multiplier, 8 * plot_size_multiplier))
 for color in ['blue', 'red']:
     mask = [c == color for c in colors]
     label = 'Mutated in backbones' if color == 'red' else 'Not mutated'
@@ -707,7 +711,7 @@ if reference_backbone in prob_pivot.columns:
     # Get probability data for these mutations
     top_prob_data = prob_pivot.loc[top_mutations]
     
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12 * plot_size_multiplier, 8 * plot_size_multiplier))
     sns.heatmap(top_prob_data, annot=True, fmt='.3f', cmap='viridis', 
                 center=top_prob_data.mean().mean(), cbar_kws={'label': 'Probability'},
                 mask=top_prob_data.isna(), annot_kws={'size': 14})  # Mask NaN values
@@ -720,7 +724,7 @@ if reference_backbone in prob_pivot.columns:
     plt.show()
     
     # 6. Create shift heatmap (with reference lineage showing zeros)
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12 * plot_size_multiplier, 8 * plot_size_multiplier))
     shift_data = prob_shifts_only.loc[top_mutations, shift_cols].copy()
     # Add reference backbone column with calculated zeros (shift from itself)
     #shift_data[f'{reference_backbone}_shift'] = 0.0
@@ -739,7 +743,7 @@ if reference_backbone in prob_pivot.columns:
     plt.show()
 
     # 7. Create grammar heatmap (with reference lineage showing zeros)
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12 * plot_size_multiplier, 8 * plot_size_multiplier))
     gram_data = gram_shifts.loc[top_mutations, shift_cols].copy()
     # Add reference backbone column with calculated zeros (log10(1) = 0)
     #gram_data[f'{reference_backbone}_shift'] = 0.0
@@ -848,7 +852,7 @@ rows = ['Reference'] + filtered_order  # Reference as first row too
 mut_combo_probability_matrix = mut_combo_probability_matrix.reindex(index=rows, columns=cols)
 mut_combo_grammar_matrix = mut_combo_grammar_matrix.reindex(index=rows, columns=cols)
 # Plot Probability Matrix
-plt.figure(figsize=(12, 8))
+plt.figure(figsize=(12 * plot_size_multiplier, 8 * plot_size_multiplier))
 sns.heatmap(mut_combo_probability_matrix, annot=True, fmt='.3f', cmap='viridis', 
             cbar_kws={'label': 'Probability'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Mutation Probability Matrix')
@@ -857,7 +861,7 @@ plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_mutation_probabil
 plt.show()
 
 # Plot Log10 Probability Matrix
-plt.figure(figsize=(12, 8))
+plt.figure(figsize=(12 * plot_size_multiplier, 8 * plot_size_multiplier))
 sns.heatmap(np.log10(mut_combo_probability_matrix), annot=True, fmt='.3f', cmap='viridis', 
             cbar_kws={'label': 'Log10 Probability'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Log10 Mutation Probability Matrix')
@@ -866,7 +870,7 @@ plt.savefig(os.path.join(outdir, f"{lineage_base}_{model_name}_log10_mutation_pr
 plt.show()
 
 # Plot Grammar on Backbone (absolute)
-plt.figure(figsize=(12, 8))
+plt.figure(figsize=(12 * plot_size_multiplier, 8 * plot_size_multiplier))
 sns.heatmap(mut_combo_grammar_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
             cbar_kws={'label': 'Focal Sequence Grammar'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Focal Sequence Grammar on Backbone')
@@ -882,7 +886,7 @@ plt.show()
 prob_shift_matrix = mut_combo_probability_matrix.subtract(mut_combo_probability_matrix['Reference'], axis=0)
 
 
-plt.figure(figsize=(12, 8))
+plt.figure(figsize=(12 * plot_size_multiplier, 8 * plot_size_multiplier))
 sns.heatmap(prob_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
             cbar_kws={'label': f'Probability Shift (vs Reference {lineage_base})'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Probability Shift Matrix (Relative to Reference {lineage_base})')
@@ -898,7 +902,7 @@ log_prob_shift_matrix = log_mut_combo_probability_matrix.subtract(log_mut_combo_
 log_prob_shift_matrix.iloc[:,0]= np.nan
 
 
-plt.figure(figsize=(12, 8))
+plt.figure(figsize=(12 * plot_size_multiplier, 8 * plot_size_multiplier))
 sns.heatmap(log_prob_shift_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
             cbar_kws={'label': f'Log10 Probability Shift (vs Reference {lineage_base})'}, annot_kws={'size': 14})
 plt.title(f'{model_name} Log10 Probability Shift Matrix (Relative to Reference {lineage_base})')
@@ -964,7 +968,7 @@ print(mut_combo_grammar_matrix.iloc[0:5,0:5])
 print(mut_combo_grammar_delta_matrix.iloc[0:5,0:5])
 
 # Create figure with visual separation between reference and pairwise sections
-fig, ax = plt.subplots(figsize=(14, 10))
+fig, ax = plt.subplots(figsize=(14 * plot_size_multiplier, 10 * plot_size_multiplier))
 
 # Calculate symmetric vmin/vmax from visible data only (respecting mask)
 visible_data = grammar_shift_matrix.values[~mask]
@@ -1066,7 +1070,7 @@ else:
     vmin_epistasis, vmax_epistasis = None, None
 
 # Plot Epistasis Matrix
-fig, ax = plt.subplots(figsize=(14, 10))
+fig, ax = plt.subplots(figsize=(14 * plot_size_multiplier, 10 * plot_size_multiplier))
 sns.heatmap(epistasis_matrix, annot=True, fmt='.3f', cmap='viridis', center=0,
             vmin=vmin_epistasis, vmax=vmax_epistasis,
             cbar_kws={'label': 'Epistasis (Observed - Expected)'}, annot_kws={'size': 12},

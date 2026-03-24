@@ -26,6 +26,7 @@ NAIVE=2_500_000  # Approximate naive population size
 
 CENTROID_FILE="/home3/oml4h/PLM_SARS-CoV-2/Results/PLANT_results/yearly_centroids.csv"
 PLANT_EMBEDDINGS_FILE="/home3/oml4h/PLM_SARS-CoV-2/Results/PLANT_results/PLANT_embeddings_with_distance.csv"
+PLANT_OG_BACKGROUND_FILE="/home3/oml4h/hugging_face_downloads/PLANT_model/code/examples/backgrounds.csv"
 
 outdir = "/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu"
 outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu_naive_rest/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
@@ -33,6 +34,29 @@ outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu_naiv
 outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results/H3N2_partial_flu_smear_rest/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
 
 outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results_new_cf/H3N2_partial_flu_smear_rest/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
+outdir = f"/home3/oml4h/PLM_SARS-CoV-2/Results/sim_results_new_cf/H3N2_partial_flu_smear_rest_J.2.4cf/import_{IMPORTATION_RATE}_seasonal_amp_{SEASONAL_AMPLITUDE}"
+
+Saved 3D antigenic map: /home3/oml4h/PLM_SARS-CoV-2/Results/sim_results_new_cf/H3N2_partial_flu_smear_rest_J.2.4cf/import_10.0_seasonal_amp_0.5/flu_antigenic_map_highlighted.html
+Background year filter <= 2024: kept 151,785/151,785 points
+Saved 3D antigenic map: /home3/oml4h/PLM_SARS-CoV-2/Results/sim_results_new_cf/H3N2_partial_flu_smear_rest_J.2.4cf/import_10.0_seasonal_amp_0.5/flu_antigenic_map_highlighted_og_background.html
+Distance from Vaccine to K Lineage: 0.97 units
+Distance from K lineage to 2014: 8.02 units
+Distance from K lineage to 2015: 8.25 units
+Distance from K lineage to 2016: 8.00 units
+Distance from K lineage to 2017: 7.48 units
+Distance from K lineage to 2018: 6.71 units
+Distance from K lineage to 2019: 6.00 units
+Distance from K lineage to 2020: 5.29 units
+Distance from K lineage to 2021: 2.90 units
+Distance from K lineage to 2022: 2.52 units
+Distance from K lineage to 2023: 1.54 units
+Distance from K lineage to 2024: 1.20 units
+
+--- CALIBRATION ---
+Target Re gain per unit distance : 0.0147
+Calibrated escape slope          : 0.053144
+Antigenic distance K ↔ CF        : 0.649 units
+Achieved Re ratio S_eff_K/S_eff_CF : 1.009544  (per-unit gain = 0.0147)
 
 #%% 
 class AntigenicSeirModel:
@@ -235,6 +259,7 @@ def plot_antigenic_map_with_highlights(
     vacc_coord,
     output_html_path,
     background_embeddings_csv=PLANT_EMBEDDINGS_FILE,
+    max_background_year=None,
 ):
     """Create a 3D antigenic map with muted background and highlighted key points."""
     fig = go.Figure()
@@ -244,13 +269,35 @@ def plot_antigenic_map_with_highlights(
         bg_df = pd.read_csv(background_embeddings_csv)
         required_cols = {"X", "Y", "Z"}
         if required_cols.issubset(bg_df.columns):
+            if max_background_year is not None:
+                year_series = None
+                if "year" in bg_df.columns:
+                    year_series = pd.to_numeric(bg_df["year"], errors="coerce")
+                elif "collection date" in bg_df.columns:
+                    year_series = pd.to_numeric(
+                        bg_df["collection date"].astype(str).str.extract(r"(\d{4})", expand=False),
+                        errors="coerce",
+                    )
+                elif "collection_date" in bg_df.columns:
+                    year_series = pd.to_numeric(
+                        bg_df["collection_date"].astype(str).str.extract(r"(\d{4})", expand=False),
+                        errors="coerce",
+                    )
+
+                if year_series is not None:
+                    before_n = len(bg_df)
+                    bg_df = bg_df.loc[year_series <= max_background_year].copy()
+                    print(
+                        f"Background year filter <= {max_background_year}: kept {len(bg_df):,}/{before_n:,} points"
+                    )
+
             fig.add_trace(
                 go.Scatter3d(
                     x=bg_df["X"],
                     y=bg_df["Y"],
                     z=bg_df["Z"],
                     mode="markers",
-                    marker=dict(size=2, color="#c7c7c7", opacity=0.18),
+                    marker=dict(size=2, color="#c7c7c7", opacity=0.08),
                     name="Background (all PLANT points)",
                     hoverinfo="skip",
                     showlegend=True,
@@ -287,9 +334,11 @@ def plot_antigenic_map_with_highlights(
     key_points = [
         ("Vaccine", vacc_coord, "#006400", 15),
         ("K lineage", k_coord, "#8B0000", 15),
-        ("Counterfactual", cf_coord, "#00008B", 15),
+        (f"Counterfactual \n {cf_name}", cf_coord, "#00008B", 15),
     ]
+    shared_label_font = dict(size=14, color="#5DA2C2")
     for name, coord, color, size in key_points:
+        text_position = "bottom center" if name == "Counterfactual" else "top center"
         fig.add_trace(
             go.Scatter3d(
                 x=[coord[0]],
@@ -298,7 +347,8 @@ def plot_antigenic_map_with_highlights(
                 mode="markers+text",
                 marker=dict(size=size, color=color, opacity=1.0, symbol="circle"),
                 text=[name],
-                textposition="top center",
+                textposition=text_position,
+                textfont=shared_label_font,
                 name=name,
                 hovertemplate=f"{name}<br>X: %{{x:.3f}}<br>Y: %{{y:.3f}}<br>Z: %{{z:.3f}}<extra></extra>",
                 showlegend=True,
@@ -450,17 +500,11 @@ model = AntigenicSeirModel(history, population_size=67_000_000, current_year=202
 # EPI3791586|HA|A/England/2024|J.2.2Eng24,2024,J.2.2Eng24,3.046875,3.5292969,-0.5493164,0.22035405
 # EPI4908143|HA|A/Columbia_vaccine/2023|J.2,2023,J.2.vaccine_column,3.0117188,3.59375,-0.34155273,0.0
 
-k_coord = (3.4980469,3.5703125,0.4946289) 
 
-#EPI4908143|HA|A/Columbia_vaccine/2023|J.2 root .. the Croatia one was for eggs and has D186A on J.2 root
-vacc_coord = (3.0117188,3.59375,-0.34155273) 
 
-cf_coord = (3.011719, 3.59375, -0.34155) # (3.693,3.424,-0.073) # Approx PLANT coord on just first branch with I160K only
 # croatia onw 
 #counterfactual coords of the Eng 24 virus circulating in 2024
-cf_coord =(3.046875,3.5292969,-0.5493164 )
 
-cf_name="Eng24(J.2.2..)"
 
 antigenic_map_output_path = os.path.join(outdir, "flu_antigenic_map_highlighted.html")
 plot_antigenic_map_with_highlights(
@@ -469,6 +513,17 @@ plot_antigenic_map_with_highlights(
     cf_coord=cf_coord,
     vacc_coord=vacc_coord,
     output_html_path=antigenic_map_output_path,
+)
+
+antigenic_map_og_background_output_path = os.path.join(outdir, "flu_antigenic_map_highlighted_og_background.html")
+plot_antigenic_map_with_highlights(
+    history=history,
+    k_coord=k_coord,
+    cf_coord=cf_coord,
+    vacc_coord=vacc_coord,
+    output_html_path=antigenic_map_og_background_output_path,
+    background_embeddings_csv=PLANT_OG_BACKGROUND_FILE,
+    max_background_year=max(history.keys()),
 )
 
 #print distance from vaccine to K

@@ -142,6 +142,10 @@ print("Base lineage:",base_lineage)
 print("vs lineage:",final_lineage)
 print(K_indexed_muts)
 
+# Scale plot sizes relative to the number of mutations (baseline = 8 mutations → multiplier = 1)
+plot_size_multiplier = max(1.0, len(K_indexed_muts) / 8)
+print(f"Plot size multiplier: {plot_size_multiplier:.2f} ({len(K_indexed_muts)} mutations)")
+
 # %%
 mutation_dictionary  = {k:J_indexed_muts[i] for i,k in enumerate(K_indexed_muts)}
 
@@ -532,7 +536,7 @@ abs_shifts = shifts
 log_abs_shifts = np.log10(abs_shifts.replace(0, np.nan))
 
 # Plot 1: Absolute Shifts — use viridis for consistency
-plt.figure(figsize=(14, 10))
+plt.figure(figsize=(14 * plot_size_multiplier, 10 * plot_size_multiplier))
 sns.heatmap(abs_shifts, annot=True, fmt=".2f", cmap='viridis', annot_kws={"size": 8})
 plt.title(f'Absolute Probability Shifts vs Reference {base_lineage} ({sub_mod})')
 plt.xlabel('Focal Mutation')
@@ -542,7 +546,7 @@ plt.savefig(out + sub_mod + '_probability_shifts_heatmap_abs.png')
 plt.show()
 
 # Plot 2: Log10 Absolute Shifts
-plt.figure(figsize=(14, 10))
+plt.figure(figsize=(14 * plot_size_multiplier, 10 * plot_size_multiplier))
 sns.heatmap(log_abs_shifts, annot=True, fmt=".2f", cmap='viridis', annot_kws={"size": 8})
 plt.title(f'Log10 Absolute Probability Shifts vs Reference {base_lineage} ({sub_mod})')
 plt.xlabel('Focal Mutation')
@@ -576,7 +580,7 @@ rel_grammar_matrix = rel_grammar_matrix.reindex(index=row_order, columns=col_ord
 for label in rel_grammar_matrix.index.intersection(rel_grammar_matrix.columns):
     rel_grammar_matrix.loc[label, label] = 0.0
 
-plt.figure(figsize=(14, 10))
+plt.figure(figsize=(14 * plot_size_multiplier, 10 * plot_size_multiplier))
 sns.heatmap(rel_grammar_matrix, annot=True, fmt=".2f", cmap='viridis',
             center=0, cbar_kws={'label': 'Relative Grammar (rel_grammar)'},
             annot_kws={'size': 10})
@@ -818,7 +822,7 @@ for i, name in enumerate(mut_names):
             if count >= 3:
                 break
 
-fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 3*rows), sharey=True, sharex=True)
+fig, axes = plt.subplots(rows, cols, figsize=(4*cols*plot_size_multiplier, 3*rows*plot_size_multiplier), sharey=True, sharex=True)
 # Flatten axes for easy iteration if it's a grid
 if num_plots > 1:
     axes_flat = axes.flatten()
@@ -1000,7 +1004,7 @@ canonical_mutations = mutations_to_canonical(K_indexed_muts, h3_map_with_ha2)
 canon_dict = {k: canonical_mutations[i] for i, k in enumerate(K_indexed_muts)}
 
 # Create figure with two subplots
-plt.figure(figsize=(16, 6))
+plt.figure(figsize=(16 * plot_size_multiplier, 6 * plot_size_multiplier))
 
 # Subplot 1: Histogram
 plt.subplot(1, 2, 1)
@@ -1131,7 +1135,7 @@ for mut in K_indexed_muts:
         print(f"Warning: Observed mutation {mut} not found in possible mutations list.")
 
 # 6. Plotting
-plt.figure(figsize=(12, 8))
+plt.figure(figsize=(12 * plot_size_multiplier, 8 * plot_size_multiplier))
 
 # Plot all mutations as a line
 plt.plot(all_muts_df['rank'], all_muts_df['log10_prob'], color='blue', linewidth=0.8, alpha=0.5, label='All possible mutations')
@@ -1163,7 +1167,7 @@ print(obs_df[['mutation', 'canon', 'rank', 'log10_prob']])
 # %%
 
 # seaborn heatmap of mutation_prob_flat
-plt.figure(figsize=(20, 8))
+plt.figure(figsize=(20 * plot_size_multiplier, 8 * plot_size_multiplier))
 print( mutation_prob_matrix.shape)
 mutation_prob_matrix=mutation_prob_matrix.copy()
 # make every reference amino acid probability Na then 0
@@ -1186,7 +1190,7 @@ plt.savefig(os.path.join(out, f"{sub_mod}_mutation_probability_heatmap.png"), dp
 
 
 
-plt.figure(figsize=(16, 8))
+plt.figure(figsize=(16 * plot_size_multiplier, 8 * plot_size_multiplier))
 plt.subplot(1, 2, 1)
 # log x axis before plotting
 mutation_prob_matrix_log=np.log10(mutation_prob_matrix )  # add small constant to avoid log(0)
