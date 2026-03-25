@@ -39,14 +39,16 @@ from pathlib import Path
 from typing import Dict, IO, Iterator, List, Optional, Sequence, Set, Tuple, cast
 
 
-DEFAULT_SEQUENCE_PATH = Path("/home3/oml4h/PLM_SARS-CoV-2/Sequences/cog_2025-07-17_spike.fa")
-DEFAULT_METADATA_PATH = Path("/home3/oml4h/PLM_SARS-CoV-2/Sequences/cog_2025-07-17_spike_metadata.csv")
-DEFAULT_OUTPUT_DIR = Path("/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots")
-DEFAULT_SEQUENCE_MODE = "spike"
+
 DEFAULT_SEQUENCE_PATH = Path("/home3/oml4h/PLM_SARS-CoV-2/Sequences/cog_2025-07-17_alignment.fa.gz")
 DEFAULT_METADATA_PATH = Path("/home3/oml4h/PLM_SARS-CoV-2/Sequences/cog_2025-07-17_metadata.csv.gz")
 DEFAULT_OUTPUT_DIR = Path("/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/full_genome")
 DEFAULT_SEQUENCE_MODE = "nucleotide_full"
+
+DEFAULT_SEQUENCE_PATH = Path("/home3/oml4h/PLM_SARS-CoV-2/Sequences/cog_2025-07-17_spike.fa")
+DEFAULT_METADATA_PATH = Path("/home3/oml4h/PLM_SARS-CoV-2/Sequences/cog_2025-07-17_spike_metadata.csv")
+DEFAULT_OUTPUT_DIR = Path("/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots")
+DEFAULT_SEQUENCE_MODE = "spike"
 
 
 DEFAULT_MONTHS = ("2025-06",)

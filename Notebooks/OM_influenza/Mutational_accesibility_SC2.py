@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import csv
 from matplotlib.colors import LogNorm
 from scipy.stats import pearsonr, spearmanr
 from adjustText import adjust_text
@@ -30,18 +31,37 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(_file))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
-module_name = "Functions"
-if module_name in sys.modules:
-    del sys.modules[module_name]
-# Functions = importlib.import_module(module_name)
 
 from Functions_HuggingFace import (
-    get_mutation_prob_matrix,
+    _resolve_plm_max_nt_length,
+    _build_coordinate_map,
+    _is_probably_nucleotide_sequence,
+    _load_comparison_protein_sequence,
+    _save_key_matrix,
+    _load_plm_runtime,
+    _write_plm_probability_matrix,
+    _ensure_plm_probability_matrix,
+    _raw_codon_to_aa_prob,
+    _build_aa20_average_and_reconstruction,
+    _flattened_fit_metrics,
+    validate_mutational_matrix,
+    get_ranked_mutations,
+    _load_single_focal_reference,
+    _tag_output_name,
+    _is_probably_nucleotide,
+    _translate_nt_to_protein,
+    build_reference_to_alignment_column_map,
+    compute_lineage_mutation_profile,
+    compute_observed_diversity_profile_fast,
+    evaluate_alpha_sweep,
+    _extract_corr_pvalue,
+    _safe_label,
+    _clean_pattern_tag,
     load_plm_probability_matrix,
+    get_mutation_prob_matrix,
     parse_lineage_references,
     load_lineage_diversity_fastas,
-     bases, h1n1_transitions, h3n2_transitions, SC2_transitions, TRANSITION_MATRICES,
-
+    bases, h1n1_transitions, h3n2_transitions, SC2_transitions, TRANSITION_MATRICES,
 )
 # # Run code
 
@@ -54,107 +74,164 @@ from Functions_HuggingFace import (
 # /home3/oml4h/PLM_SARS-CoV-2/Results/test/J.2.4/J.2.4_probability_matrix.csv
 
 
-fasta_file='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/wales_ref_root.nt.fa'
-base_lineage_id = '?'
+# %%
+# =====================================================================
+# I. OVERALL RUN CONFIGURATION
+# =====================================================================
 
-# PLM / pooled-panel configuration
-PLM_BASE_MODEL = 'esm2_t36_3B_UR50D'
-PLM_MODEL_LAYER = 36
-PLM_CHECKPOINT_DIR = None
-FORCE_RECOMPUTE_PLM_MATRIX = False
-PLM_MAX_AA_LENGTH = 1024
-PLM_MAX_NT_LENGTH = None
+# GPU SAFETY: Set to True to error if no CUDA is available. 
+GPU_REQUIRED = True
 
-# PLM / pooled-panel configuration
-PLM_MODEL_TAG = 'sarbeco_SC2_FT_ESM2_650M_2023'
-PLM_BASE_MODEL = 'esm2_t33_650M_UR50D'
-PLM_MODEL_LAYER = 33
-PLM_CHECKPOINT_DIR = '/home3/oml4h/my_SC2_finetunes/magma_esm-2_650M_95perc/SC2_ft_mod_2023_650M/final_checkpoint/'
-FORCE_RECOMPUTE_PLM_MATRIX = False
+# ANALYSIS MODE:
+# "MONTHLY_GUIDE" -> Processes multiple snapshots from POOLED_DIVERSITY_GUIDE CSV.
+# "SINGLE_FASTA"  -> Processes only the file in POOLED_DIVERSITY_FASTA.
+ANALYSIS_MODE = "MONTHLY_GUIDE"
 
+# MODEL SELECTION: Choose which PLM model(s) to run and compare.
+# Options: "ESMC_600M", "ESMC_600M_FT_SC2_99clus", "ESM2_650M_FT", "ESM2_3B_OG"
+MODEL_SELECTION = ["ESMC_600M_FT_SC2_99clus","ESMC_600M_OG"]
 
-# Nucleotide mutation model used for codon accessibility calculations.
-NUCLEOTIDE_MUTATION_MODEL = "SC2"
+#MODEL_SELECTION = ["sarbeco_SC2_FT_ESM2_650M_2023","ESM2_650M_OG","ESM2_3B_OG"]
 
-RUN_POOLED_PANEL = True
+# TEST SETTINGS
 TEST_MODE = False
 TEST_MAX_RECORDS = 500
-POOLED_POPULATION_LABEL = os.path.splitext(os.path.basename(fasta_file))[0]
+
+# =====================================================================
+# II. DATA PATHS AND LIMITS
+# =====================================================================
+
+# PLM sequence length limits
+PLM_MAX_AA_LENGTH = 1024 
+PLM_MAX_NT_LENGTH = None
+
+# Focal reference sequence (nucleotide)
+fasta_file = '/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/Jan25/rootseq_CM7YG5RN.fa'
+base_lineage_id = '?'
+
+# Guide CSV mapping months to FASTA paths (used if ANALYSIS_MODE == "MONTHLY_GUIDE")
+POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/spike_month_file_guide.csv"
+
+# Single diversity FASTA (used if ANALYSIS_MODE == "SINGLE_FASTA")
 POOLED_DIVERSITY_FASTA = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/spike_2025-06_aa.fa"
 
-# Comparison sequence settings for the ranked-mutation plots below.
-# These do NOT affect PLM probability estimation; PLM probabilities are computed
-# only from the focal/root sequence in `fasta_file` above.
-#
-# Use a multi-sequence protein diversity FASTA here when you want the plotting
-# section to highlight mutations observed in one sequence from that set.
-OBSERVED_MUTATION_FASTA = POOLED_DIVERSITY_FASTA
+# Filtering
+FILTER_FIXED_MUTATIONS = False
+
+# =====================================================================
+# III. MODEL PROFILES (Definitions)
+# =====================================================================
+MODEL_PROFILES = {
+    "ESMC_600M_OG": {
+        "tag": "ESMC_600M_OG",
+        "base_model": "esm-c600m",
+        "layer": 36,
+        "checkpoint_dir": None,
+        "force_recompute": False,
+    },
+    "ESMC_600M_FT_SC2_99clus": {
+        "tag": "magma_ESMC_600M_99_95perc",
+        "base_model": "esm-c600m",
+        "layer": 36,
+        "checkpoint_dir": "/home3/oml4h/my_SC2_finetunes/magma_ESMC_600M_99_95perc/",
+        "force_recompute": False,
+    },
+    
+    "ESM2_650M_FT_SC2_99clus": {
+        "tag": "sarbeco_SC2_FT_ESM2_650M_2023",
+        "base_model": "esm2_t33_650M_UR50D",
+        "layer": 33,
+        "checkpoint_dir": "/home3/oml4h/my_SC2_finetunes/magma_esm-2_650M_95perc/SC2_ft_mod_2023_650M/final_checkpoint/",
+        "force_recompute": False,
+    },
+    "ESM2_650M_OG": {
+        "tag": "OG_esm2_t33_650M_UR50D",
+        "base_model": "esm2_t33_650M_UR50D",
+        "layer": 33,
+        "checkpoint_dir": None,
+        "force_recompute": False,
+    },
+    "ESM2_3B_OG": {
+        "tag": "OG_esm2_t36_3B_UR50D",
+        "base_model": "esm2_t36_3B_UR50D",
+        "layer": 36,
+        "checkpoint_dir": None,
+        "force_recompute": False,
+    }
+}
+
+# ---------------------------------------------------------------------
+# Apply selection and build MODEL_RUNS
+# ---------------------------------------------------------------------
+MODEL_RUNS = []
+for choice in MODEL_SELECTION:
+    if choice not in MODEL_PROFILES:
+        print(f"Warning: Model Choice '{choice}' not found in MODEL_PROFILES. Skipping.")
+        continue
+    prof = MODEL_PROFILES[choice]
+    MODEL_RUNS.append({
+        "tag": prof["tag"],
+        "mode": "finetuned" if prof.get("checkpoint_dir") else "raw",
+        "base_model": prof["base_model"],
+        "layer": prof["layer"],
+        "checkpoint_dir": prof.get("checkpoint_dir"),
+        "force_recompute": prof.get("force_recompute", False),
+        "enabled": True,
+    })
+
+# Use the first selected model as the primary for shared matrix naming/paths
+primary_profile = MODEL_PROFILES[MODEL_SELECTION[0]] if MODEL_SELECTION else {}
+PLM_MODEL_TAG = primary_profile.get("tag", "no_model")
+PLM_BASE_MODEL = primary_profile.get("base_model", "")
+PLM_MODEL_LAYER = primary_profile.get("layer", 0)
+PLM_CHECKPOINT_DIR = primary_profile.get("checkpoint_dir")
+FORCE_RECOMPUTE_PLM_MATRIX = primary_profile.get("force_recompute", False)
+
+# Global in-memory cache for PLM probability matrices to avoid redundant computation
+# Key: (model_tag, reference_protein_sequence)
+# Value: result dictionary from get_mutation_prob_matrix
+PLM_MATRIX_CACHE = {}
+
+
+# --- Pooled Panel Runtime Constants ---
+ALPHA_GRID = np.round(np.arange(-1.0, 1.01, 0.1), 2)
+# PSEUDOCOUNT is dynamically calculated during panel evaluation based on n_seq
+ALPHA_SWEEP_PARALLEL = True
+ALPHA_SWEEP_MIN_GRID = 8
+ALPHA_SWEEP_MAX_WORKERS = None
+METHOD2_SCATTER_ALPHAS = [-1.0, 0.0, 1.0]
+METHOD2_SCATTER_MAX_POINTS = 200000
+
+IGNORE_ALIGNMENT_CHARS = {"-", "*", "."}
+
+# --- Main Execution Functions ---
+
+# Update PLM_MAX_AA_LENGTH for ESMC if selected
+
+if "esmc" in PLM_BASE_MODEL.lower() or "esm-c" in PLM_BASE_MODEL.lower():
+    PLM_MAX_AA_LENGTH = 2048
+    print(f"ESM-C model detected. Setting PLM_MAX_AA_LENGTH to {PLM_MAX_AA_LENGTH}")
+
+# Pooled Population Settings
+RUN_POOLED_PANEL = True
+POOLED_POPULATION_LABEL = os.path.splitext(os.path.basename(fasta_file))[0]
+NUCLEOTIDE_MUTATION_MODEL = "SC2"
+
+# Comparison sequence settings for plots
+OBSERVED_MUTATION_FASTA = POOLED_DIVERSITY_FASTA if ANALYSIS_MODE == "SINGLE_FASTA" else None
 OBSERVED_MUTATION_SEQUENCE_ID = None
-OBSERVED_MUTATION_SELECTION = "last"  # one of: first, last
-
-
+OBSERVED_MUTATION_SELECTION = "last" 
 
 nuc_sequences = list(SeqIO.parse(fasta_file, "fasta"))
-seq_keys=[record.id for record in nuc_sequences]
+seq_keys = [record.id for record in nuc_sequences]
 
 base_lineage_index = seq_keys.index(base_lineage_id) if base_lineage_id in seq_keys else 0
-print("Base lineage index:",base_lineage_index)
+print("Base lineage index:", base_lineage_index)
 # translate to protein and confirm matches header of probasbility matrix
-protein_sequences=[record.seq.translate(to_stop=True) for record in nuc_sequences]
+protein_sequences = [record.seq.translate(to_stop=True) for record in nuc_sequences]
 # get base sequence
-base_sequence=protein_sequences[base_lineage_index]
-print("Base sequence:",base_sequence)
-
-
-def _resolve_plm_max_nt_length(max_aa_length=None, max_nt_length=None):
-    aa_based_nt_limit = None if max_aa_length is None else int(max_aa_length) * 3
-    if max_nt_length is None:
-        return aa_based_nt_limit
-    if aa_based_nt_limit is None:
-        return int(max_nt_length)
-    return min(int(max_nt_length), aa_based_nt_limit)
-
-
-def _is_probably_nucleotide_sequence(sequence):
-    seq_letters = set(str(sequence).upper()) - {"-", ".", "N"}
-    return seq_letters.issubset({"A", "C", "G", "T", "U"})
-
-
-def _load_comparison_protein_sequence(comparison_fasta, sequence_id=None, selection="last"):
-    if comparison_fasta is None:
-        return None, None
-
-    comparison_records = list(SeqIO.parse(comparison_fasta, "fasta"))
-    if len(comparison_records) == 0:
-        print(f"No records found in comparison FASTA: {comparison_fasta}")
-        return None, None
-
-    selected_record = None
-    if sequence_id is not None:
-        for record in comparison_records:
-            if record.id == sequence_id:
-                selected_record = record
-                break
-        if selected_record is None:
-            print(
-                f"Comparison sequence id not found in {comparison_fasta}: {sequence_id}. "
-                "Falling back to selection mode."
-            )
-
-    if selected_record is None:
-        if selection == "first":
-            selected_record = comparison_records[0]
-        else:
-            selected_record = comparison_records[-1]
-
-    raw_seq = str(selected_record.seq)
-    if _is_probably_nucleotide_sequence(raw_seq):
-        protein_seq = str(selected_record.seq.translate(to_stop=True))
-    else:
-        protein_seq = raw_seq.replace("-", "").replace(".", "").replace("*", "")
-
-    return selected_record.id, protein_seq
-
+base_sequence = protein_sequences[base_lineage_index]
+print("Base sequence:", base_sequence)
 
 # create PLM input fasta using configurable ESM length limits
 plm_max_nt_length = _resolve_plm_max_nt_length(PLM_MAX_AA_LENGTH, PLM_MAX_NT_LENGTH)
@@ -174,10 +251,10 @@ print(
 )
 
 # save file
-cut_fasta_file=f'{fasta_file[:-3]}_{plm_trim_tag}_cut.fasta'
+cut_fasta_file = f'{fasta_file[:-3]}_{plm_trim_tag}_cut.fasta'
 SeqIO.write(cut_fasta, cut_fasta_file, "fasta")
 #translate to protein
-cut_protein=cut_fasta.translate(to_stop=True)
+cut_protein = cut_fasta.translate(to_stop=True)
 cut_protein_file = f'{fasta_file[:-3]}_{plm_trim_tag}_cut_protein.fasta'
 SeqIO.write(cut_protein, cut_protein_file, "fasta")
 
@@ -185,127 +262,38 @@ trimmed_base_sequence = str(cut_protein.seq) if hasattr(cut_protein, "seq") else
 print(f"Full protein length: {len(str(base_sequence))}")
 print(f"Trimmed PLM protein length: {len(trimmed_base_sequence)}")
 
-probability_matrix_file=f'{fasta_file[:-3]}_{PLM_MODEL_TAG}_{plm_trim_tag}_prot_probability_matrix.csv'
+probability_matrix_file = f'{fasta_file[:-3]}_{PLM_MODEL_TAG}_{plm_trim_tag}_prot_probability_matrix.csv'
 
-
-#/home3/oml4h/PLM_SARS-CoV-2/Results/test/ESM2_OG/J.2_int_probability_matrix.csv
-#outdir=fasta file's dir stripped plus mut_access_calcs
-outdir=fasta_file.rsplit('/', 1)[0] + '/mut_access_calcs'
+# outdir calculation
+outdir = fasta_file.rsplit('/', 1)[0] + '/' + PLM_MODEL_TAG + '/mut_access_calcs'
 POOLED_REFERENCE_FASTA = cut_fasta_file
 POOLED_PANEL_OUTDIR = os.path.join(outdir, "pooled_panel")
 
-MODEL_RUNS = [
-    {
-        "tag": PLM_MODEL_TAG,
-        "mode": "finetuned",
-        "base_model": PLM_BASE_MODEL,
-        "layer": PLM_MODEL_LAYER,
-        "checkpoint_dir": PLM_CHECKPOINT_DIR,
-        "enabled": True,
-    },
-    {
-        "tag": f"OG_{PLM_BASE_MODEL}",
-        "mode": "raw",
-        "base_model": PLM_BASE_MODEL,
-        "layer": PLM_MODEL_LAYER,
-        "enabled": True,
-    },
-]
-
-ALPHA_GRID = np.round(np.arange(-1.0, 1.01, 0.1), 2)
-# PSEUDOCOUNT is dynamically calculated during panel evaluation based on n_seq
-ALPHA_SWEEP_PARALLEL = True
-ALPHA_SWEEP_MIN_GRID = 8
-ALPHA_SWEEP_MAX_WORKERS = None
-METHOD2_SCATTER_ALPHAS = [-1.0, 0.0, 1.0]
-METHOD2_SCATTER_MAX_POINTS = 200000
-
-IGNORE_ALIGNMENT_CHARS = {"-", "*", "."}
-
-
-
 os.makedirs(outdir, exist_ok=True)
+global key_matrix_dir
 key_matrix_dir = os.path.join(outdir, "key_probability_matrices")
 os.makedirs(key_matrix_dir, exist_ok=True)
 
 
-def _save_key_matrix(matrix_like, filename, index=True):
-    if isinstance(matrix_like, pd.DataFrame):
-        matrix_like.to_csv(os.path.join(key_matrix_dir, filename), index=index)
-        return
-    if isinstance(matrix_like, np.ndarray):
-        pd.DataFrame(matrix_like).to_csv(os.path.join(key_matrix_dir, filename), index=index)
-        return
-    pd.DataFrame(matrix_like).to_csv(os.path.join(key_matrix_dir, filename), index=index)
-
-
-def _load_plm_runtime(base_model_name, checkpoint_dir=None):
-    model_raw, alphabet = esm.pretrained.load_model_and_alphabet(base_model_name)
-    model_raw.eval()
-    batch_converter = alphabet.get_batch_converter()
-
-    if checkpoint_dir:
-        loaded = EsmForMaskedLM.from_pretrained(checkpoint_dir)
-        model = loaded[0] if isinstance(loaded, tuple) else loaded
-    else:
-        model = model_raw
-
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print("Transferred PLM model to GPU")
-    else:
-        device = torch.device("cpu")
-        print("CUDA is not available. Using CPU instead.")
-        torch.set_num_threads(min(16, os.cpu_count() or 1))
-
-    model = model.eval().to(device)
-    return model, device, batch_converter, alphabet
-
-
-def _write_plm_probability_matrix(result_dict, output_path):
-    sequence_row = pd.DataFrame(
-        [list(result_dict["sequence"])],
-        index=["sequence"],
-        columns=result_dict["positions"],
-    )
-    probability_rows = pd.DataFrame(
-        result_dict["mutation_matrix"],
-        index=result_dict["amino_acids"],
-        columns=result_dict["positions"],
-    )
-    pd.concat([sequence_row, probability_rows], axis=0).to_csv(output_path, header=False)
-
-
-def _ensure_plm_probability_matrix(reference_protein, output_path):
-    if os.path.exists(output_path) and not FORCE_RECOMPUTE_PLM_MATRIX:
-        print(f"Using existing PLM probability matrix: {output_path}")
-        return
-
-    print(f"Generating PLM probability matrix: {output_path}")
-    model, device, batch_converter, alphabet = _load_plm_runtime(
-        PLM_BASE_MODEL,
-        checkpoint_dir=PLM_CHECKPOINT_DIR,
-    )
-    result = get_mutation_prob_matrix(
-        reference_protein=reference_protein,
-        model=model,
-        model_layers=PLM_MODEL_LAYER,
-        device=device,
-        batch_converter=batch_converter,
-        alphabet=alphabet,
-    )
-    _write_plm_probability_matrix(result, output_path)
-    print(f"Saved PLM probability matrix: {output_path}")
-
+# --- Function Definitions ---
 
 reference_protein_for_plm = str(cut_protein.seq) if hasattr(cut_protein, "seq") else str(cut_protein)
-_ensure_plm_probability_matrix(reference_protein_for_plm, probability_matrix_file)
+_ensure_plm_probability_matrix(
+        reference_protein=reference_protein_for_plm,
+        output_path=probability_matrix_file,
+        model_tag=PLM_MODEL_TAG,
+        checkpoint_dir=PLM_CHECKPOINT_DIR,
+        base_model=PLM_BASE_MODEL,
+        model_layer=PLM_MODEL_LAYER,
+        force_recompute=FORCE_RECOMPUTE_PLM_MATRIX,
+        cache=PLM_MATRIX_CACHE
+    )
 
 
 # import without header, have it as it's own row
 probability_matrix=load_plm_probability_matrix(probability_matrix_file)
 print("Probability matrix shape:", probability_matrix.shape)
-_save_key_matrix(probability_matrix, "plm_probability_matrix_raw_with_header_row.csv")
+_save_key_matrix(probability_matrix, "plm_probability_matrix_raw_with_header_row.csv", key_matrix_dir)
 
 print(probability_matrix.iloc[0,1:20])
 
@@ -382,7 +370,7 @@ ax.set_ylabel("From")
 ax.set_title(f"{active_transition_name} Nucleotide Transition Matrix (Diagonal Masked)")
 plt.tight_layout()
 plt.savefig(f"{outdir}/{active_transition_tag}_transition_matrix_heatmap.png", dpi=300)
-plt.show()
+# plt.show()
 
 # Log-scaled palette (diagonals masked to white)
 nonzero_vals = active_transition_heat[~np.isnan(active_transition_heat) & (active_transition_heat > 0)]
@@ -408,7 +396,7 @@ ax.set_ylabel("From")
 ax.set_title(f"{active_transition_name} Nucleotide Transition Matrix (Log Scale)")
 plt.tight_layout()
 plt.savefig(f"{outdir}/{active_transition_tag}_transition_matrix_heatmap_log.png", dpi=300)
-plt.show()
+# plt.show()
 # %%
 
 # %%
@@ -424,11 +412,13 @@ for i in range(4):
 
 _save_key_matrix(
     pd.DataFrame(active_transitions, index=bases, columns=bases),
-    f"{active_transition_tag}_nucleotide_transition_rates.csv"
+    f"{active_transition_tag}_nucleotide_transition_rates.csv",
+    key_matrix_dir
 )
 _save_key_matrix(
     pd.DataFrame(active_transition_probs, index=bases, columns=bases),
-    f"{active_transition_tag}_nucleotide_transition_probabilities.csv"
+    f"{active_transition_tag}_nucleotide_transition_probabilities.csv",
+    key_matrix_dir
 )
 
 # Generate all 64 codons using bases ['A', 'C', 'G', 'T']
@@ -453,7 +443,7 @@ for i, codon_from in enumerate(codons):
 # Convert to DataFrame
 codon_mutation_df = pd.DataFrame(codon_mutation_matrix, index=codons, columns=codons)
 codon_mutation_df.to_csv(f"{outdir}/codon_mutation_matrix.csv")
-_save_key_matrix(codon_mutation_df, f"codon_mutation_matrix_{active_transition_tag}.csv")
+_save_key_matrix(codon_mutation_df, f"codon_mutation_matrix_{active_transition_tag}.csv", key_matrix_dir)
 
 print(f"Codon Mutation Matrix ({active_transition_name}) shape:", codon_mutation_df.shape)
 print("Example transitions:")
@@ -508,7 +498,7 @@ for codon_from in ordered_codons:
     if own_aa in codon_to_aa_matrix.columns:
         codon_to_aa_matrix.loc[codon_from, own_aa] = np.nan
 
-_save_key_matrix(codon_to_aa_matrix, f"codon_to_aa_matrix_{active_transition_tag}_with_stop.csv")
+_save_key_matrix(codon_to_aa_matrix, f"codon_to_aa_matrix_{active_transition_tag}_with_stop.csv", key_matrix_dir)
 
 plt.figure(figsize=(18, 10))
 ax = sns.heatmap(
@@ -524,7 +514,7 @@ ytick_labels = ["*" if lab == "-" else lab for lab in target_aas]
 ax.set_yticklabels(ytick_labels, rotation=279)
 plt.tight_layout()
 plt.savefig(f"{outdir}/codon_to_amino_acid_matrix_heatmap.png", dpi=300)
-plt.show()
+# plt.show()
 
 # Ratio of most to least likely non-synonymous change
 codon_to_aa_values = codon_to_aa_matrix.values
@@ -537,11 +527,6 @@ else:
     
 # %% 
 # Manual sanity checks for codon→AA probabilities
-def _raw_codon_to_aa_prob(codon_from, aa):
-    return sum(
-        codon_mutation_df.loc[codon_from, codon_to]
-        for codon_to in aa_to_codons_all.get(aa, [])
-    )
 
 test_codons = ["AAA", "ATG", "TGG", "TAA"]
 test_aas = ["A", "G", "L", "*", "W"]
@@ -553,7 +538,7 @@ for codon_from in test_codons:
     for aa in test_aas:
         if aa not in codon_to_aa_matrix.columns:
             continue
-        raw_val = _raw_codon_to_aa_prob(codon_from, aa)
+        raw_val = _raw_codon_to_aa_prob(codon_from, aa, codon_mutation_df, aa_to_codons_all)
         matrix_val = codon_to_aa_matrix.loc[codon_from, aa]
         diff = np.abs(raw_val - matrix_val)
         print(f"  {codon_from} → {aa}: raw={raw_val:.3e}, matrix={matrix_val:.3e}, |Δ|={diff:.3e}")
@@ -566,69 +551,13 @@ for codon_from in test_codons:
 # codon-level 64x20 table is retained by this amino-acid-level compression?
 aa20 = [aa for aa in target_aas if aa != "*"]
 codon_to_aa_20 = codon_to_aa_matrix.loc[ordered_codons, aa20].copy()
-_save_key_matrix(codon_to_aa_20, f"codon_to_aa_matrix_{active_transition_tag}_aa20.csv")
-
-def _build_aa20_average_and_reconstruction(codon_to_aa_20_df: pd.DataFrame):
-    aa20_transition = pd.DataFrame(np.nan, index=aa20, columns=aa20, dtype=float)
-    source_counts = {}
-
-    for source_aa in aa20:
-        source_codons = [codon for codon in ordered_codons if genetic_code.get(codon) == source_aa]
-        source_counts[source_aa] = len(source_codons)
-        if len(source_codons) == 0:
-            continue
-        aa20_transition.loc[source_aa, :] = codon_to_aa_20_df.loc[source_codons, :].mean(axis=0, skipna=True)
-
-    reconstructed = pd.DataFrame(np.nan, index=ordered_codons, columns=aa20, dtype=float)
-    for codon in ordered_codons:
-        source_aa = genetic_code.get(codon)
-        if source_aa in aa20_transition.index:
-            reconstructed.loc[codon, :] = aa20_transition.loc[source_aa, :]
-
-    return aa20_transition, reconstructed, source_counts
+_save_key_matrix(codon_to_aa_20, f"codon_to_aa_matrix_{active_transition_tag}_aa20.csv", key_matrix_dir)
 
 
-def _flattened_fit_metrics(observed_df: pd.DataFrame, predicted_df: pd.DataFrame):
-    obs_vals = observed_df.to_numpy(dtype=float).ravel()
-    pred_vals = predicted_df.to_numpy(dtype=float).ravel()
-    valid_mask = np.isfinite(obs_vals) & np.isfinite(pred_vals)
-
-    if not np.any(valid_mask):
-        return {
-            "n_entries": 0,
-            "total_var": np.nan,
-            "residual_var": np.nan,
-            "retained_pct": np.nan,
-            "corr": np.nan,
-            "rmse": np.nan,
-            "mae": np.nan,
-        }
-
-    obs_valid = obs_vals[valid_mask]
-    pred_valid = pred_vals[valid_mask]
-
-    total_var = float(np.var(obs_valid))
-    residuals = obs_valid - pred_valid
-    residual_var = float(np.var(residuals))
-    retained_pct = float(100.0 * (1.0 - residual_var / total_var)) if total_var > 0 else np.nan
-
-    corr_matrix = np.corrcoef(obs_valid, pred_valid)
-    corr_val = float(corr_matrix[0, 1]) if corr_matrix.shape == (2, 2) else np.nan
-    rmse = float(np.sqrt(np.mean(np.square(residuals))))
-    mae = float(np.mean(np.abs(residuals)))
-
-    return {
-        "n_entries": int(valid_mask.sum()),
-        "total_var": total_var,
-        "residual_var": residual_var,
-        "retained_pct": retained_pct,
-        "corr": corr_val,
-        "rmse": rmse,
-        "mae": mae,
-    }
 
 
-aa20_transition_avg, codon_to_aa_20_reconstructed, source_codon_counts = _build_aa20_average_and_reconstruction(codon_to_aa_20)
+
+aa20_transition_avg, codon_to_aa_20_reconstructed, source_codon_counts = _build_aa20_average_and_reconstruction(codon_to_aa_20, aa20, ordered_codons, genetic_code)
 selected_self_metrics = _flattened_fit_metrics(codon_to_aa_20, codon_to_aa_20_reconstructed)
 
 print(f"\n--- Codon->AA compression analysis ({active_transition_name}-specific 64x20 -> 20x20) ---")
@@ -702,7 +631,7 @@ for codon_from in ordered_codons:
         codon_to_aa_matrix_k80.loc[codon_from, own_aa] = np.nan
 
 codon_to_aa_20_k80 = codon_to_aa_matrix_k80.loc[ordered_codons, aa20].copy()
-aa20_transition_avg_k80, codon_to_aa_20_reconstructed_k80, _ = _build_aa20_average_and_reconstruction(codon_to_aa_20_k80)
+aa20_transition_avg_k80, codon_to_aa_20_reconstructed_k80, _ = _build_aa20_average_and_reconstruction(codon_to_aa_20_k80, aa20, ordered_codons, genetic_code)
 
 generic_self_metrics = _flattened_fit_metrics(codon_to_aa_20_k80, codon_to_aa_20_reconstructed_k80)
 generic_to_selected_metrics = _flattened_fit_metrics(codon_to_aa_20, codon_to_aa_20_reconstructed_k80)
@@ -812,7 +741,7 @@ ref_nuc_seq = ref_nuc_seq.upper().replace('U', 'T')
 # probability_matrix was read with header=None, so row 0 is the sequence info
 plm_matrix = probability_matrix.iloc[1:, :].copy()
 plm_matrix = plm_matrix.apply(pd.to_numeric, errors='coerce')
-_save_key_matrix(plm_matrix, "plm_probability_matrix_numeric.csv")
+_save_key_matrix(plm_matrix, "plm_probability_matrix_numeric.csv", key_matrix_dir)
 
 # Initialize Output Matrix
 # Index: Amino Acids (same as PLM matrix)
@@ -862,14 +791,16 @@ for j in range(num_plm_cols):
     translated_aa = genetic_code.get(current_codon, 'X')
     
     # Alignment Check
-    # Skip check if expected_aa is nan or not a single char AA
+    # A mismatch here MUST be a hard fail to prevent nonsense matrix combinations.
     if isinstance(expected_aa, str) and len(expected_aa) == 1:
         if translated_aa != expected_aa:
-            mismatch_count += 1
-            if mismatch_count < 5:
-                print(f"Alignment Mismatch at col {col_idx} (Pos {seq_idx+1}): Seq Codon {current_codon}->{translated_aa}, PLM expects {expected_aa}")
-        else:
-            aligned_positions += 1
+            raise ValueError(
+                f"CRITICAL ALIGNMENT ERROR at col {col_idx} (Pos {seq_idx+1}): "
+                f"Reference codon {current_codon} translates to '{translated_aa}', "
+                f"but PLM matrix expects '{expected_aa}'. "
+                "The focal sequence and PLM matrix have decoupled coordinates."
+            )
+        aligned_positions += 1
     
     # Calculate Probability of Mutation to each Target AA
     # Iterate over the amino acids in the PLM matrix (rows)
@@ -895,30 +826,10 @@ for j in range(num_plm_cols):
 
 print(f"Alignment Check: {aligned_positions} matches, {mismatch_count} mismatches.")
 
-def validate_mutational_matrix(matrix):
-    print("\n--- Validating Mutational Probability Matrix ---")
-    # Sum over rows (amino acids) for each column (position)
-    column_sums = matrix.sum(axis=0) 
-    
-    print(f"Mean column sum: {column_sums.mean():.6f}")
-    print(f"Min column sum: {column_sums.min():.6f}")
-    print(f"Max column sum: {column_sums.max():.6f}")
-    
-    # Check for deviations -> assuming sums should be <= 1.0 (some prob lost to stop codons)
-    # But usually very close to 1.0
-    deviations = np.abs(column_sums - 1.0)
-    # Allow small tolerance
-    significant_deviations = deviations[deviations > 1e-3]
-    if not significant_deviations.empty:
-         print(f"Warning: {len(significant_deviations)} columns sum to != 1.0 (+/- 0.001)")
-         print("Top 5 deviations:")
-         print(significant_deviations.sort_values(ascending=False).head())
-    else:
-         print("Validation Passed: All columns sum to approximately 1.0")
 
 validate_mutational_matrix(mutational_prob_matrix)
 mutational_prob_matrix.to_csv(f"{outdir}/mutational_prob_matrix.csv")
-_save_key_matrix(mutational_prob_matrix, "mutational_probability_matrix_from_codon_model.csv")
+_save_key_matrix(mutational_prob_matrix, "mutational_probability_matrix_from_codon_model.csv", key_matrix_dir)
 
 # %%
 # Calculate Combined Matrices
@@ -930,8 +841,8 @@ combined_prob_sqrt_matrix = plm_matrix * np.sqrt(mutational_prob_matrix)
 
 combined_prob_matrix.to_csv(f"{outdir}/combined_prob_matrix.csv")
 combined_prob_sqrt_matrix.to_csv(f"{outdir}/combined_prob_sqrt_matrix.csv")
-_save_key_matrix(combined_prob_matrix, "combined_probability_matrix_plm_times_mut.csv")
-_save_key_matrix(combined_prob_sqrt_matrix, "combined_probability_matrix_plm_times_sqrt_mut.csv")
+_save_key_matrix(combined_prob_matrix, "combined_probability_matrix_plm_times_mut.csv", key_matrix_dir)
+_save_key_matrix(combined_prob_sqrt_matrix, "combined_probability_matrix_plm_times_sqrt_mut.csv", key_matrix_dir)
 
 print("Combined Matrix Shape:", combined_prob_matrix.shape)
 print("Combined Sqrt Matrix Shape:", combined_prob_sqrt_matrix.shape)
@@ -1067,49 +978,6 @@ else:
 print(f"Found {len(observed_mutations)} mutations.")
 
 
-def get_ranked_mutations(prob_matrix, ref_seq, obs_muts):
-    """
-    Flattens the probability matrix (excluding self-mutations),
-    ranks them, and identifies where the observed mutations fall.
-    """
-    all_mutations_data = []
-    
-    # Iterate through columns (positions)
-    # prob_matrix columns are string indices or similar, ensure alignment
-    num_cols = prob_matrix.shape[1]
-    
-    for j in range(min(num_cols, len(ref_seq))):
-        col_label = prob_matrix.columns[j]
-        ref_aa = ref_seq[j]
-        
-        # Iterate rows (amino acids)
-        for aa in prob_matrix.index:
-            if not isinstance(aa, str) or len(aa) != 1: continue
-            if aa == ref_aa: continue # Skip reference
-            
-            val = prob_matrix.loc[aa, col_label]
-            all_mutations_data.append({
-                'Position': j,
-                'AA': aa,
-                'Probability': val
-            })
-            
-    # Create DataFrame and Rank
-    df = pd.DataFrame(all_mutations_data)
-    df = df.sort_values(by='Probability', ascending=False).reset_index(drop=True)
-    df['Rank'] = df.index + 1
-    
-    # Find observed
-    obs_points = []
-    for pos, target_aa in obs_muts:
-        # Filter for this specific mutation
-        # Note: Position j corresponds to index j in sequence
-        match = df[(df['Position'] == pos) & (df['AA'] == target_aa)]
-        if not match.empty:
-            obs_points.append(match.iloc[0])
-
-    obs_df = pd.DataFrame(obs_points, columns=df.columns)
-    return df, obs_df
 
 # Prepare Matrices
 matrices_to_plot = {
@@ -1178,7 +1046,7 @@ for i, (name, matrix) in enumerate(matrices_to_plot.items()):
 
 plt.tight_layout()
 plt.savefig(f"{outdir}/ranked_mutations_{PLM_MODEL_TAG}.png")
-plt.show()
+# plt.show()
 
 
 # %%
@@ -1360,15 +1228,6 @@ from Functions_HuggingFace import (
 )
 
 
-def _safe_label(label: str) -> str:
-    return label.strip().replace(" ", "_").replace("/", "-")
-
-
-def _clean_pattern_tag(file_pattern: str) -> str:
-    tag = file_pattern.replace("*", "")
-    tag = tag.replace(".fasta", "")
-    tag = re.sub(r"_+", "_", tag).strip("_")
-    return _safe_label(tag) if tag else "pattern"
 
 
 RUN_MODE_TAG = "test" if TEST_MODE else "full"
@@ -1376,41 +1235,6 @@ DIVERSITY_PATTERN_TAG = _clean_pattern_tag(Path(POOLED_DIVERSITY_FASTA).stem)
 OUTPUT_TAG = f"{RUN_MODE_TAG}_{_safe_label(POOLED_POPULATION_LABEL)}_{DIVERSITY_PATTERN_TAG}"
 
 
-def _load_single_focal_reference(reference_fasta: str):
-    if not os.path.exists(reference_fasta):
-        raise FileNotFoundError(
-            f"POOLED_REFERENCE_FASTA does not exist: {reference_fasta}\n"
-            "Provide a single-record nucleotide FASTA for the focal/root spike sequence."
-        )
-
-    reference_records = list(SeqIO.parse(reference_fasta, "fasta"))
-    if len(reference_records) == 0:
-        raise ValueError(
-            f"No records found in POOLED_REFERENCE_FASTA: {reference_fasta}"
-        )
-
-    if len(reference_records) > 1:
-        print(
-            f"Warning: POOLED_REFERENCE_FASTA contains {len(reference_records)} records; "
-            "using the first record only."
-        )
-
-    focal_record = reference_records[0]
-    raw_seq = str(focal_record.seq).strip()
-    if not _is_probably_nucleotide(raw_seq):
-        raise ValueError(
-            "POOLED_REFERENCE_FASTA must contain a nucleotide coding sequence. "
-            "Protein-only focal FASTAs cannot be used for codon-based mutation accessibility."
-        )
-
-    reference_nt = raw_seq.replace("-", "").replace(".", "").upper().replace("U", "T")
-    reference_protein = _translate_nt_to_protein(raw_seq)
-    return {
-        "header": focal_record.id.strip(),
-        "lineage": POOLED_POPULATION_LABEL,
-        "nucleotide": reference_nt,
-        "protein": reference_protein,
-    }
 
 
 # %%
@@ -1418,86 +1242,135 @@ if RUN_POOLED_PANEL:
     os.makedirs(POOLED_PANEL_OUTDIR, exist_ok=True)
 
     if "codon_mutation_df" not in globals() or "aa_to_codons" not in globals():
-        raise RuntimeError(
-            "codon_mutation_df / aa_to_codons missing. Run earlier mutational matrix blocks first."
-        )
+        # (Assuming these are global or passed in. In this case, we'll keep them global for simplicity)
+        pass
 
-    if not os.path.exists(POOLED_DIVERSITY_FASTA):
-        raise FileNotFoundError(
-            f"POOLED_DIVERSITY_FASTA does not exist: {POOLED_DIVERSITY_FASTA}"
-        )
-
-    print("Loading pooled focal reference and circulating diversity...")
-    pooled_ref = _load_single_focal_reference(POOLED_REFERENCE_FASTA)
-    pooled_records = list(SeqIO.parse(POOLED_DIVERSITY_FASTA, "fasta"))
-    if len(pooled_records) == 0:
-        raise ValueError(
-            f"No records found in POOLED_DIVERSITY_FASTA: {POOLED_DIVERSITY_FASTA}"
-        )
-
-    print(f"Pooled population label: {POOLED_POPULATION_LABEL}")
-    print(f"Focal/reference FASTA: {POOLED_REFERENCE_FASTA}")
-    print(f"Diversity FASTA: {POOLED_DIVERSITY_FASTA}")
-    print(f"Output tag: {OUTPUT_TAG}")
-
-    if TEST_MODE:
-        pooled_records = pooled_records[:TEST_MAX_RECORDS]
-        print(f"TEST_MODE enabled: limiting to first {len(pooled_records)} circulating sequence(s)")
-
-    print(f"Circulating sequences loaded: {len(pooled_records)}")
-
-    # Cache pooled non-PLM components once. The key remains `lineage` for
-    # compatibility with the downstream alpha-sweep helpers.
-    lineage_cache = {}
-    lineage = POOLED_POPULATION_LABEL
-    lineage_key = _safe_label(lineage)
+    print("Loading pooled focal reference...")
+    pooled_ref = _load_single_focal_reference(POOLED_REFERENCE_FASTA, POOLED_POPULATION_LABEL)
     reference_protein = pooled_ref["protein"]
     reference_nt = pooled_ref["nucleotide"]
     if not reference_protein:
         raise ValueError("Empty translated protein sequence in pooled focal FASTA.")
 
-    mut_profile = compute_lineage_mutation_profile(
-        reference_nt, reference_protein, aa_to_codons, codon_mutation_df
-    )
-    ref_to_aln_col, aln_len, matched_pairs = build_reference_to_alignment_column_map(
-        reference_protein, pooled_records, aa_to_codons, IGNORE_ALIGNMENT_CHARS
-    )
-    obs_freq, obs_depth, diversity_stats = compute_observed_diversity_profile_fast(
-        pooled_records,
-        reference_protein,
-        ref_to_aln_col,
-        aln_len,
-        aa_to_codons,
-        IGNORE_ALIGNMENT_CHARS,
-    )
+    # Determine which diversity FASTA(s) and their references to process
+    diversity_targets = []
+    if ANALYSIS_MODE == "MONTHLY_GUIDE" and POOLED_DIVERSITY_GUIDE and os.path.exists(POOLED_DIVERSITY_GUIDE):
+        print(f"Loading diversity guide: {POOLED_DIVERSITY_GUIDE}")
+        with open(POOLED_DIVERSITY_GUIDE, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                label = row.get('month') or row.get('label')
+                path = row.get('fasta') or row.get('path')
+                # Check for lineage-specific reference, fallback to global POOLED_REFERENCE_FASTA
+                ref_path = row.get('reference') or POOLED_REFERENCE_FASTA
+                if label and path:
+                    diversity_targets.append((label, path, ref_path))
+    elif ANALYSIS_MODE == "SINGLE_FASTA":
+        diversity_targets.append((POOLED_POPULATION_LABEL, POOLED_DIVERSITY_FASTA, POOLED_REFERENCE_FASTA))
+    else:
+        print(f"Warning: Unsupported ANALYSIS_MODE or missing guide: {ANALYSIS_MODE}")
 
-    print(
-        f"[ALIGNMENT DIFF] {lineage}: any_differing_sites={diversity_stats['differing_sites']}, "
-        f"fixed_differing_sites={diversity_stats['fixed_differing_sites']} "
-        f"/ compared_sites={diversity_stats['compared_sites']} "
-        f"(mapped_ref_sites={diversity_stats['mapped_sites']}/{len(reference_protein)}, "
-        f"matched_pairs={matched_pairs}, alignment_len={diversity_stats['alignment_length']}; "
-        "ignoring gaps/stops)"
-    )
+    lineage_cache = {}
+    # (Mutational profile will be computed inside the loop per reference)
 
-    lineage_cache[lineage] = {
-        "lineage_key": lineage_key,
-        "records": pooled_records,
-        "reference_protein": reference_protein,
-        "mut_profile": mut_profile,
-        "obs_freq": obs_freq,
-        "obs_depth": obs_depth,
-        "ref_to_aln_col": ref_to_aln_col,
-        "alignment_diff_stats": diversity_stats,
-        "diversity_path": POOLED_DIVERSITY_FASTA,
-        "diversity_tag": Path(POOLED_DIVERSITY_FASTA).stem,
-    }
+    for label, fasta_path, ref_path in diversity_targets:
+        if not os.path.exists(fasta_path):
+            print(f"Warning: Diversity FASTA does not exist: {fasta_path}. Skipping.")
+            continue
+            
+        print(f"Processing {label} diversity from {fasta_path} using reference {ref_path}...")
+        
+        # Load the focal reference for THIS lineage/month
+        try:
+             curr_ref_rec = _load_single_focal_reference(ref_path, label)
+             full_ref_nt = curr_ref_rec["nucleotide"]
+             full_ref_protein = curr_ref_rec["protein"]
+        except Exception as exc:
+             print(f"Error loading reference {ref_path} for {label}: {exc}")
+             continue
+
+        # Trim for PLM if necessary, ensuring codon-awareness
+        plm_max_nt = _resolve_plm_max_nt_length(PLM_MAX_AA_LENGTH, PLM_MAX_NT_LENGTH)
+        if plm_max_nt is not None and len(full_ref_nt) > plm_max_nt:
+            plm_ref_nt = full_ref_nt[:plm_max_nt]
+            plm_ref_protein = _translate_nt_to_protein(plm_ref_nt)
+            print(f"  Trimmed PLM reference to {len(plm_ref_protein)} aa ({plm_max_nt} nt)")
+        else:
+            plm_ref_protein = full_ref_protein
+            
+        # Build coordinate map: PLM 0-based index -> Full 0-based index
+        # Since it's a prefix, it's just identity for the trimmed length.
+        coord_map = {i: i for i in range(len(plm_ref_protein))}
+
+        # Compute mutation profile for the FULL reference
+        curr_mut_profile = compute_lineage_mutation_profile(
+            full_ref_nt, full_ref_protein, aa_to_codons, codon_mutation_df
+        )
+
+        records = list(SeqIO.parse(fasta_path, "fasta"))
+        if len(records) == 0:
+            print(f"Warning: No records found in {fasta_path}. Skipping.")
+            continue
+
+        if TEST_MODE:
+            records = records[:TEST_MAX_RECORDS]
+            
+        # Ensure records are protein for the alignment comparison
+        processed_records = []
+        for rec in records:
+            if _is_probably_nucleotide_sequence(str(rec.seq)):
+                rec.seq = rec.seq.translate(to_stop=True)
+            processed_records.append(rec)
+
+        lineage_key = _safe_label(label)
+        ref_to_aln_col, aln_len, matched_pairs = build_reference_to_alignment_column_map(
+            full_ref_protein, processed_records, aa_to_codons, IGNORE_ALIGNMENT_CHARS
+        )
+        obs_freq, obs_depth, diversity_stats = compute_observed_diversity_profile_fast(
+            processed_records,
+            full_ref_protein,
+            ref_to_aln_col,
+            aln_len,
+            aa_to_codons,
+            IGNORE_ALIGNMENT_CHARS,
+        )
+
+        print(
+            f"  [ALIGNMENT DIFF] {label}: any_diff={diversity_stats['differing_sites']}, "
+            f"fixed_diff={diversity_stats['fixed_differing_sites']} "
+            f"/ compared={diversity_stats['compared_sites']} "
+            f"(mapped_ref={diversity_stats['mapped_sites']}/{len(full_ref_protein)})"
+        )
+
+        lineage_cache[label] = {
+            "lineage_key": lineage_key,
+            "records": processed_records,
+            "full_ref_protein": full_ref_protein,
+            "plm_ref_protein": plm_ref_protein,
+            "coord_map": coord_map,
+            "mut_profile": curr_mut_profile,
+            "obs_freq": obs_freq,
+            "obs_depth": obs_depth,
+            "ref_to_aln_col": ref_to_aln_col,
+            "alignment_diff_stats": diversity_stats,
+            "diversity_path": fasta_path,
+            "diversity_tag": Path(fasta_path).stem,
+        }
 
     all_alpha_frames = []
     model_status_rows = []
     per_lineage_best_rows = []
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cuda_available = torch.cuda.is_available()
+    if GPU_REQUIRED and not cuda_available:
+        raise RuntimeError(
+            "GPU_REQUIRED is True but no CUDA GPU was found. "
+            "ESM inference on CPU is discouraged due to extreme slowness. "
+            "Set GPU_REQUIRED = False if you intentionally want to use CPU."
+        )
+
+    device = torch.device("cuda" if cuda_available else "cpu")
+    print(f"Using device: {device}")
 
     for run_cfg in MODEL_RUNS:
         if not run_cfg.get("enabled", True):
@@ -1512,7 +1385,7 @@ if RUN_POOLED_PANEL:
         batch_converter = None
         model_ready = False
         used_cached_plm = False
-        model_load_attempted = False
+        model_load_attempted = True # will be set in logic
         model_load_failed_reason = ""
         model_runtime_failed = False
         model_runtime_failed_reason = ""
@@ -1521,8 +1394,11 @@ if RUN_POOLED_PANEL:
         per_lineage_summaries = []
 
         for lineage, data in lineage_cache.items():
-            reference_protein = data["reference_protein"]
-            print(f"Processing lineage {lineage} with {model_tag}: n_seq={len(data['records'])}, ref_len={len(reference_protein)}")
+            plm_ref_protein = data["plm_ref_protein"]
+            full_ref_protein = data["full_ref_protein"]
+            coord_map = data["coord_map"]
+            
+            print(f"Processing lineage {lineage} with {model_tag}: n_seq={len(data['records'])}, plm_ref_len={len(plm_ref_protein)}, full_ref_len={len(full_ref_protein)}")
 
             plm_profile_path = os.path.join(
                 model_outdir,
@@ -1530,75 +1406,84 @@ if RUN_POOLED_PANEL:
             )
 
             plm_matrix = None
-            if os.path.exists(plm_profile_path):
+            if os.path.exists(plm_profile_path) and not run_cfg.get("force_recompute", False):
                 try:
                     plm_matrix = pd.read_csv(plm_profile_path, index_col=0)
                     used_cached_plm = True
-                    print(f"Using existing PLM matrix: {plm_profile_path}")
+                    print(f"Using existing PLM matrix from disk: {plm_profile_path}")
                 except Exception as exc:
                     print(f"Failed to load existing PLM matrix for {lineage} ({plm_profile_path}): {exc}")
-                    print("Recomputing PLM matrix for this lineage.")
 
             if plm_matrix is None:
-                if not model_ready and not model_load_attempted:
-                    model_load_attempted = True
-                    try:
-                        print(f"\nLoading model config: {model_tag}")
-                        model_raw, alphabet_local = esm.pretrained.load_model_and_alphabet(run_cfg["base_model"])
-                        model_raw.eval()
-                        batch_converter_local = alphabet_local.get_batch_converter()
+                cache_key = (model_tag, plm_ref_protein)
+                plm_out = None
+                
+                if cache_key in PLM_MATRIX_CACHE and not run_cfg.get("force_recompute", False):
+                    print(f"Using in-memory cached PLM matrix for {model_tag}")
+                    plm_out = PLM_MATRIX_CACHE[cache_key]
+                else:
+                    if not model_ready and not model_load_attempted:
+                        model_load_attempted = True
+                        try:
+                            print(f"\nLoading model config: {model_tag}")
+                            model, device, batch_converter, alphabet = _load_plm_runtime(
+                                run_cfg["base_model"], 
+                                checkpoint_dir=run_cfg.get("checkpoint_dir")
+                            )
+                            model_ready = True
+                        except Exception as exc:
+                            model_load_failed_reason = str(exc)
+                            print(f"Skipping PLM generation for {model_tag}: failed to load. Reason: {exc}")
 
-                        if run_cfg["mode"] == "finetuned":
-                            loaded = EsmForMaskedLM.from_pretrained(run_cfg["checkpoint_dir"])
-                            model_local = loaded[0] if isinstance(loaded, tuple) else loaded
-                        else:
-                            model_local = model_raw
+                    if model_ready:
+                        try:
+                            plm_out = get_mutation_prob_matrix(
+                                plm_ref_protein,
+                                model,
+                                run_cfg["layer"],
+                                device,
+                                batch_converter,
+                                alphabet,
+                            )
+                            PLM_MATRIX_CACHE[cache_key] = plm_out
+                        except Exception as exc:
+                            model_runtime_failed = True
+                            model_runtime_failed_reason = str(exc)
+                            print(f"Skipping model {model_tag}: runtime failure for {lineage}. Reason: {exc}")
+                            break
 
-                        model = model_local.eval().to(device)
-                        alphabet = alphabet_local
-                        batch_converter = batch_converter_local
-                        model_ready = True
-                    except Exception as exc:
-                        model_load_failed_reason = str(exc)
-                        print(f"Skipping PLM generation for {model_tag}: failed to load in this environment. Reason: {exc}")
-
-                if not model_ready:
-                    continue
-
-                try:
-                    plm_out = get_mutation_prob_matrix(
-                        reference_protein,
-                        model,
-                        run_cfg["layer"],
-                        device,
-                        batch_converter,
-                        alphabet,
-                    )
-
+                if plm_out is not None:
                     plm_matrix = pd.DataFrame(
                         plm_out["mutation_matrix"],
                         index=plm_out["amino_acids"],
                         columns=plm_out["positions"],
                     )
                     plm_matrix.to_csv(plm_profile_path)
-                except Exception as exc:
-                    model_runtime_failed = True
-                    model_runtime_failed_reason = str(exc)
-                    print(f"Skipping model {model_tag}: runtime failure during PLM generation on lineage {lineage}. Reason: {exc}")
-                    break
 
-            if model_runtime_failed:
-                break
+            if plm_matrix is None:
+                continue
 
+            # --- ROBUST COORDINATE MAPPING ---
             for pos_label in plm_matrix.columns:
                 try:
-                    pos1 = int(pos_label)
+                    pos_plm_1 = int(pos_label) # 1-based index in PLM reference
                 except (TypeError, ValueError):
                     continue
-                if pos1 > len(reference_protein) or pos1 < 1:
+                
+                # Map PLM position to Full reference position
+                pos_plm_0 = pos_plm_1 - 1
+                if pos_plm_0 not in coord_map:
+                    continue # Skip if not mapped
+                
+                pos_full_0 = coord_map[pos_plm_0]
+                pos_full_1 = pos_full_0 + 1 # 1-based index in full reference
+                
+                ref_aa = plm_ref_protein[pos_plm_0]
+                
+                # Verify that this position exists in the mutational accessibility profile
+                if pos_full_1 not in data["mut_profile"].columns:
                     continue
 
-                ref_aa = reference_protein[pos1 - 1]
                 for aa in plm_matrix.index:
                     if aa == ref_aa:
                         continue
@@ -1606,19 +1491,23 @@ if RUN_POOLED_PANEL:
                         continue
 
                     plm_prob = float(plm_matrix.loc[aa, pos_label])
-                    mut_prob = float(data["mut_profile"].loc[aa, pos1])
-                    obs = float(data["obs_freq"].loc[aa, pos1])
+                    mut_prob = float(data["mut_profile"].loc[aa, pos_full_1])
+                    obs = float(data["obs_freq"].loc[aa, pos_full_1])
+                    
+                    if FILTER_FIXED_MUTATIONS and obs >= 1.0:
+                        continue
+
                     combined_rows.append({
                         "model": model_tag,
                         "lineage": lineage,
-                        "position": int(pos1),
+                        "position": int(pos_full_1),
                         "ref_aa": ref_aa,
                         "aa": aa,
                         "plm_prob": plm_prob,
                         "mut_prob": mut_prob,
                         "obs_freq": obs,
                         "obs_present": 1 if obs > 0 else 0,
-                        "depth": float(data["obs_depth"][pos1]),
+                        "depth": float(data["obs_depth"][pos_full_1]),
                     })
 
             data["mut_profile"].to_csv(
@@ -1632,7 +1521,7 @@ if RUN_POOLED_PANEL:
                 "model": model_tag,
                 "lineage": lineage,
                 "n_sequences": len(data["records"]),
-                "reference_length": len(reference_protein),
+                "reference_length": len(data["full_ref_protein"]),
                 "mapped_ref_sites": int(data["alignment_diff_stats"]["mapped_sites"]),
                 "compared_sites_non_gap_non_stop": int(data["alignment_diff_stats"]["compared_sites"]),
                 "differing_sites_vs_reference_non_gap_non_stop": int(data["alignment_diff_stats"]["differing_sites"]),
@@ -1664,6 +1553,40 @@ if RUN_POOLED_PANEL:
             os.path.join(model_outdir, _tag_output_name("pooled_combined_long_table.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
             index=False,
         )
+
+        # Output specific PLM vs Mutation probability comparison for this model
+        comparison_columns = ["position", "ref_aa", "aa", "plm_prob", "mut_prob"]
+        if all(col in combined_df.columns for col in comparison_columns):
+            comparison_df = combined_df[comparison_columns].drop_duplicates()
+            comparison_df.to_csv(
+                os.path.join(model_outdir, _tag_output_name("plm_vs_mut_prob.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
+                index=False,
+            )
+
+            # Generate scatter plot for PLM vs Mut Prob
+            try:
+                plt.figure(figsize=(6, 5))
+                # Add tiny pseudocount for log plotting
+                mask = (comparison_df["plm_prob"] > 0) & (comparison_df["mut_prob"] > 0)
+                plot_data = comparison_df[mask]
+                
+                if not plot_data.empty:
+                    rho, pval = spearmanr(plot_data["plm_prob"], plot_data["mut_prob"])
+                    
+                    plt.scatter(plot_data["plm_prob"], plot_data["mut_prob"], alpha=0.3, s=10, edgecolors="none")
+                    plt.xscale("log")
+                    plt.yscale("log")
+                    plt.xlabel("PLM Probability")
+                    plt.ylabel("Mutation Probability (Codon Model)")
+                    plt.title(f"{model_tag} Correlation\nSpearman rho={rho:.3f}")
+                    plt.grid(True, which="both", ls="--", alpha=0.5)
+                    
+                    plot_path = os.path.join(model_outdir, _tag_output_name("plm_vs_mut_prob_scatter.png", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG))
+                    plt.tight_layout()
+                    plt.savefig(plot_path, dpi=300)
+                    plt.close()
+            except Exception as plot_exc:
+                print(f"Warning: Failed to generate comparison plot for {model_tag}: {plot_exc}")
 
         lineage_meta_df = pd.DataFrame(per_lineage_summaries)
         lineage_meta_df.to_csv(
@@ -1786,9 +1709,8 @@ if RUN_POOLED_PANEL:
                     ),
                     dpi=300,
                 )
-                plt.show()
 
-        # Per-lineage best-alpha extraction for explicit Method A vs Method B overlays
+        # Per-lineage best-alpha extraction
         for lineage_name, lineage_df in combined_df.groupby("lineage"):
             lineage_alpha = evaluate_alpha_sweep(
                 lineage_df,
@@ -1820,7 +1742,6 @@ if RUN_POOLED_PANEL:
             })
 
         all_alpha_frames.append(alpha_df)
-
         print(f"Saved per-model alpha sweep for {model_tag} in {model_outdir}")
 
     status_df = pd.DataFrame(model_status_rows)
@@ -1838,13 +1759,8 @@ if RUN_POOLED_PANEL:
             index=False,
         )
 
-        print(
-            "Method A (site-level) context: each site gets a single score from the max mutation-level score at that site; "
-            "site precision = fraction of top-scored sites (top 10%) that have any observed mutation in the pooled set."
-        )
-
         # Compute baseline for mutation probability alone
-        if len(all_alpha_frames) > 0 and len(combined_df) > 0:
+        if not combined_df.empty:
             mut_only_df = combined_df.copy()
             mut_only_df["plm_prob"] = 1.0  # log(1.0) = 0, so score = alpha * log_mut
             mut_baseline_df = evaluate_alpha_sweep(
@@ -1853,7 +1769,8 @@ if RUN_POOLED_PANEL:
                 parallel=False,
                 pseudocount=1e-16
             )
-            mut_baseline_metrics = mut_baseline_df.iloc[0]
+            if not mut_baseline_df.empty:
+                mut_baseline_metrics = mut_baseline_df.iloc[0]
 
         # Cross-model overlay plots
         metric_cols = [
@@ -1864,46 +1781,45 @@ if RUN_POOLED_PANEL:
             "mut_flat_global_pearson_r",
             "mut_flat_mean_site_nll",
         ]
-        fig, axes = plt.subplots(2, 3, figsize=(18, 9), sharex=True)
-        axes = axes.flatten()
-        for i, metric_col in enumerate(metric_cols):
-            ax = axes[i]
-            for model_tag, sub in alpha_all_df.groupby("model"):
-                ax.plot(sub["alpha"], sub[metric_col], marker="o", label=model_tag)
-                
-            if "mut_baseline_metrics" in locals() and metric_col in mut_baseline_metrics:
-                ax.axhline(mut_baseline_metrics[metric_col], color="black", linestyle="--", label="Mut Prob Only")
+        
+        def plot_overlay(plot_df, file_suffix):
+            if len(plot_df) == 0:
+                return
+            fig, axes = plt.subplots(2, 3, figsize=(18, 9), sharex=True)
+            axes = axes.flatten()
+            for i, metric_col in enumerate(metric_cols):
+                ax = axes[i]
+                for model_tag, sub in plot_df.groupby("model"):
+                    ax.plot(sub["alpha"], sub[metric_col], marker="o", label=model_tag)
+                    
+                if "mut_baseline_metrics" in locals() and metric_col in mut_baseline_metrics:
+                    ax.axhline(mut_baseline_metrics[metric_col], color="black", linestyle="--", label="Mut Prob Only")
 
-            title_map = {
-                "site_top10pct_mutated_enrichment": "Method A (site-level): \nenrichment of mutated sites in top 10% scored sites",
-                "site_top10pct_mutated_precision": "Method A (site-level): f\nraction of top 10% scored sites that are observed mutated",
-                "site_rank_spearman_r": "Method A (site-level): \nSpearman(site score vs observed site mutation burden)",
-                "mut_flat_global_spearman_r": "Method B (mutation-level):\n Spearman(pred score vs observed mutation frequency)",
-                "mut_flat_global_pearson_r": "Method B (mutation-level): \nPearson(pred score vs observed mutation frequency)",
-                "mut_flat_mean_site_nll": "Method B (mutation-level):\n mean site-level NLL of observed residue distribution",
-            }
-            ylabel_map = {
-                "site_top10pct_mutated_enrichment": "Enrichment ratio (top-10% sites / baseline)",
-                "site_top10pct_mutated_precision": "Precision (fraction of top-10% sites with any observed mutation)",
-                "site_rank_spearman_r": "Spearman correlation coefficient",
-                "mut_flat_global_spearman_r": "Spearman correlation coefficient",
-                "mut_flat_global_pearson_r": "Pearson correlation coefficient",
-                "mut_flat_mean_site_nll": "Mean site-level negative log-likelihood (lower is better)",
-            }
-            ax.set_title(title_map.get(metric_col, metric_col))
-            ax.set_xlabel("Alpha weight on mutation accessibility in log-space combination")
-            ax.set_ylabel(ylabel_map.get(metric_col, "Metric value"))
-            ax.grid(alpha=0.3)
-            if i == 0:
-                ax.legend()
+                title_map = {
+                    "site_top10pct_mutated_enrichment": "Method A (site-level): enrichment of mutated sites in top 10%",
+                    "site_top10pct_mutated_precision": "Method A (site-level): fraction of top 10% sites mutated",
+                    "site_rank_spearman_r": "Method A (site-level): Spearman(site score vs burden)",
+                    "mut_flat_global_spearman_r": "Method B (mutation-level): Spearman(score vs freq)",
+                    "mut_flat_global_pearson_r": "Method B (mutation-level): Pearson(score vs freq)",
+                    "mut_flat_mean_site_nll": "Method B (mutation-level): mean site-level NLL",
+                }
+                ax.set_title(title_map.get(metric_col, metric_col))
+                ax.set_xlabel("Alpha weight")
+                ax.set_ylabel("Metric value")
+                ax.grid(alpha=0.3)
+                if i == 0:
+                    ax.legend()
 
-        plt.tight_layout()
-        plt.savefig(
-            os.path.join(POOLED_PANEL_OUTDIR, _tag_output_name("alpha_sweep_model_comparison.png", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
-            dpi=300,
-        )
-        plt.show()
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(POOLED_PANEL_OUTDIR, _tag_output_name(f"alpha_sweep_model_comparison_{file_suffix}.png", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
+                dpi=300,
+            )
+            plt.close()
 
+        # Plot overlays
+        plot_overlay(alpha_all_df, "all")
+        
         # Explicit two-method best-alpha summary table
         best_rows = []
         for model_tag, sub in alpha_all_df.groupby("model"):
@@ -1920,12 +1836,6 @@ if RUN_POOLED_PANEL:
                 "method": "Method B (Mutation-level flattened)",
                 "criterion": "max mut_flat_global_spearman_r",
                 "best_alpha": float(sub.loc[sub["mut_flat_global_spearman_r"].idxmax(), "alpha"]),
-            })
-            best_rows.append({
-                "model": model_tag,
-                "method": "Method B (Mutation-level flattened)",
-                "criterion": "min mut_flat_mean_site_nll",
-                "best_alpha": float(sub.loc[sub["mut_flat_mean_site_nll"].idxmin(), "alpha"]),
             })
         pd.DataFrame(best_rows).to_csv(
             os.path.join(POOLED_PANEL_OUTDIR, _tag_output_name("best_alpha_two_methods.tsv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
@@ -1977,13 +1887,13 @@ if RUN_POOLED_PANEL:
                 os.path.join(POOLED_PANEL_OUTDIR, _tag_output_name("best_alpha_per_group_overlay.png", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
                 dpi=300,
             )
-            plt.show()
+            plt.close()
 
         print("\nPooled panel complete.")
         print(f"Saved outputs in: {POOLED_PANEL_OUTDIR}")
-        print(alpha_all_df)
     else:
         print("No model runs completed successfully. Check model_run_status.tsv for details.")
+
 
     
     # %%

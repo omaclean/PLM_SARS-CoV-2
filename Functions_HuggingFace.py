@@ -26,6 +26,9 @@ from io import StringIO
 import matplotlib.pyplot as plt
 from typing import Optional, List, Dict, Tuple, Any, Union, Iterable
 
+import itertools
+from matplotlib.colors import LogNorm
+from Bio.Data import CodonTable
 import glob
 import os
 import re
@@ -289,12 +292,29 @@ def translate_mat_proteins_with_genbank(sequence,ref):
     return proteins_dict
 #####################################################################################
 ## ESM Embedding Functions ##########################################################
+class ESMCAlphabetWrapper:
+    def __init__(self, tokenizer):
+        self._tokenizer = tokenizer
+        self.padding_idx = tokenizer.pad_token_id
+        if hasattr(tokenizer, "vocab"):
+            self.all_toks = list(tokenizer.vocab.keys())
+        else:
+            self.all_toks = []
+    
+    def get_idx(self, word):
+        if hasattr(self._tokenizer, "vocab") and word in self._tokenizer.vocab:
+            return self._tokenizer.vocab[word]
+        return getattr(self._tokenizer, "unk_token_id", 3)
+    
+    def get_batch_converter(self):
+        return None
+
 def embed_sequence(sequence, model, device, model_layers, batch_converter, alphabet):
-    """Embed a protein sequence with either FAIR-ESM or HuggingFace-style ESM APIs.
+    """Embed a protein sequence with either FAIR-ESM, HuggingFace-style ESM APIs, or ESMC.
 
     Args:
         sequence (str): Amino-acid sequence with no padding tokens.
-        model (PreTrainedModel): HuggingFace ESM model instance.
+        model (PreTrainedModel): HuggingFace ESM model instance or ESMC model.
         device (torch.device): Device where tensors should reside.
         model_layers (int): Hidden-state index to extract (falls back to last layer if too large).
         batch_converter (callable): Function that converts (label, seq) pairs to model tokens.
@@ -304,6 +324,23 @@ def embed_sequence(sequence, model, device, model_layers, batch_converter, alpha
         tuple: ``(results, base_logits, base_mean_embedding, full_embedding)`` where logits are
         log-softmax probabilities and embeddings are torch tensors on CPU.
     """
+    if model.__class__.__name__ == "ESMC":
+        batch_tokens = model._tokenize([sequence]).to(device=device, non_blocking=True)
+        batch_len = (batch_tokens != alphabet.padding_idx).sum(1)[0]
+        
+        kwargs = {"enabled": True, "device_type": "cuda", "dtype": torch.bfloat16} if device.type == "cuda" else {"enabled": False, "device_type": "cpu"}
+        with torch.no_grad(), torch.autocast(**kwargs):
+            results = model.forward(sequence_tokens=batch_tokens)
+            layer_idx = model_layers if model_layers < len(results.hidden_states) else -1
+            token_representation = results.hidden_states[layer_idx][0]
+            logits_tensor = results.sequence_logits[0]
+            
+        full_embedding = token_representation[1:batch_len - 1].cpu().float()
+        base_mean_embedding = token_representation[1 : batch_len - 1].mean(0).cpu().float()
+        lsoftmax = torch.nn.LogSoftmax(dim=1)
+        base_logits = lsoftmax(logits_tensor.to(device="cpu").float())
+        return results, base_logits, base_mean_embedding, full_embedding
+
     # Sequences to embed
     sequence_data = [('base', sequence)]
     
@@ -2728,3 +2765,387 @@ def plot_mutational_accessibility_heatmap(matrix_df, outpath=None, figsize=(14, 
         plt.savefig(str(outpath), dpi=300)
     plt.show()
 
+
+def _resolve_plm_max_nt_length(max_aa_length=None, max_nt_length=None):
+    aa_based_nt_limit = None if max_aa_length is None else int(max_aa_length) * 3
+    
+    effective_limit = None
+    if max_nt_length is None:
+        effective_limit = aa_based_nt_limit
+    elif aa_based_nt_limit is None:
+        effective_limit = int(max_nt_length)
+    else:
+        effective_limit = min(int(max_nt_length), aa_based_nt_limit)
+        
+    if effective_limit is not None:
+        # Ensure codon-aware trimming to prevent frameshifts
+        effective_limit = (effective_limit // 3) * 3
+        
+    return effective_limit
+
+
+def _build_coordinate_map(query_seq, target_seq):
+    """
+    Builds a mapping from query sequence indices (0-based) to target sequence indices (0-based)
+    using global alignment. Returns a dict {query_idx: target_idx}.
+    """
+    from Bio import Align
+    aligner = Align.PairwiseAligner()
+    aligner.mode = 'global'
+    aligner.match_score = 2
+    aligner.mismatch_score = -1
+    aligner.open_gap_score = -10
+    aligner.extend_gap_score = -0.5
+    
+    alignments = aligner.align(query_seq, target_seq)
+    best_alignment = alignments[0]
+    
+    # alignment.aligned is a tuple of (query_indices, target_indices) 
+    # where each is a list of [start, end] ranges.
+    query_ranges, target_ranges = best_alignment.aligned
+    
+    mapping = {}
+    for (q_start, q_end), (t_start, t_end) in zip(query_ranges, target_ranges):
+        for q_idx, t_idx in zip(range(q_start, q_end), range(t_start, t_end)):
+            mapping[q_idx] = t_idx
+            
+    return mapping
+
+
+def _is_probably_nucleotide_sequence(sequence):
+    seq_letters = set(str(sequence).upper()) - {"-", ".", "N"}
+    return seq_letters.issubset({"A", "C", "G", "T", "U"})
+
+
+def _load_comparison_protein_sequence(comparison_fasta, sequence_id=None, selection="last"):
+    if comparison_fasta is None:
+        return None, None
+
+    comparison_records = list(SeqIO.parse(comparison_fasta, "fasta"))
+    if len(comparison_records) == 0:
+        print(f"No records found in comparison FASTA: {comparison_fasta}")
+        return None, None
+
+    selected_record = None
+    if sequence_id is not None:
+        for record in comparison_records:
+            if record.id == sequence_id:
+                selected_record = record
+                break
+        if selected_record is None:
+            print(
+                f"Comparison sequence id not found in {comparison_fasta}: {sequence_id}. "
+                "Falling back to selection mode."
+            )
+
+    if selected_record is None:
+        if selection == "first":
+            selected_record = comparison_records[0]
+        else:
+            selected_record = comparison_records[-1]
+
+    raw_seq = str(selected_record.seq)
+    if _is_probably_nucleotide_sequence(raw_seq):
+        protein_seq = str(selected_record.seq.translate(to_stop=True))
+    else:
+        protein_seq = raw_seq.replace("-", "").replace(".", "").replace("*", "")
+
+    return selected_record.id, protein_seq
+
+
+def _save_key_matrix(matrix_like, filename, key_matrix_dir, index=True):
+    if isinstance(matrix_like, pd.DataFrame):
+        matrix_like.to_csv(os.path.join(key_matrix_dir, filename), index=index)
+        return
+    if isinstance(matrix_like, np.ndarray):
+        pd.DataFrame(matrix_like).to_csv(os.path.join(key_matrix_dir, filename), index=index)
+        return
+    pd.DataFrame(matrix_like).to_csv(os.path.join(key_matrix_dir, filename), index=index)
+
+
+def _load_plm_runtime(base_model_name, checkpoint_dir=None):
+    if "esmc" in base_model_name.lower() or "esm-c" in base_model_name.lower():
+        try:
+            from esm.models.esmc import ESMC
+        except ImportError:
+            raise ImportError("EvolutionaryScale's esm>=3.0 package is required for ESMC models. Please switch environments.")
+        from safetensors.torch import load_file
+        # ESMCAlphabetWrapper should be defined or available in the calling context
+        # In fact, we should move it to Functions_HuggingFace too if it's not there.
+        # But for now we assume it's available.
+        from Functions_HuggingFace import ESMCAlphabetWrapper
+        
+        model_id = "esmc_600m" if "600m" in base_model_name.lower() else "esmc_300m"
+        model = ESMC.from_pretrained(model_id)
+        
+        if checkpoint_dir:
+            import os
+            safetensors_path = os.path.join(checkpoint_dir, "model.safetensors")
+            if os.path.exists(safetensors_path):
+                print(f"Loading ESMC weights from {safetensors_path}")
+                state_dict = load_file(safetensors_path)
+                state_dict = {k.replace("esmc.", "") if k.startswith("esmc.") else k: v for k, v in state_dict.items()}
+                model.load_state_dict(state_dict)
+            else:
+                print(f"Warning: ESMC checkpoint safetensors not found at {safetensors_path}")
+        
+        alphabet = ESMCAlphabetWrapper(model.tokenizer)
+        batch_converter = alphabet.get_batch_converter()
+        
+    else:
+        try:
+            model_raw, alphabet = esm.pretrained.load_model_and_alphabet(base_model_name)
+        except (AttributeError, ImportError):
+            raise ImportError(f"Legacy FAIR esm package (version < 3.0) is required for ESM-2 models like {base_model_name}. Please switch to the 'plm_entropy' or 'plm_sars' environment.")
+        model_raw.eval()
+        batch_converter = alphabet.get_batch_converter()
+
+        if checkpoint_dir:
+            from transformers import EsmForMaskedLM
+            loaded = EsmForMaskedLM.from_pretrained(checkpoint_dir)
+            model = loaded[0] if isinstance(loaded, tuple) else loaded
+        else:
+            model = model_raw
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("Transferred PLM model to GPU")
+    else:
+        device = torch.device("cpu")
+        print("CUDA is not available. Using CPU instead.")
+        torch.set_num_threads(min(16, os.cpu_count() or 1))
+
+    model = model.eval().to(device)
+    return model, device, batch_converter, alphabet
+
+
+def _write_plm_probability_matrix(result_dict, output_path):
+    sequence_row = pd.DataFrame(
+        [list(result_dict["sequence"])],
+        index=["sequence"],
+        columns=result_dict["positions"],
+    )
+    probability_rows = pd.DataFrame(
+        result_dict["mutation_matrix"],
+        index=result_dict["amino_acids"],
+        columns=result_dict["positions"],
+    )
+    pd.concat([sequence_row, probability_rows], axis=0).to_csv(output_path, header=False)
+
+
+def _ensure_plm_probability_matrix(reference_protein, output_path, model_tag, checkpoint_dir, base_model, model_layer, force_recompute=False, cache=None):
+    if cache is None:
+        cache = {}
+    cache_key = (model_tag, reference_protein)
+    
+    if os.path.exists(output_path) and not force_recompute:
+        print(f"Using existing PLM probability matrix on disk: {output_path}")
+        return
+        
+    if cache_key in cache and not force_recompute:
+        print(f"Using in-memory cached PLM probability matrix for model {model_tag}")
+        result = cache[cache_key]
+        _write_plm_probability_matrix(result, output_path)
+        return
+
+    print(f"Generating PLM probability matrix: {output_path}")
+    model, device, batch_converter, alphabet = _load_plm_runtime(
+        base_model,
+        checkpoint_dir=checkpoint_dir,
+    )
+    from Functions_HuggingFace import get_mutation_prob_matrix
+    result = get_mutation_prob_matrix(
+        reference_protein=reference_protein,
+        model=model,
+        model_layers=model_layer,
+        device=device,
+        batch_converter=batch_converter,
+        alphabet=alphabet,
+    )
+    cache[cache_key] = result
+    _write_plm_probability_matrix(result, output_path)
+    print(f"Saved PLM probability matrix: {output_path}")
+
+
+def _raw_codon_to_aa_prob(codon_from, aa, codon_mutation_df, aa_to_codons_all):
+    return sum(
+        codon_mutation_df.loc[codon_from, codon_to]
+        for codon_to in aa_to_codons_all.get(aa, [])
+    )
+
+
+def _build_aa20_average_and_reconstruction(codon_to_aa_20_df, aa20, ordered_codons, genetic_code):
+    aa20_transition = pd.DataFrame(np.nan, index=aa20, columns=aa20, dtype=float)
+    source_counts = {}
+
+    for source_aa in aa20:
+        source_codons = [codon for codon in ordered_codons if genetic_code.get(codon) == source_aa]
+        source_counts[source_aa] = len(source_codons)
+        if len(source_codons) == 0:
+            continue
+        aa20_transition.loc[source_aa, :] = codon_to_aa_20_df.loc[source_codons, :].mean(axis=0, skipna=True)
+
+    reconstructed = pd.DataFrame(np.nan, index=ordered_codons, columns=aa20, dtype=float)
+    for codon in ordered_codons:
+        source_aa = genetic_code.get(codon)
+        if source_aa in aa20_transition.index:
+            reconstructed.loc[codon, :] = aa20_transition.loc[source_aa, :]
+
+    return aa20_transition, reconstructed, source_counts
+
+
+def _flattened_fit_metrics(observed_df, predicted_df):
+    obs_vals = observed_df.to_numpy(dtype=float).ravel()
+    pred_vals = predicted_df.to_numpy(dtype=float).ravel()
+    valid_mask = np.isfinite(obs_vals) & np.isfinite(pred_vals)
+
+    if not np.any(valid_mask):
+        return {
+            "n_entries": 0,
+            "total_var": np.nan,
+            "residual_var": np.nan,
+            "retained_pct": np.nan,
+            "corr": np.nan,
+            "rmse": np.nan,
+            "mae": np.nan,
+        }
+
+    obs_valid = obs_vals[valid_mask]
+    pred_valid = pred_vals[valid_mask]
+
+    total_var = float(np.var(obs_valid))
+    residuals = obs_valid - pred_valid
+    residual_var = float(np.var(residuals))
+    retained_pct = float(100.0 * (1.0 - residual_var / total_var)) if total_var > 0 else np.nan
+
+    corr_matrix = np.corrcoef(obs_valid, pred_valid)
+    corr_val = float(corr_matrix[0, 1]) if corr_matrix.shape == (2, 2) else np.nan
+    rmse = float(np.sqrt(np.mean(np.square(residuals))))
+    mae = float(np.mean(np.abs(residuals)))
+
+    return {
+        "n_entries": int(valid_mask.sum()),
+        "total_var": total_var,
+        "residual_var": residual_var,
+        "retained_pct": retained_pct,
+        "corr": corr_val,
+        "rmse": rmse,
+        "mae": mae,
+    }
+
+
+def validate_mutational_matrix(matrix):
+    print("\n--- Validating Mutational Probability Matrix ---")
+    # Sum over rows (amino acids) for each column (position)
+    column_sums = matrix.sum(axis=0) 
+    
+    print(f"Mean column sum: {column_sums.mean():.6f}")
+    print(f"Min column sum: {column_sums.min():.6f}")
+    print(f"Max column sum: {column_sums.max():.6f}")
+    
+    # Check for deviations -> assuming sums should be <= 1.0 (some prob lost to stop codons)
+    # But usually very close to 1.0
+    deviations = np.abs(column_sums - 1.0)
+    # Allow small tolerance
+    significant_deviations = deviations[deviations > 1e-3]
+    if not significant_deviations.empty:
+         print(f"Warning: {len(significant_deviations)} columns sum to != 1.0 (+/- 0.001)")
+         print("Top 5 deviations:")
+         print(significant_deviations.sort_values(ascending=False).head())
+    else:
+         print("Validation Passed: All columns sum to approximately 1.0")
+
+
+def get_ranked_mutations(prob_matrix, ref_seq, obs_muts):
+    """
+    Flattens the probability matrix (excluding self-mutations),
+    ranks them, and identifies where the observed mutations fall.
+    """
+    all_mutations_data = []
+    
+    # Iterate through columns (positions)
+    # prob_matrix columns are string indices or similar, ensure alignment
+    num_cols = prob_matrix.shape[1]
+    
+    for j in range(min(num_cols, len(ref_seq))):
+        col_label = prob_matrix.columns[j]
+        ref_aa = ref_seq[j]
+        
+        # Iterate rows (amino acids)
+        for aa in prob_matrix.index:
+            if not isinstance(aa, str) or len(aa) != 1: continue
+            if aa == ref_aa: continue # Skip reference
+            
+            val = prob_matrix.loc[aa, col_label]
+            all_mutations_data.append({
+                'Position': j,
+                'AA': aa,
+                'Probability': val
+            })
+            
+    # Create DataFrame and Rank
+    df = pd.DataFrame(all_mutations_data)
+    df = df.sort_values(by='Probability', ascending=False).reset_index(drop=True)
+    df['Rank'] = df.index + 1
+    
+    # Find observed
+    obs_points = []
+    for pos, target_aa in obs_muts:
+        # Filter for this specific mutation
+        # Note: Position j corresponds to index j in sequence
+        match = df[(df['Position'] == pos) & (df['AA'] == target_aa)]
+        if not match.empty:
+            obs_points.append(match.iloc[0])
+
+    obs_df = pd.DataFrame(obs_points, columns=df.columns)
+    return df, obs_df
+
+
+def _load_single_focal_reference(reference_fasta: str, lineage_label=""):
+    if not os.path.exists(reference_fasta):
+        raise FileNotFoundError(
+            f"POOLED_REFERENCE_FASTA does not exist: {reference_fasta}\n"
+            "Provide a single-record nucleotide FASTA for the focal/root spike sequence."
+        )
+
+    reference_records = list(SeqIO.parse(reference_fasta, "fasta"))
+    if len(reference_records) == 0:
+        raise ValueError(
+            f"No records found in POOLED_REFERENCE_FASTA: {reference_fasta}"
+        )
+
+    if len(reference_records) > 1:
+        print(
+            f"Warning: POOLED_REFERENCE_FASTA contains {len(reference_records)} records; "
+            "using the first record only."
+        )
+
+    focal_record = reference_records[0]
+    raw_seq = str(focal_record.seq).strip()
+    
+    # We use _is_probably_nucleotide from Functions_HuggingFace
+    if not _is_probably_nucleotide(raw_seq):
+        raise ValueError(
+            "POOLED_REFERENCE_FASTA must contain a nucleotide coding sequence. "
+            "Protein-only focal FASTAs cannot be used for codon-based mutation accessibility."
+        )
+
+    reference_nt = raw_seq.replace("-", "").replace(".", "").upper().replace("U", "T")
+    # _translate_nt_to_protein from Functions_HuggingFace
+    reference_protein = _translate_nt_to_protein(raw_seq)
+    return {
+        "header": focal_record.id.strip(),
+        "lineage": lineage_label,
+        "nucleotide": reference_nt,
+        "protein": reference_protein,
+    }
+
+def _safe_label(label: str) -> str:
+    return label.strip().replace(" ", "_").replace("/", "-")
+
+
+def _clean_pattern_tag(file_pattern: str) -> str:
+    tag = file_pattern.replace("*", "")
+    tag = tag.replace(".fasta", "")
+    tag = re.sub(r"_+", "_", tag).strip("_")
+    return _safe_label(tag) if tag else "pattern"
