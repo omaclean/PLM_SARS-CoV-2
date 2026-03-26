@@ -82,17 +82,16 @@ from Functions_HuggingFace import (
 # GPU SAFETY: Set to True to error if no CUDA is available. 
 GPU_REQUIRED = True
 
-# ANALYSIS MODE:
-# "MONTHLY_GUIDE" -> Processes multiple snapshots from POOLED_DIVERSITY_GUIDE CSV.
-# "SINGLE_FASTA"  -> Processes only the file in POOLED_DIVERSITY_FASTA.
-ANALYSIS_MODE = "MONTHLY_GUIDE"
 
 # MODEL SELECTION: Choose which PLM model(s) to run and compare.
 # Options: "ESMC_600M", "ESMC_600M_FT_SC2_99clus", "ESM2_650M_FT", "ESM2_3B_OG"
-MODEL_SELECTION = ["ESMC_600M_FT_SC2_99clus","ESMC_600M_OG"]
+MODEL_SELECTION = ["ESMC_600M_OG","ESMC_600M_FT_SC2_99clus",]
+outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESMC_runs_aa'
 
-#MODEL_SELECTION = ["sarbeco_SC2_FT_ESM2_650M_2023","ESM2_650M_OG","ESM2_3B_OG"]
 
+MODEL_SELECTION = ["sarbeco_SC2_FT_ESM2_650M_2023","ESM2_650M_OG","ESM2_3B_OG"]
+outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESM2_runs_aa_singles_rounded'
+PLM_MAX_AA_LENGTH=1022
 # TEST SETTINGS
 TEST_MODE = False
 TEST_MAX_RECORDS = 500
@@ -102,13 +101,21 @@ TEST_MAX_RECORDS = 500
 # =====================================================================
 
 # PLM sequence length limits
-PLM_MAX_AA_LENGTH = 1024 
 PLM_MAX_NT_LENGTH = None
 
 # Focal reference sequence (nucleotide)
 fasta_file = '/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/Jan25/rootseq_CM7YG5RN.fa'
 base_lineage_id = '?'
 
+# ANALYSIS MODE:
+# "MONTHLY_GUIDE" -> Processes multiple snapshots from POOLED_DIVERSITY_GUIDE CSV.
+# "SINGLE_FASTA"  -> Processes only the file in POOLED_DIVERSITY_FASTA.
+ANALYSIS_MODE = "MONTHLY_GUIDE"
+# Set to True to strictly parse diversity FASTA files as protein, bypassing heuristics.
+EXPECT_PROTEIN_DIVERSITY = True 
+
+# Set to True to project a single global PLM matrix onto monthly diversity references
+USE_GLOBAL_PLM_REFERENCE = True
 # Guide CSV mapping months to FASTA paths (used if ANALYSIS_MODE == "MONTHLY_GUIDE")
 POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/spike_month_file_guide.csv"
 
@@ -116,7 +123,12 @@ POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapsh
 POOLED_DIVERSITY_FASTA = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/spike_2025-06_aa.fa"
 
 # Filtering
-FILTER_FIXED_MUTATIONS = False
+FILTER_FIXED_MUTATIONS = True
+# Optionally filter out singleton mutations seen in only one sample (per-site count)
+FILTER_SINGLETON_MUTATIONS = True
+SKIP_FILTER=False
+# Minimum observed counts required to include a mutation (default 2 -> exclude singletons)
+MIN_OBS_COUNT = 2
 
 # =====================================================================
 # III. MODEL PROFILES (Definitions)
@@ -127,17 +139,17 @@ MODEL_PROFILES = {
         "base_model": "esm-c600m",
         "layer": 36,
         "checkpoint_dir": None,
-        "force_recompute": False,
+        "force_recompute": True,
     },
     "ESMC_600M_FT_SC2_99clus": {
-        "tag": "magma_ESMC_600M_99_95perc",
+        "tag": "ESMC_600M_FT_SC2_99clus",
         "base_model": "esm-c600m",
         "layer": 36,
         "checkpoint_dir": "/home3/oml4h/my_SC2_finetunes/magma_ESMC_600M_99_95perc/",
-        "force_recompute": False,
+        "force_recompute": True,
     },
     
-    "ESM2_650M_FT_SC2_99clus": {
+    "sarbeco_SC2_FT_ESM2_650M_2023": {
         "tag": "sarbeco_SC2_FT_ESM2_650M_2023",
         "base_model": "esm2_t33_650M_UR50D",
         "layer": 33,
@@ -164,10 +176,15 @@ MODEL_PROFILES = {
 # Apply selection and build MODEL_RUNS
 # ---------------------------------------------------------------------
 MODEL_RUNS = []
+# Ensure all models in MODEL_SELECTION exist in MODEL_PROFILES before proceeding
+missing_models = [m for m in MODEL_SELECTION if m not in MODEL_PROFILES]
+if missing_models:
+    raise ValueError(
+        f"MODEL_SELECTION contains unknown profile(s): {missing_models}. "
+        f"Available profiles: {list(MODEL_PROFILES.keys())}"
+    )
+
 for choice in MODEL_SELECTION:
-    if choice not in MODEL_PROFILES:
-        print(f"Warning: Model Choice '{choice}' not found in MODEL_PROFILES. Skipping.")
-        continue
     prof = MODEL_PROFILES[choice]
     MODEL_RUNS.append({
         "tag": prof["tag"],
@@ -264,16 +281,20 @@ print(f"Trimmed PLM protein length: {len(trimmed_base_sequence)}")
 
 probability_matrix_file = f'{fasta_file[:-3]}_{PLM_MODEL_TAG}_{plm_trim_tag}_prot_probability_matrix.csv'
 
-# outdir calculation
-outdir = fasta_file.rsplit('/', 1)[0] + '/' + PLM_MODEL_TAG + '/mut_access_calcs'
+# outdir calculation if not defined
+try:
+    outdir
+except NameError:
+    outdir = fasta_file.rsplit('/', 1)[0] + '/' + PLM_MODEL_TAG + '/mut_access_calcs'
 POOLED_REFERENCE_FASTA = cut_fasta_file
 POOLED_PANEL_OUTDIR = os.path.join(outdir, "pooled_panel")
 
 os.makedirs(outdir, exist_ok=True)
+os.makedirs(POOLED_PANEL_OUTDIR, exist_ok=True)
 global key_matrix_dir
 key_matrix_dir = os.path.join(outdir, "key_probability_matrices")
 os.makedirs(key_matrix_dir, exist_ok=True)
-
+print(outdir)
 
 # --- Function Definitions ---
 
@@ -1316,11 +1337,13 @@ if RUN_POOLED_PANEL:
             records = records[:TEST_MAX_RECORDS]
             
         # Ensure records are protein for the alignment comparison
+      # Ensure records are protein for the alignment comparison
         processed_records = []
         for rec in records:
-            if _is_probably_nucleotide_sequence(str(rec.seq)):
+            if not EXPECT_PROTEIN_DIVERSITY and _is_probably_nucleotide_sequence(str(rec.seq)):
                 rec.seq = rec.seq.translate(to_stop=True)
             processed_records.append(rec)
+
 
         lineage_key = _safe_label(label)
         ref_to_aln_col, aln_len, matched_pairs = build_reference_to_alignment_column_map(
@@ -1385,7 +1408,7 @@ if RUN_POOLED_PANEL:
         batch_converter = None
         model_ready = False
         used_cached_plm = False
-        model_load_attempted = True # will be set in logic
+        model_load_attempted = False # will be set in logic
         model_load_failed_reason = ""
         model_runtime_failed = False
         model_runtime_failed_reason = ""
@@ -1431,6 +1454,27 @@ if RUN_POOLED_PANEL:
                                 checkpoint_dir=run_cfg.get("checkpoint_dir")
                             )
                             model_ready = True
+                            # Infer per-model maximum input length (aa) and set PLM_MAX_NT_LENGTH (nt)
+                            try:
+                                max_aa = None
+                                # Common places to find model/tokenizer length
+                                if hasattr(alphabet, "max_seq_len") and alphabet.max_seq_len:
+                                    max_aa = int(alphabet.max_seq_len)
+                                elif hasattr(alphabet, "_tokenizer") and hasattr(alphabet._tokenizer, "model_max_length"):
+                                    max_aa = int(alphabet._tokenizer.model_max_length)
+                                elif hasattr(alphabet, "tokenizer") and hasattr(alphabet.tokenizer, "model_max_length"):
+                                    max_aa = int(alphabet.tokenizer.model_max_length)
+                                elif hasattr(model, "config") and hasattr(model.config, "max_position_embeddings"):
+                                    max_aa = int(model.config.max_position_embeddings)
+                                # Fallback for ESM-C models: allow large context
+                                if max_aa is None and ("esmc" in run_cfg["base_model"].lower() or "esm-c" in run_cfg["base_model"].lower()):
+                                    max_aa = 2048
+
+                                if max_aa is not None:
+                                    PLM_MAX_NT_LENGTH = max_aa * 3
+                                    print(f"Inferred PLM max aa={max_aa}, setting PLM_MAX_NT_LENGTH={PLM_MAX_NT_LENGTH}")
+                            except Exception as exc:
+                                print(f"Warning: failed to infer PLM max length for {model_tag}: {exc}")
                         except Exception as exc:
                             model_load_failed_reason = str(exc)
                             print(f"Skipping PLM generation for {model_tag}: failed to load. Reason: {exc}")
@@ -1463,6 +1507,34 @@ if RUN_POOLED_PANEL:
             if plm_matrix is None:
                 continue
 
+            # Assuming 'focal_protein_seq' is your global root reference that generated the PLM
+            global_to_monthly_map = {}
+            if USE_GLOBAL_PLM_REFERENCE:
+                from Bio import Align
+                aligner = Align.PairwiseAligner()
+                aligner.mode = 'global'
+                aligner.match_score = 2
+                aligner.mismatch_score = -1
+                aligner.open_gap_score = -10
+                aligner.extend_gap_score = -0.5
+
+                # Align global PLM reference to the current monthly reference
+                aln = next(iter(aligner.align(focal_protein_seq, plm_ref_protein)))
+                
+                global_pos = 0
+                monthly_pos = 0
+                
+                # Extract coordinate mapping from alignment trajectory
+                for char_g, char_m in zip(aln[0], aln[1]):
+                    if char_g != '-' and char_m != '-':
+                        global_to_monthly_map[global_pos] = monthly_pos
+                        global_pos += 1
+                        monthly_pos += 1
+                    elif char_g == '-':
+                        monthly_pos += 1
+                    elif char_m == '-':
+                        global_pos += 1
+
             # --- ROBUST COORDINATE MAPPING ---
             for pos_label in plm_matrix.columns:
                 try:
@@ -1470,12 +1542,22 @@ if RUN_POOLED_PANEL:
                 except (TypeError, ValueError):
                     continue
                 
-                # Map PLM position to Full reference position
                 pos_plm_0 = pos_plm_1 - 1
-                if pos_plm_0 not in coord_map:
-                    continue # Skip if not mapped
                 
-                pos_full_0 = coord_map[pos_plm_0]
+                # Transpose coordinates using the alignment map
+                if USE_GLOBAL_PLM_REFERENCE:
+                    if pos_plm_0 not in global_to_monthly_map:
+                        continue # Global position deleted in monthly reference
+                    mapped_monthly_0 = global_to_monthly_map[pos_plm_0]
+                    
+                    if mapped_monthly_0 not in coord_map:
+                        continue
+                    pos_full_0 = coord_map[mapped_monthly_0]
+                else:
+                    if pos_plm_0 not in coord_map:
+                        continue 
+                    pos_full_0 = coord_map[pos_plm_0]
+
                 pos_full_1 = pos_full_0 + 1 # 1-based index in full reference
                 
                 ref_aa = plm_ref_protein[pos_plm_0]
@@ -1494,8 +1576,22 @@ if RUN_POOLED_PANEL:
                     mut_prob = float(data["mut_profile"].loc[aa, pos_full_1])
                     obs = float(data["obs_freq"].loc[aa, pos_full_1])
                     
+                    # Calculate approximate observed counts at this site for this AA
+                    depth_here = int(data["obs_depth"].get(pos_full_1, 0)) if pos_full_1 in data["obs_depth"].index else int(data["obs_depth"].loc[pos_full_1])
+                    obs_count_est = int(round(obs * depth_here)) if depth_here > 0 else 0
+
                     if FILTER_FIXED_MUTATIONS and obs >= 1.0:
                         continue
+
+                    # If singleton filtering is enabled, round small observed counts down to zero
+                    obs_final = obs
+                    obs_present_final = 1 if obs > 0 else 0
+                    if FILTER_SINGLETON_MUTATIONS and obs_count_est < MIN_OBS_COUNT:
+                        if SKIP_FILTER:
+                            continue #<- to only look at circulating sites
+                        else:
+                            obs_final = 0.0
+                            obs_present_final = 0
 
                     combined_rows.append({
                         "model": model_tag,
@@ -1505,8 +1601,8 @@ if RUN_POOLED_PANEL:
                         "aa": aa,
                         "plm_prob": plm_prob,
                         "mut_prob": mut_prob,
-                        "obs_freq": obs,
-                        "obs_present": 1 if obs > 0 else 0,
+                        "obs_freq": obs_final,
+                        "obs_present": obs_present_final,
                         "depth": float(data["obs_depth"][pos_full_1]),
                     })
 
@@ -1534,15 +1630,38 @@ if RUN_POOLED_PANEL:
         if model_runtime_failed:
             combined_rows = []
             per_lineage_summaries = []
-            model_status_rows.append({"model": model_tag, "status": "skipped", "reason": f"runtime failure: {model_runtime_failed_reason}"})
+            model_status_rows.append({
+                "model": model_tag,
+                "status": "skipped",
+                "reason": f"runtime failure: {model_runtime_failed_reason}",
+                "load_failed_reason": model_load_failed_reason,
+                "runtime_failed_reason": model_runtime_failed_reason,
+                "used_cached_plm": used_cached_plm,
+            })
             continue
 
+        # Ensure we always append a status row with explicit reasons and diagnostics
         if model_ready:
-            model_status_rows.append({"model": model_tag, "status": "loaded", "reason": "used for PLM generation"})
+            status = "loaded"
+            reason = "used for PLM generation"
         elif used_cached_plm:
-            model_status_rows.append({"model": model_tag, "status": "cached_only", "reason": "all PLM profiles reused from disk"})
-        elif model_load_attempted:
-            model_status_rows.append({"model": model_tag, "status": "skipped", "reason": model_load_failed_reason})
+            status = "cached_only"
+            reason = "all PLM profiles reused from disk"
+        elif model_load_attempted and model_load_failed_reason:
+            status = "skipped"
+            reason = f"load failed: {model_load_failed_reason}"
+        else:
+            status = "skipped"
+            reason = "no PLM profiles generated and no load error captured (no model loaded, no cached matrices)"
+
+        model_status_rows.append({
+            "model": model_tag,
+            "status": status,
+            "reason": reason,
+            "load_failed_reason": model_load_failed_reason,
+            "runtime_failed_reason": model_runtime_failed_reason,
+            "used_cached_plm": used_cached_plm,
+        })
 
         combined_df = pd.DataFrame(combined_rows)
         if combined_df.empty:
@@ -1698,7 +1817,7 @@ if RUN_POOLED_PANEL:
                             ax.set_ylabel("")
 
                 fig_sc.suptitle(
-                    "Method B (mutation-level): observed mutation frequency vs PLM×mutation accessibility score\n"
+                    f"{model_tag}: Method B (mutation-level) — observed mutation frequency vs PLM×mutation accessibility score\n"
                     "row = pooled population, columns = alpha values"
                 )
                 plt.tight_layout(rect=(0, 0, 1, 0.95))
@@ -1782,6 +1901,20 @@ if RUN_POOLED_PANEL:
             "mut_flat_mean_site_nll",
         ]
         
+        # Consistent color mapping across plots
+        run_tags_order = [r["tag"] for r in MODEL_RUNS]
+        def _build_model_palette(from_df):
+            models_in_df = list(pd.Series(from_df["model"]).dropna().unique()) if len(from_df) > 0 else []
+            # Preserve user-specified run order where possible
+            model_order = [t for t in run_tags_order if t in models_in_df] + [m for m in models_in_df if m not in run_tags_order]
+            if len(model_order) == 0:
+                return {}, []
+            colors = sns.color_palette("tab10", n_colors=max(len(model_order), 3))
+            palette = {m: colors[i % len(colors)] for i, m in enumerate(model_order)}
+            return palette, model_order
+
+        model_palette, model_order = _build_model_palette(alpha_all_df)
+
         def plot_overlay(plot_df, file_suffix):
             if len(plot_df) == 0:
                 return
@@ -1790,7 +1923,8 @@ if RUN_POOLED_PANEL:
             for i, metric_col in enumerate(metric_cols):
                 ax = axes[i]
                 for model_tag, sub in plot_df.groupby("model"):
-                    ax.plot(sub["alpha"], sub[metric_col], marker="o", label=model_tag)
+                    color = model_palette.get(model_tag)
+                    ax.plot(sub["alpha"], sub[metric_col], marker="o", label=model_tag, color=color)
                     
                 if "mut_baseline_metrics" in locals() and metric_col in mut_baseline_metrics:
                     ax.axhline(mut_baseline_metrics[metric_col], color="black", linestyle="--", label="Mut Prob Only")
@@ -1871,6 +2005,8 @@ if RUN_POOLED_PANEL:
                     jitter=0.15,
                     size=7,
                     ax=ax,
+                    palette=model_palette,
+                    hue_order=model_order,
                 )
                 ax.axhline(0.0, linestyle="--", color="black", alpha=0.6)
                 ax.set_title(f"Per-group best alpha overlay\n{method_name}")
@@ -1897,3 +2033,6 @@ if RUN_POOLED_PANEL:
 
     
     # %%
+    print(outdir)
+    print(PLM_MAX_NT_LENGTH)
+# %%
