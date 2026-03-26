@@ -17,12 +17,10 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 # ---------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-MODEL_TAG = "ESM2-HA80"
-MODEL_TAG = "OG_ESM2_t36_3B"
-
-OUTPUT_SELECTOR = "full_H3N2_max10"
-TARGET_LINEAGE = "J.2"
-PANEL_MODEL_NAME = "full_plus_plm_mut_interaction"
+MODEL_TAG = "magma_ESMC_600M_99_95perc"
+OUTPUT_SELECTOR = ""
+TARGET_LINEAGE = "Jan25" # Example month to plot individually
+PANEL_MODEL_NAME = "SC2_monthly_glm"
 
 # Keep original modeling behavior
 MODEL_ENGINE = "binomial_glm"
@@ -37,7 +35,9 @@ DMS_IMPUTATION = "zero"  # "mean" | "zero"
 
 HIST_BINS = 35
 
-LINEAGE_PANEL_DIR = PROJECT_ROOT / "Results" / "test" / "lineage_panel_mutability_vs_plm" / "gisaidinc"
+# Adjusted for SC2 monthly aggregation output
+LINEAGE_PANEL_DIR = PROJECT_ROOT / "Sequences" / "SC2_month_snapshots" / "magma_ESMC_600M_99_95perc" / "mut_access_calcs" / "pooled_panel"
+# For other models, you would update the "magma_ESMC..." part above.
 DMS_DIR = PROJECT_ROOT / "Results" / "DMS_investigation"
 OUTDIR = PROJECT_ROOT / "Results" / "test" / "lineage_nested_glm"
 os.makedirs(OUTDIR, exist_ok=True)
@@ -59,11 +59,9 @@ def infer_dms_file(model_tag: str) -> Path:
 
 
 def load_lineage_combined(model_tag: str, output_selector: str) -> pd.DataFrame:
-    path = (
-        LINEAGE_PANEL_DIR
-        / model_tag
-        / f"lineage_combined_long_table_{output_selector}.csv"
-    )
+    # Matches the output of Mutational_accesibility_SC2.py
+    filename = "pooled_combined_long_table.csv" if output_selector == "" else f"pooled_combined_long_table_{output_selector}.csv"
+    path = LINEAGE_PANEL_DIR / model_tag / filename
     if not path.exists():
         raise FileNotFoundError(f"Lineage combined table not found: {path}")
     df = pd.read_csv(path)

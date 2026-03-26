@@ -15,12 +15,18 @@ from matplotlib.colors import LogNorm
 from scipy.stats import pearsonr, spearmanr
 from adjustText import adjust_text
 
-from Bio import SeqIO
+from Bio import SeqIO ,Align, pairwise2
 from Bio.Seq import Seq
 from Bio.Data import CodonTable
 import esm
 import torch
 from transformers import EsmForMaskedLM
+import glob
+import re
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
+import random
 
 # Access Functions
 try:
@@ -63,6 +69,7 @@ from Functions_HuggingFace import (
     load_lineage_diversity_fastas,
     bases, h1n1_transitions, h3n2_transitions, SC2_transitions, TRANSITION_MATRICES,
 )
+
 # # Run code
 
 # get fasta imported as nuc
@@ -85,16 +92,16 @@ GPU_REQUIRED = True
 
 # MODEL SELECTION: Choose which PLM model(s) to run and compare.
 # Options: "ESMC_600M", "ESMC_600M_FT_SC2_99clus", "ESM2_650M_FT", "ESM2_3B_OG"
-MODEL_SELECTION = ["ESMC_600M_OG","ESMC_600M_FT_SC2_99clus",]
+MODEL_SELECTION = ["ESMC_600M_FT_SC2_99clus","ESMC_600M_OG",]
 outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESMC_runs_aa'
 
 
 MODEL_SELECTION = ["sarbeco_SC2_FT_ESM2_650M_2023","ESM2_650M_OG","ESM2_3B_OG"]
-outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESM2_runs_aa_singles_rounded'
+outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESM2_runs_aa_singles_rounded/1022AA'
 PLM_MAX_AA_LENGTH=1022
 # TEST SETTINGS
 TEST_MODE = False
-TEST_MAX_RECORDS = 500
+TEST_MAX_RECORDS = 5
 
 # =====================================================================
 # II. DATA PATHS AND LIMITS
@@ -125,7 +132,7 @@ POOLED_DIVERSITY_FASTA = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapsh
 # Filtering
 FILTER_FIXED_MUTATIONS = True
 # Optionally filter out singleton mutations seen in only one sample (per-site count)
-FILTER_SINGLETON_MUTATIONS = True
+FILTER_SINGLETON_MUTATIONS = False
 SKIP_FILTER=False
 # Minimum observed counts required to include a mutation (default 2 -> exclude singletons)
 MIN_OBS_COUNT = 2
@@ -203,6 +210,134 @@ PLM_BASE_MODEL = primary_profile.get("base_model", "")
 PLM_MODEL_LAYER = primary_profile.get("layer", 0)
 PLM_CHECKPOINT_DIR = primary_profile.get("checkpoint_dir")
 FORCE_RECOMPUTE_PLM_MATRIX = primary_profile.get("force_recompute", False)
+
+def generate_verified_coordinate_map(ref_seq: str, target_seq: str) -> dict:
+    """
+    Generates a 0-based coordinate map from a reference sequence to a target sequence.
+    Uses free end gaps to prevent terminal missing data from causing frameshifts.
+    """
+    aligner = Align.PairwiseAligner()
+    aligner.mode = 'global'
+    aligner.match_score = 2
+    aligner.mismatch_score = -1
+    aligner.open_gap_score = -10
+    aligner.extend_gap_score = -0.5
+    
+    # Crucial for viral consensus sequences: do not penalise missing termini
+    aligner.target_end_gap_score = 0.0
+    aligner.query_end_gap_score = 0.0
+
+    alignments = aligner.align(ref_seq, target_seq)
+    best_aln = next(iter(alignments))
+    
+    coord_map = {}
+    ref_pos = 0
+    target_pos = 0
+    
+    for char_ref, char_tgt in zip(best_aln[0], best_aln[1]):
+        if char_ref != '-' and char_tgt != '-':
+            coord_map[ref_pos] = target_pos
+            ref_pos += 1
+            target_pos += 1
+        elif char_ref == '-':
+            target_pos += 1
+        elif char_tgt == '-':
+            ref_pos += 1
+            
+    return coord_map, best_aln
+
+def export_rolling_identity_plot(alignment, window_size=50, outdir=".", label=""):
+    """
+    Calculates and plots a rolling percentage identity between two aligned sequences.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    
+    # Extract gapped sequences from the alignment object
+    aln_ref, aln_tgt = alignment[0], alignment[1]
+    
+    identities = []
+    positions = []
+    
+    # Track the ungapped position of the reference sequence for the x-axis
+    ref_pos = 0 
+    
+    for i in range(len(aln_ref) - window_size + 1):
+        window_r = aln_ref[i:i+window_size]
+        window_t = aln_tgt[i:i+window_size]
+        
+        # Calculate matches, excluding positions where both are gaps
+        valid_pairs = [(r, t) for r, t in zip(window_r, window_t) if not (r == '-' and t == '-')]
+        if not valid_pairs:
+            identities.append(0.0)
+        else:
+            matches = sum(1 for r, t in valid_pairs if r == t)
+            identities.append((matches / len(valid_pairs)) * 100)
+        
+        # Advance sequence coordinate if reference is not a gap
+        if aln_ref[i] != '-':
+            ref_pos += 1
+            
+        positions.append(ref_pos)
+        
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(positions, identities, color='k', linewidth=1.5)
+    ax.set_title(f"Rolling Sequence Identity ({window_size}aa window) - {label}")
+    ax.set_xlabel("Focal Sequence Position")
+    ax.set_ylabel("% Identity")
+    ax.set_ylim(0, 105)
+    ax.grid(True, linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"rolling_identity_{label}.png"), dpi=300)
+    plt.close()
+
+
+def export_alignment_verification_plot(plm_matrix, ref_seq, target_seq, coord_map, month_label, outdir, max_cols=100):
+    """
+    Exports a heatmap showing the PLM top prediction vs the mapped sequences.
+    Includes type-safe lookups to prevent false 100% mismatch rates.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    plot_data = []
+
+    # Ensure we don't exceed the bounds of the sequence or the matrix
+    limit = min(max_cols, len(ref_seq), plm_matrix.shape[1])
+    for ref_pos in range(limit):
+        target_pos = coord_map.get(ref_pos, None)
+
+        # Bypass the index labels entirely using positional indexing
+        top_aa = plm_matrix.iloc[:, ref_pos].idxmax()
+
+        actual_ref_aa = ref_seq[ref_pos]
+        actual_tgt_aa = target_seq[target_pos] if target_pos is not None and target_pos < len(target_seq) else '-'
+
+        match_status = 1 if actual_tgt_aa == top_aa else 0
+
+        plot_data.append({
+            'Position': ref_pos + 1,
+            'PLM_Top': top_aa,
+            'Ref_AA': actual_ref_aa,
+            'Target_AA': actual_tgt_aa,
+            'Match': match_status
+        })
+
+    df = pd.DataFrame(plot_data)
+    
+    fig, ax = plt.subplots(figsize=(20, 4))
+    sns.heatmap([df['Match'].tolist()], cmap=['#e74c3c', '#2ecc71'], cbar=False, ax=ax, linewidths=0.5)
+    
+    for i in range(len(df)):
+        text = f"P:{df['PLM_Top'].iloc[i]}\nR:{df['Ref_AA'].iloc[i]}\nT:{df['Target_AA'].iloc[i]}"
+        ax.text(i + 0.5, 0.5, text, ha='center', va='center', fontsize=8, color='black')
+        
+    ax.set_xticks(np.arange(len(df)) + 0.5)
+    ax.set_xticklabels(df['Position'], rotation=90, fontsize=8)
+    ax.set_yticks([])
+    ax.set_title(f"PLM Prediction vs Sequences ({month_label})\nRed = Mismatch, Green = Match")
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"alignment_verification_{month_label}.png"), dpi=300)
+    plt.close()
 
 # Global in-memory cache for PLM probability matrices to avoid redundant computation
 # Key: (model_tag, reference_protein_sequence)
@@ -780,24 +915,17 @@ print(f"Processing {num_plm_cols} positions...")
 print("--- [COPILOT FIX] RE-CALCULATING MUTATIONAL MATRIX ---") # Proof of execution
 
 for j in range(num_plm_cols):
-    # Get column name/label in the dataframe
+    # Use pure positional indexing: the j-th column corresponds to the j-th residue
     col_idx = plm_matrix.columns[j]
     
-    # Map column index to 0-based sequence index
-    # Assuming col_idx is 1-based position (e.g. 1, 2, 3...)
-    try:
-        seq_idx = int(col_idx) - 1
-    except ValueError:
-        print(f"Skipping non-integer column: {col_idx}")
-        continue
-
+    # Bypass string parsing; the j-th column is natively the j-th sequence index
+    seq_idx = j 
+    
     # Bounds check
-    if seq_idx < 0 or seq_idx >= len(ref_nuc_seq) // 3:
-        # print(f"Column {col_idx} (SeqIdx {seq_idx}) out of bounds")
+    if seq_idx >= len(ref_nuc_seq) // 3:
         continue
 
     # Expected Amino Acid from PLM header (row 0 of original loaded df)
-    # The header row value at column j
     expected_aa = probability_matrix.iloc[0, j]
     
     # Codon range in nucleotide sequence
@@ -1230,24 +1358,6 @@ else:
 # %% [markdown]
 # # Pooled mutation accessibility vs PLM probability panel
 # %%
-import glob
-import re
-from pathlib import Path
-from Bio import pairwise2
-from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
-
-from Functions_HuggingFace import (
-    _extract_corr_pvalue,
-    _is_probably_nucleotide,
-    _tag_output_name,
-    _translate_nt_to_protein,
-    build_reference_to_alignment_column_map,
-    compute_lineage_mutation_profile,
-    compute_observed_diversity_profile_fast,
-    evaluate_alpha_sweep,
-)
-
 
 
 
@@ -1261,6 +1371,9 @@ OUTPUT_TAG = f"{RUN_MODE_TAG}_{_safe_label(POOLED_POPULATION_LABEL)}_{DIVERSITY_
 # %%
 if RUN_POOLED_PANEL:
     os.makedirs(POOLED_PANEL_OUTDIR, exist_ok=True)
+
+    # Flag set when any diversity/lineage sequences look like nucleotides
+    lineage_sequence_nucleotide_flag = False
 
     if "codon_mutation_df" not in globals() or "aa_to_codons" not in globals():
         # (Assuming these are global or passed in. In this case, we'll keep them global for simplicity)
@@ -1279,13 +1392,24 @@ if RUN_POOLED_PANEL:
         print(f"Loading diversity guide: {POOLED_DIVERSITY_GUIDE}")
         with open(POOLED_DIVERSITY_GUIDE, 'r') as f:
             reader = csv.DictReader(f)
-            for row in reader:
-                label = row.get('month') or row.get('label')
-                path = row.get('fasta') or row.get('path')
-                # Check for lineage-specific reference, fallback to global POOLED_REFERENCE_FASTA
-                ref_path = row.get('reference') or POOLED_REFERENCE_FASTA
-                if label and path:
-                    diversity_targets.append((label, path, ref_path))
+            if TEST_MODE:
+                # In test mode, only read the first data line (if any)
+                row = next(reader, None)
+                if row:
+                    label = row.get('month') or row.get('label')
+                    path = row.get('fasta') or row.get('path')
+                    # Check for lineage-specific reference, fallback to global POOLED_REFERENCE_FASTA
+                    ref_path = row.get('reference') or POOLED_REFERENCE_FASTA
+                    if label and path:
+                        diversity_targets.append((label, path, ref_path))
+            else:
+                for row in reader:
+                    label = row.get('month') or row.get('label')
+                    path = row.get('fasta') or row.get('path')
+                    # Check for lineage-specific reference, fallback to global POOLED_REFERENCE_FASTA
+                    ref_path = row.get('reference') or POOLED_REFERENCE_FASTA
+                    if label and path:
+                        diversity_targets.append((label, path, ref_path))
     elif ANALYSIS_MODE == "SINGLE_FASTA":
         diversity_targets.append((POOLED_POPULATION_LABEL, POOLED_DIVERSITY_FASTA, POOLED_REFERENCE_FASTA))
     else:
@@ -1335,6 +1459,18 @@ if RUN_POOLED_PANEL:
 
         if TEST_MODE:
             records = records[:TEST_MAX_RECORDS]
+        # Detect nucleotide-like diversity sequences when we expect protein sequences
+        if EXPECT_PROTEIN_DIVERSITY:
+            try:
+                any_nuc = any(_is_probably_nucleotide_sequence(str(rec.seq)) for rec in records)
+            except Exception:
+                any_nuc = False
+            if any_nuc:
+                lineage_sequence_nucleotide_flag = True
+                banner = "\n" + "!" * 80 + "\n" + (
+                    "WARNING: INPUT DIVERSITY SEQUENCES APPEAR TO BE NUCLEOTIDES, NOT AMINO ACIDS"
+                ) + "\n" + "!" * 80 + "\n"
+                print(banner)
             
         # Ensure records are protein for the alignment comparison
       # Ensure records are protein for the alignment comparison
@@ -1510,39 +1646,41 @@ if RUN_POOLED_PANEL:
             # Assuming 'focal_protein_seq' is your global root reference that generated the PLM
             global_to_monthly_map = {}
             if USE_GLOBAL_PLM_REFERENCE:
-                from Bio import Align
-                aligner = Align.PairwiseAligner()
-                aligner.mode = 'global'
-                aligner.match_score = 2
-                aligner.mismatch_score = -1
-                aligner.open_gap_score = -10
-                aligner.extend_gap_score = -0.5
+                try:
+                    # Uses the robust generator we set up previously
+                    global_to_monthly_map, alignment_obj = generate_verified_coordinate_map(focal_protein_seq, plm_ref_protein)
 
-                # Align global PLM reference to the current monthly reference
-                aln = next(iter(aligner.align(focal_protein_seq, plm_ref_protein)))
-                
-                global_pos = 0
-                monthly_pos = 0
-                
-                # Extract coordinate mapping from alignment trajectory
-                for char_g, char_m in zip(aln[0], aln[1]):
-                    if char_g != '-' and char_m != '-':
-                        global_to_monthly_map[global_pos] = monthly_pos
-                        global_pos += 1
-                        monthly_pos += 1
-                    elif char_g == '-':
-                        monthly_pos += 1
-                    elif char_m == '-':
-                        global_pos += 1
+                    verify_dir = os.path.join(model_outdir, "alignment_verifications")
+                    
+                    # 1. Generate the type-safe verification heatmap
+                    export_alignment_verification_plot(
+                        plm_matrix=plm_matrix,
+                        ref_seq=focal_protein_seq,
+                        target_seq=plm_ref_protein,
+                        coord_map=global_to_monthly_map,
+                        month_label=lineage,
+                        outdir=verify_dir,
+                    )
+                    
+                    # 2. Generate the rolling % identity curve
+                    export_rolling_identity_plot(
+                        alignment=alignment_obj,
+                        window_size=30, # Adjustable window 
+                        outdir=verify_dir,
+                        label=lineage
+                    )
+
+                    # Calculate a simple metric for sanity checking
+                    mapped_target_aas = [plm_ref_protein[global_to_monthly_map[i]] for i in range(len(focal_protein_seq)) if i in global_to_monthly_map]
+                    print(f"[{lineage}] Mapping complete. Captured {len(mapped_target_aas)} aligned residues.")
+                except Exception as exc:
+                    print(f"[{lineage}] Alignment failed: {exc}")
+            
 
             # --- ROBUST COORDINATE MAPPING ---
-            for pos_label in plm_matrix.columns:
-                try:
-                    pos_plm_1 = int(pos_label) # 1-based index in PLM reference
-                except (TypeError, ValueError):
-                    continue
-                
-                pos_plm_0 = pos_plm_1 - 1
+            for j, pos_label in enumerate(plm_matrix.columns):
+                # j is the guaranteed 0-based column index
+                pos_plm_0 = j
                 
                 # Transpose coordinates using the alignment map
                 if USE_GLOBAL_PLM_REFERENCE:
@@ -1572,7 +1710,10 @@ if RUN_POOLED_PANEL:
                     if aa not in data["mut_profile"].index or aa not in data["obs_freq"].index:
                         continue
 
-                    plm_prob = float(plm_matrix.loc[aa, pos_label])
+                    # Use .iloc to fetch by absolute coordinate rather than label
+                    row_idx = plm_matrix.index.get_loc(aa)
+                    plm_prob = float(plm_matrix.iloc[row_idx, j])
+                    
                     mut_prob = float(data["mut_profile"].loc[aa, pos_full_1])
                     obs = float(data["obs_freq"].loc[aa, pos_full_1])
                     
@@ -2024,6 +2165,13 @@ if RUN_POOLED_PANEL:
                 dpi=300,
             )
             plt.close()
+
+        # Closing banner if nucleotide-like sequences were detected earlier
+        if 'lineage_sequence_nucleotide_flag' in globals() and lineage_sequence_nucleotide_flag:
+            end_banner = "\n" + "!" * 80 + "\n" + (
+                "END WARNING: INPUT DIVERSITY SEQUENCES WERE DETECTED AS NUCLEOTIDES"
+            ) + "\n" + "!" * 80 + "\n"
+            print(end_banner)
 
         print("\nPooled panel complete.")
         print(f"Saved outputs in: {POOLED_PANEL_OUTDIR}")
