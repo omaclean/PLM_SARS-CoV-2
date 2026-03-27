@@ -126,6 +126,39 @@ def test_load_single_focal_reference():
         assert res["nucleotide"] == "ATGGTGTAA"
         assert res["protein"] == "MV"
 
+
+    def test_reference_sequence_validity():
+        # Create a dummy fasta with nucleotide length multiple of 3
+        dummy_fasta = "/tmp/dummy_valid_ref.fasta"
+        with open(dummy_fasta, "w") as f:
+            f.write(">valid_ref\nATGGCC\n")
+
+        res = _load_single_focal_reference(dummy_fasta, "lineage_test")
+
+        # Nucleotide length must be multiple of 3
+        assert len(res["nucleotide"]) % 3 == 0
+
+        # Protein translation must not contain unknowns ('X') or alignment gaps ('-')
+        assert "X" not in res["protein"]
+        assert "-" not in res["protein"]
+
+
+    def test_lineage_sequences_are_detected_as_nucleotide(tmp_path):
+        # Create a dummy diversity fasta with sequences that are nucleotide-like
+        fasta = tmp_path / "diversity_nuc_like.fasta"
+        fasta.write_text(">s1\nATGATGATG\n>s2\nATGCCC\n")
+
+        records = list(SeqIO.parse(str(fasta), "fasta"))
+        assert len(records) == 2
+        # Should detect nucleotide-like content
+        assert any(_is_probably_nucleotide_sequence(str(rec.seq)) for rec in records)
+
+
+    def test_lineage_sequences_not_detected_for_protein():
+        # Create protein-like records and ensure detection is False
+        prot_recs = [SeqRecord(Seq("ACDEFGHIK"), id="p1"), SeqRecord(Seq("LMNPQRSTV"), id="p2")]
+        assert not any(_is_probably_nucleotide_sequence(str(rec.seq)) for rec in prot_recs)
+
 def test_ensure_plm_probability_matrix_cache():
     # Test that it uses cache
     cache = {("model1", "seq1"): {"mutation_matrix": [[0.5]], "amino_acids": ["A"], "positions": ["0"], "sequence": "A"}}

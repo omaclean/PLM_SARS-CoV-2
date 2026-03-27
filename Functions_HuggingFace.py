@@ -2507,8 +2507,14 @@ def compute_observed_diversity_profile_fast(records, reference_protein: str, ref
 
         compared_sites += 1
         ref_aa = reference_protein[pos1 - 1]
-        has_any_difference = bool(np.any(residues != ref_aa))
-        has_fixed_difference = bool(np.all(residues != ref_aa))
+        # Treat unknown reference characters (e.g., 'X') as non-informative reference:
+        # do not count observed residues as real differences when the reference is 'X'.
+        if isinstance(ref_aa, str) and ref_aa.upper() == 'X':
+            has_any_difference = False
+            has_fixed_difference = False
+        else:
+            has_any_difference = bool(np.any(residues != ref_aa))
+            has_fixed_difference = bool(np.all(residues != ref_aa))
         if has_any_difference:
             differing_sites += 1
         if has_fixed_difference:

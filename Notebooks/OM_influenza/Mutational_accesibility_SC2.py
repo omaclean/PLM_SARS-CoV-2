@@ -67,7 +67,7 @@ from Functions_HuggingFace import (
     get_mutation_prob_matrix,
     parse_lineage_references,
     load_lineage_diversity_fastas,
-    bases, h1n1_transitions, h3n2_transitions, SC2_transitions, TRANSITION_MATRICES,
+    bases, TRANSITION_MATRICES,
 )
 
 # # Run code
@@ -89,17 +89,46 @@ from Functions_HuggingFace import (
 # GPU SAFETY: Set to True to error if no CUDA is available. 
 GPU_REQUIRED = True
 
+# ANALYSIS MODE:
+# "MONTHLY_GUIDE" -> Processes multiple snapshots from POOLED_DIVERSITY_GUIDE CSV.
+# "SINGLE_FASTA"  -> Processes only the file in POOLED_DIVERSITY_FASTA.
+# if in single fasta mode, months/ lineages
+ANALYSIS_MODE = "MONTHLY_GUIDE"
+# Guide CSV mapping months to FASTA paths (used if ANALYSIS_MODE == "MONTHLY_GUIDE")
+POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/spike_month_file_guide.csv"
+
+# Focal reference sequence (nucleotide)
+fasta_file = '/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/Jan25/rootseq_CM7YG5RN.fa'
+base_lineage_id = '?'
+
 
 # MODEL SELECTION: Choose which PLM model(s) to run and compare.
 # Options: "ESMC_600M", "ESMC_600M_FT_SC2_99clus", "ESM2_650M_FT", "ESM2_3B_OG"
+
+FILTER_SINGLETON_MUTATIONS = False
+
+NUCLEOTIDE_MUTATION_MODEL = "SC2"
+
 MODEL_SELECTION = ["ESMC_600M_FT_SC2_99clus","ESMC_600M_OG",]
 outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESMC_runs_aa'
+PLM_MAX_AA_LENGTH=1522
 
+#SC2 ESM2 block
+# MODEL_SELECTION = ["sarbeco_SC2_FT_ESM2_650M_2023","ESM2_650M_OG","ESM2_3B_OG"]
+# outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESM2_runs_aa_singles_rounded/1022AA'
+# PLM_MAX_AA_LENGTH=1022
 
-MODEL_SELECTION = ["sarbeco_SC2_FT_ESM2_650M_2023","ESM2_650M_OG","ESM2_3B_OG"]
-outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESM2_runs_aa_singles_rounded/1022AA'
-PLM_MAX_AA_LENGTH=1022
+#IAV block
+NUCLEOTIDE_MUTATION_MODEL = "H3N2"
+
+POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv"
+fasta_file = '/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_files/J_int.nt.fa'
+MODEL_SELECTION = ["IAV_Spyros_finetuned_HA80","ESM2_650M_OG","ESM2_3B_OG"]
+outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_files/IAV_model_comparison_aa'
+
 # TEST SETTINGS
+
+
 TEST_MODE = False
 TEST_MAX_RECORDS = 5
 
@@ -110,29 +139,19 @@ TEST_MAX_RECORDS = 5
 # PLM sequence length limits
 PLM_MAX_NT_LENGTH = None
 
-# Focal reference sequence (nucleotide)
-fasta_file = '/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/Jan25/rootseq_CM7YG5RN.fa'
-base_lineage_id = '?'
 
-# ANALYSIS MODE:
-# "MONTHLY_GUIDE" -> Processes multiple snapshots from POOLED_DIVERSITY_GUIDE CSV.
-# "SINGLE_FASTA"  -> Processes only the file in POOLED_DIVERSITY_FASTA.
-ANALYSIS_MODE = "MONTHLY_GUIDE"
 # Set to True to strictly parse diversity FASTA files as protein, bypassing heuristics.
 EXPECT_PROTEIN_DIVERSITY = True 
 
 # Set to True to project a single global PLM matrix onto monthly diversity references
-USE_GLOBAL_PLM_REFERENCE = True
-# Guide CSV mapping months to FASTA paths (used if ANALYSIS_MODE == "MONTHLY_GUIDE")
-POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/spike_month_file_guide.csv"
+USE_GLOBAL_PLM_REFERENCE = False
 
-# Single diversity FASTA (used if ANALYSIS_MODE == "SINGLE_FASTA")
-POOLED_DIVERSITY_FASTA = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/spike_2025-06_aa.fa"
+
 
 # Filtering
 FILTER_FIXED_MUTATIONS = True
 # Optionally filter out singleton mutations seen in only one sample (per-site count)
-FILTER_SINGLETON_MUTATIONS = False
+
 SKIP_FILTER=False
 # Minimum observed counts required to include a mutation (default 2 -> exclude singletons)
 MIN_OBS_COUNT = 2
@@ -155,7 +174,13 @@ MODEL_PROFILES = {
         "checkpoint_dir": "/home3/oml4h/my_SC2_finetunes/magma_ESMC_600M_99_95perc/",
         "force_recompute": True,
     },
-    
+    "IAV_Spyros_finetuned_HA80": {
+        "tag": "IAV_Spyros_finetuned_HA80",
+        "base_model": "esm2_t33_650M_UR50D",
+        "layer": 33,
+        "checkpoint_dir": "/home3/oml4h/hugging_face_downloads/model_weights_topublish/ESM2-HA80/",
+        "force_recompute": False,
+    },
     "sarbeco_SC2_FT_ESM2_650M_2023": {
         "tag": "sarbeco_SC2_FT_ESM2_650M_2023",
         "base_model": "esm2_t33_650M_UR50D",
@@ -367,12 +392,19 @@ if "esmc" in PLM_BASE_MODEL.lower() or "esm-c" in PLM_BASE_MODEL.lower():
 # Pooled Population Settings
 RUN_POOLED_PANEL = True
 POOLED_POPULATION_LABEL = os.path.splitext(os.path.basename(fasta_file))[0]
-NUCLEOTIDE_MUTATION_MODEL = "SC2"
 
 # Comparison sequence settings for plots
-OBSERVED_MUTATION_FASTA = POOLED_DIVERSITY_FASTA if ANALYSIS_MODE == "SINGLE_FASTA" else None
+# Only set the observed-mutation comparison FASTA when running in SINGLE_FASTA mode.
+if ANALYSIS_MODE == "SINGLE_FASTA":
+    OBSERVED_MUTATION_FASTA = POOLED_DIVERSITY_FASTA if POOLED_DIVERSITY_FASTA else None
+elif ANALYSIS_MODE == "MONTHLY_GUIDE":
+    # In MONTHLY_GUIDE mode we don't have a single observed-mutation fasta by default.
+    OBSERVED_MUTATION_FASTA = None
+else:
+    OBSERVED_MUTATION_FASTA = POOLED_DIVERSITY_FASTA if POOLED_DIVERSITY_FASTA else None
+
 OBSERVED_MUTATION_SEQUENCE_ID = None
-OBSERVED_MUTATION_SELECTION = "last" 
+OBSERVED_MUTATION_SELECTION = "last"
 
 nuc_sequences = list(SeqIO.parse(fasta_file, "fasta"))
 seq_keys = [record.id for record in nuc_sequences]
@@ -1362,7 +1394,17 @@ else:
 
 
 RUN_MODE_TAG = "test" if TEST_MODE else "full"
-DIVERSITY_PATTERN_TAG = _clean_pattern_tag(Path(POOLED_DIVERSITY_FASTA).stem)
+# Derive diversity pattern tag from the active analysis mode so the script
+# does not implicitly require the other (unused) path to be defined.
+if ANALYSIS_MODE == "MONTHLY_GUIDE" and POOLED_DIVERSITY_GUIDE:
+    _pattern_source = POOLED_DIVERSITY_GUIDE
+elif ANALYSIS_MODE == "SINGLE_FASTA" and POOLED_DIVERSITY_FASTA:
+    _pattern_source = POOLED_DIVERSITY_FASTA
+else:
+    # Fallback to the pooled population label when no path is provided
+    _pattern_source = POOLED_POPULATION_LABEL
+
+DIVERSITY_PATTERN_TAG = _clean_pattern_tag(Path(str(_pattern_source)).stem)
 OUTPUT_TAG = f"{RUN_MODE_TAG}_{_safe_label(POOLED_POPULATION_LABEL)}_{DIVERSITY_PATTERN_TAG}"
 
 
@@ -1941,9 +1983,10 @@ if RUN_POOLED_PANEL:
 
                         corr_result = spearmanr(x_vals, y_vals)
                         corr_r, _ = _extract_corr_pvalue(corr_result)
+                        n_mut_obs = int(lineage_scatter_df["obs_freq"].gt(0).sum())
                         ax.set_title(
                             f"alpha={alpha_value:.2f}\n"
-                            f"ρ={corr_r:.3f}, n_mut={len(lineage_scatter_df)}, n_seq={n_seq_lineage}"
+                            f"ρ={corr_r:.3f}, n_mut={n_mut_obs}, n_seq={n_seq_lineage}"
                         )
                         ax.grid(alpha=0.25)
 

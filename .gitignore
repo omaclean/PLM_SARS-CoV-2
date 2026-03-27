@@ -6,3 +6,7 @@ Sequences/gisaid_data
 Sequences/gisaid_data/*
 Sequences/om_list_cluster_db*
 Sequences/SC2_month_snapshots
+dev
+Sequences/IAV_lineage_files
+Sequences/gisaid_and_genbank_data
+Sequences
