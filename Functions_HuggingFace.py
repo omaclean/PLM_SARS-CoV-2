@@ -2675,6 +2675,7 @@ def softmax_from_log_scores(log_scores: np.ndarray) -> np.ndarray:
     return ex / denom
 
 
+
 def _extract_corr_pvalue(result):
     """Return (correlation, pvalue) from scipy result object or tuple."""
     try:
@@ -2685,15 +2686,50 @@ def _extract_corr_pvalue(result):
         return float(corr), float(pval)
 
 
+def _safe_corr_pair(method, x, y):
+    """Return correlation and p-value, guarding against empty or constant inputs."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y)
+    if np.count_nonzero(valid) < 2:
+        return np.nan, np.nan
+
+    x_valid = x[valid]
+    y_valid = y[valid]
+    if np.nanstd(x_valid) == 0 or np.nanstd(y_valid) == 0:
+        return np.nan, np.nan
+
+    return _extract_corr_pvalue(method(x_valid, y_valid))
+
+
 def _evaluate_single_alpha(alpha: float, base_df: pd.DataFrame, pseudocount: float = 1e-6) -> dict:
     from scipy.stats import spearmanr, pearsonr
     working = base_df.copy()
     working["combined_log_score"] = working["log_plm"] + alpha * working["log_mut"]
 
-    global_spearman = spearmanr(working["combined_log_score"], working["obs_freq"])
-    global_pearson = pearsonr(working["combined_log_score"], working["obs_freq"])
-    sp_r, sp_p = _extract_corr_pvalue(global_spearman)
-    pr_r, pr_p = _extract_corr_pvalue(global_pearson)
+    score_vals = working["combined_log_score"].to_numpy(dtype=float)
+    obs_freq_vals = working["obs_freq"].to_numpy(dtype=float)
+    nonzero_mask = obs_freq_vals > 0
+
+    sp_r, sp_p = _safe_corr_pair(spearmanr, score_vals, obs_freq_vals)
+    pr_r, pr_p = _safe_corr_pair(pearsonr, score_vals, obs_freq_vals)
+    nonzero_sp_r, nonzero_sp_p = _safe_corr_pair(
+        spearmanr,
+        score_vals[nonzero_mask],
+        obs_freq_vals[nonzero_mask],
+    )
+    nonzero_pr_r, nonzero_pr_p = _safe_corr_pair(
+        pearsonr,
+        score_vals[nonzero_mask],
+        obs_freq_vals[nonzero_mask],
+    )
+    log_obs_freq_vals = np.log(np.clip(obs_freq_vals, pseudocount, None))
+    log_pr_r, log_pr_p = _safe_corr_pair(pearsonr, score_vals, log_obs_freq_vals)
+    log_nonzero_pr_r, log_nonzero_pr_p = _safe_corr_pair(
+        pearsonr,
+        score_vals[nonzero_mask],
+        np.log(obs_freq_vals[nonzero_mask]) if np.any(nonzero_mask) else np.array([]),
+    )
 
     top_frac = 0.05
     n_top = max(1, int(len(working) * top_frac))
@@ -2753,6 +2789,14 @@ def _evaluate_single_alpha(alpha: float, base_df: pd.DataFrame, pseudocount: flo
         "mut_flat_global_spearman_p": float(sp_p) if np.isfinite(sp_p) else np.nan,
         "mut_flat_global_pearson_r": float(pr_r) if np.isfinite(pr_r) else np.nan,
         "mut_flat_global_pearson_p": float(pr_p) if np.isfinite(pr_p) else np.nan,
+        "mut_flat_nonzero_spearman_r": float(nonzero_sp_r) if np.isfinite(nonzero_sp_r) else np.nan,
+        "mut_flat_nonzero_spearman_p": float(nonzero_sp_p) if np.isfinite(nonzero_sp_p) else np.nan,
+        "mut_flat_nonzero_pearson_r": float(nonzero_pr_r) if np.isfinite(nonzero_pr_r) else np.nan,
+        "mut_flat_nonzero_pearson_p": float(nonzero_pr_p) if np.isfinite(nonzero_pr_p) else np.nan,
+        "mut_flat_logfreq_global_pearson_r": float(log_pr_r) if np.isfinite(log_pr_r) else np.nan,
+        "mut_flat_logfreq_global_pearson_p": float(log_pr_p) if np.isfinite(log_pr_p) else np.nan,
+        "mut_flat_logfreq_nonzero_pearson_r": float(log_nonzero_pr_r) if np.isfinite(log_nonzero_pr_r) else np.nan,
+        "mut_flat_logfreq_nonzero_pearson_p": float(log_nonzero_pr_p) if np.isfinite(log_nonzero_pr_p) else np.nan,
         "mut_flat_top5pct_enrichment": float(top_enrichment) if np.isfinite(top_enrichment) else np.nan,
         "mut_flat_mean_site_nll": float(np.mean(site_nlls)) if len(site_nlls) > 0 else np.nan,
         "mut_flat_median_site_spearman": float(np.median(site_rhos)) if len(site_rhos) > 0 else np.nan,
