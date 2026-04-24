@@ -1,0 +1,746 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_PATH = PROJECT_ROOT / "scripts" / "run_mutational_accessibility.py"
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+spec = importlib.util.spec_from_file_location("run_mutational_accessibility", SCRIPT_PATH)
+mut_script = importlib.util.module_from_spec(spec)
+assert spec is not None and spec.loader is not None
+spec.loader.exec_module(mut_script)
+
+
+def write_fasta(path: Path, records: list[tuple[str, str]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for name, sequence in records:
+            handle.write(f">{name}\n{sequence}\n")
+
+
+def write_precomputed_plm(path: Path) -> None:
+    matrix = pd.DataFrame(
+        [
+            ["M", "A", "E"],
+            [0.10, 0.60, 0.10],
+            [0.10, 0.20, 0.10],
+            [0.10, 0.15, 0.10],
+            [0.10, 0.10, 0.70],
+            [0.70, 0.10, 0.10],
+        ],
+        index=["sequence", "A", "S", "T", "E", "M"],
+    )
+    matrix.to_csv(path, header=False)
+
+
+def build_toy_monthly_guide_inputs(tmp_path: Path) -> dict[str, Path]:
+    reference_fasta = tmp_path / "reference.nt.fa"
+    diversity_fasta = tmp_path / "diversity.fasta"
+    guide_path = tmp_path / "guide.csv"
+    plm_path = tmp_path / "toy_plm.csv"
+    output_dir = tmp_path / "outputs"
+
+    write_fasta(reference_fasta, [("toy_ref", "ATGGCTGAA")])
+    write_fasta(
+        diversity_fasta,
+        [
+            ("seq1", "MAE"),
+            ("seq2", "MSE"),
+            ("seq3", "MTE"),
+        ],
+    )
+    guide_path.write_text(
+        "month,fasta,reference\n"
+        f"toy_lineage,{diversity_fasta},{reference_fasta}\n",
+        encoding="utf-8",
+    )
+    write_precomputed_plm(plm_path)
+
+    return {
+        "reference_fasta": reference_fasta,
+        "diversity_fasta": diversity_fasta,
+        "guide_path": guide_path,
+        "plm_path": plm_path,
+        "output_dir": output_dir,
+    }
+
+
+class TestValidateArgs:
+    def test_requires_single_fasta_inputs(self, tmp_path: Path):
+        parser = mut_script.build_parser()
+        args = parser.parse_args(
+            [
+                "--analysis-mode",
+                "SINGLE_FASTA",
+                "--mutation-model",
+                "H3N2",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--precomputed-plm-path",
+                str(tmp_path / "plm.csv"),
+            ]
+        )
+
+        with pytest.raises(ValueError, match="--diversity-fasta is required"):
+            mut_script.validate_args(args)
+
+    def test_rejects_conflicting_checkpoint_options(self, tmp_path: Path):
+        parser = mut_script.build_parser()
+        args = parser.parse_args(
+            [
+                "--analysis-mode",
+                "MONTHLY_GUIDE",
+                "--guide-path",
+                str(tmp_path / "guide.csv"),
+                "--mutation-model",
+                "H3N2",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--model-tag",
+                "toy",
+                "--base-model",
+                "esm-c600m",
+                "--model-layer",
+                "36",
+                "--checkpoint-dir",
+                str(tmp_path / "checkpoints"),
+                "--checkpoint-glob",
+                str(tmp_path / "checkpoints/checkpoint-*"),
+            ]
+        )
+
+        with pytest.raises(ValueError, match="Provide either --checkpoint-dir or --checkpoint-glob"):
+            mut_script.validate_args(args)
+
+    def test_rejects_non_positive_alpha_step(self, tmp_path: Path):
+        parser = mut_script.build_parser()
+        args = parser.parse_args(
+            [
+                "--analysis-mode",
+                "MONTHLY_GUIDE",
+                "--guide-path",
+                str(tmp_path / "guide.csv"),
+                "--mutation-model",
+                "H3N2",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--precomputed-plm-path",
+                str(tmp_path / "plm.csv"),
+                "--alpha-step",
+                "0",
+            ]
+        )
+
+        with pytest.raises(ValueError, match="--alpha-step must be > 0"):
+            mut_script.validate_args(args)
+
+
+class TestHelpers:
+    def test_parse_scatter_alphas_handles_empty_and_values(self):
+        assert mut_script.parse_scatter_alphas("") == []
+        assert mut_script.parse_scatter_alphas("-1, 0, 1.5") == [-1.0, 0.0, 1.5]
+
+    def test_infer_epoch_value_extracts_trailing_numeric_token(self):
+        assert mut_script.infer_epoch_value("checkpoint-525", 0) == 525.0
+        assert mut_script.infer_epoch_value("epoch_12.5", 0) == 12.5
+        assert mut_script.infer_epoch_value("final_checkpoint", 7) == 7.0
+
+    def test_load_diversity_records_translates_nucleotide_when_requested(self, tmp_path: Path):
+        fasta_path = tmp_path / "diversity_nt.fasta"
+        write_fasta(fasta_path, [("nt1", "ATGGCTGAA"), ("nt2", "ATGTCTGAA")])
+
+        records, any_nucleotide = mut_script.load_diversity_records(
+            fasta_path,
+            expect_protein_diversity=False,
+            test_mode=False,
+            test_max_records=5,
+        )
+
+        assert any_nucleotide is True
+        assert [str(record.seq) for record in records] == ["MAE", "MSE"]
+
+
+class TestBuildModelSpecs:
+    def test_uses_precomputed_plm_path_directly(self, tmp_path: Path):
+        plm_path = tmp_path / "toy_plm.csv"
+        plm_path.write_text("sequence,M\nA,1.0\n", encoding="utf-8")
+        parser = mut_script.build_parser()
+        args = parser.parse_args(
+            [
+                "--analysis-mode",
+                "MONTHLY_GUIDE",
+                "--guide-path",
+                str(tmp_path / "guide.csv"),
+                "--mutation-model",
+                "H3N2",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--precomputed-plm-path",
+                str(plm_path),
+            ]
+        )
+
+        specs = mut_script.build_model_specs(args)
+
+        assert len(specs) == 1
+        assert specs[0]["precomputed_plm_path"] == plm_path
+        assert specs[0]["epoch_label"] == "toy_plm"
+
+    def test_discovers_child_checkpoint_directories(self, tmp_path: Path):
+        checkpoint_root = tmp_path / "model"
+        (checkpoint_root / "checkpoint-10").mkdir(parents=True)
+        (checkpoint_root / "checkpoint-10" / "model.safetensors").write_text("", encoding="utf-8")
+        (checkpoint_root / "checkpoint-2").mkdir(parents=True)
+        (checkpoint_root / "checkpoint-2" / "model.safetensors").write_text("", encoding="utf-8")
+        (checkpoint_root / "final_checkpoint").mkdir(parents=True)
+        (checkpoint_root / "final_checkpoint" / "model.safetensors").write_text("", encoding="utf-8")
+
+        parser = mut_script.build_parser()
+        args = parser.parse_args(
+            [
+                "--analysis-mode",
+                "MONTHLY_GUIDE",
+                "--guide-path",
+                str(tmp_path / "guide.csv"),
+                "--mutation-model",
+                "H3N2",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--model-tag",
+                "toy",
+                "--base-model",
+                "esm-c600m",
+                "--model-layer",
+                "36",
+                "--checkpoint-dir",
+                str(checkpoint_root),
+            ]
+        )
+
+        specs = mut_script.build_model_specs(args)
+
+        assert [spec["epoch_label"] for spec in specs] == ["checkpoint-2", "checkpoint-10", "final_checkpoint"]
+        assert [spec["epoch_value"] for spec in specs] == [2.0, 10.0, pytest.approx(float(sys.maxsize), rel=0, abs=0)]
+
+    def test_supports_checkpoint_glob(self, tmp_path: Path):
+        checkpoint_root = tmp_path / "model"
+        (checkpoint_root / "checkpoint-4").mkdir(parents=True)
+        (checkpoint_root / "checkpoint-8").mkdir(parents=True)
+
+        parser = mut_script.build_parser()
+        args = parser.parse_args(
+            [
+                "--analysis-mode",
+                "MONTHLY_GUIDE",
+                "--guide-path",
+                str(tmp_path / "guide.csv"),
+                "--mutation-model",
+                "H3N2",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--model-tag",
+                "toy",
+                "--base-model",
+                "esm-c600m",
+                "--model-layer",
+                "36",
+                "--checkpoint-glob",
+                str(checkpoint_root / "checkpoint-*"),
+            ]
+        )
+
+        specs = mut_script.build_model_specs(args)
+
+        assert [spec["epoch_label"] for spec in specs] == ["checkpoint-4", "checkpoint-8"]
+
+
+class TestMainErrors:
+    def test_main_reports_missing_guide_path(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run_mutational_accessibility.py",
+                "--analysis-mode",
+                "MONTHLY_GUIDE",
+                "--mutation-model",
+                "H3N2",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--precomputed-plm-path",
+                str(tmp_path / "plm.csv"),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            mut_script.main()
+
+        assert exc_info.value.code == 2
+        assert "--guide-path is required for MONTHLY_GUIDE mode" in capsys.readouterr().err
+
+    def test_main_reports_missing_guide_file(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path):
+        plm_path = tmp_path / "plm.csv"
+        write_precomputed_plm(plm_path)
+        missing_guide = tmp_path / "missing_guide.csv"
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run_mutational_accessibility.py",
+                "--analysis-mode",
+                "MONTHLY_GUIDE",
+                "--guide-path",
+                str(missing_guide),
+                "--mutation-model",
+                "H3N2",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--precomputed-plm-path",
+                str(plm_path),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            mut_script.main()
+
+        assert exc_info.value.code == 2
+        assert f"Guide file not found: {missing_guide}" in capsys.readouterr().err
+
+
+class TestIntegration:
+    def test_run_analysis_monthly_guide_with_precomputed_plm(self, tmp_path: Path):
+        inputs = build_toy_monthly_guide_inputs(tmp_path)
+        parser = mut_script.build_parser()
+        args = parser.parse_args(
+            [
+                "--analysis-mode",
+                "MONTHLY_GUIDE",
+                "--guide-path",
+                str(inputs["guide_path"]),
+                "--mutation-model",
+                "H3N2",
+                "--output-dir",
+                str(inputs["output_dir"]),
+                "--expect-protein-diversity",
+                "--precomputed-plm-path",
+                str(inputs["plm_path"]),
+                "--alpha-start",
+                "0",
+                "--alpha-stop",
+                "0",
+                "--alpha-step",
+                "1",
+                "--scatter-alphas",
+                "0",
+                "--scatter-max-points",
+                "1000",
+                "--no-alpha-parallel",
+            ]
+        )
+
+        mut_script.validate_args(args)
+        exit_code = mut_script.run_analysis(args)
+
+        assert exit_code == 0
+        combined_path = inputs["output_dir"] / "tables" / "combined_long_table.csv"
+        status_path = inputs["output_dir"] / "tables" / "model_run_status.tsv"
+        manifest_path = inputs["output_dir"] / "run_manifest.json"
+        plot_path = inputs["output_dir"] / "plots" / "epoch_metric_summary.png"
+
+        assert combined_path.exists()
+        assert manifest_path.exists()
+        assert status_path.exists()
+        assert plot_path.exists()
+
+        combined_df = pd.read_csv(combined_path)
+        status_df = pd.read_csv(status_path, sep="\t")
+
+        assert not combined_df.empty
+        assert set(["model", "epoch_label", "lineage", "plm_prob", "mut_prob", "obs_freq"]).issubset(combined_df.columns)
+        assert (status_df["status"] == "completed").any()
+import argparse
+import importlib.util
+import sys
+import types
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_PATH = REPO_ROOT / "scripts" / "run_mutational_accessibility.py"
+
+
+def _load_script_module():
+    module_name = "run_mutational_accessibility"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+
+    spec = importlib.util.spec_from_file_location(module_name, SCRIPT_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+rma = _load_script_module()
+
+
+def _make_args(**overrides):
+    base = dict(
+        analysis_mode="MONTHLY_GUIDE",
+        reference_fasta=None,
+        diversity_fasta=None,
+        guide_path=Path("guide.csv"),
+        label="population",
+        mutation_model="H3N2",
+        output_dir=Path("out"),
+        expect_protein_diversity=False,
+        plm_max_aa_length=None,
+        plm_max_nt_length=None,
+        filter_fixed_mutations=True,
+        filter_singleton_mutations=False,
+        skip_low_count_sites=False,
+        min_obs_count=2,
+        alpha_start=-1.0,
+        alpha_stop=1.0,
+        alpha_step=0.1,
+        alpha_parallel=True,
+        alpha_sweep_min_grid=8,
+        alpha_sweep_max_workers=None,
+        scatter_alphas="-1,0,1",
+        scatter_max_points=200000,
+        test_mode=False,
+        test_max_targets=1,
+        test_max_records=5,
+        precomputed_plm_path=None,
+        model_tag="ESMC_600M_FLU",
+        base_model="esm-c600m",
+        model_layer=36,
+        checkpoint_dir=Path("checkpoint-root"),
+        checkpoint_glob=None,
+        force_recompute_plm=False,
+        gpu_required=True,
+        mutation_baseline_x=-2.0,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def _install_fake_functions_hf(monkeypatch, **attrs):
+    fake_module = types.ModuleType("Functions_HuggingFace")
+    for name, value in attrs.items():
+        setattr(fake_module, name, value)
+    monkeypatch.setitem(sys.modules, "Functions_HuggingFace", fake_module)
+    return fake_module
+
+
+class TestValidateArgs:
+    def test_single_fasta_requires_diversity_and_reference(self):
+        args = _make_args(analysis_mode="SINGLE_FASTA", diversity_fasta=None, reference_fasta=None)
+        with pytest.raises(ValueError, match="--diversity-fasta is required"):
+            rma.validate_args(args)
+
+        args = _make_args(
+            analysis_mode="SINGLE_FASTA",
+            diversity_fasta=Path("diversity.fasta"),
+            reference_fasta=None,
+        )
+        with pytest.raises(ValueError, match="--reference-fasta is required"):
+            rma.validate_args(args)
+
+    def test_checkpoint_backed_runs_require_model_fields(self):
+        args = _make_args(model_tag=None, base_model=None, model_layer=None)
+        with pytest.raises(ValueError, match="--model-tag, --base-model, --model-layer"):
+            rma.validate_args(args)
+
+    def test_rejects_checkpoint_dir_and_glob_together(self):
+        args = _make_args(checkpoint_dir=Path("a"), checkpoint_glob="checkpoint-*")
+        with pytest.raises(ValueError, match="either --checkpoint-dir or --checkpoint-glob"):
+            rma.validate_args(args)
+
+    def test_rejects_non_positive_alpha_step(self):
+        args = _make_args(alpha_step=0.0)
+        with pytest.raises(ValueError, match="--alpha-step must be > 0"):
+            rma.validate_args(args)
+
+
+class TestParsingHelpers:
+    def test_parse_alpha_grid_is_inclusive(self):
+        args = _make_args(alpha_start=-0.2, alpha_stop=0.2, alpha_step=0.2)
+        grid = rma.parse_alpha_grid(args)
+        np.testing.assert_allclose(grid, np.array([-0.2, 0.0, 0.2]))
+
+    def test_parse_scatter_alphas_handles_empty_and_values(self):
+        assert rma.parse_scatter_alphas("") == []
+        assert rma.parse_scatter_alphas("-1, 0, 1.5") == [-1.0, 0.0, 1.5]
+
+    def test_normalise_plm_matrix_drops_sequence_row(self):
+        raw_df = pd.DataFrame(
+            [["A", "C"], ["0.1", "0.2"], ["0.3", "0.4"]],
+            index=["sequence", "A", "C"],
+            columns=[1, 2],
+        )
+        normalised = rma.normalise_plm_matrix(raw_df)
+        assert list(normalised.index) == ["A", "C"]
+        assert float(normalised.loc["A", 1]) == pytest.approx(0.1)
+
+    def test_infer_epoch_value_uses_last_numeric_token(self):
+        assert rma.infer_epoch_value("checkpoint-525", 0) == 525.0
+        assert rma.infer_epoch_value("epoch_3.5_snapshot", 0) == 3.5
+        assert rma.infer_epoch_value("final_checkpoint", 7) == 7.0
+
+
+class TestCheckpointDiscovery:
+    def test_discover_checkpoint_dirs_finds_only_safetensor_children(self, tmp_path):
+        for name in ["checkpoint-10", "checkpoint-2", "final_checkpoint"]:
+            path = tmp_path / name
+            path.mkdir()
+            (path / "model.safetensors").write_text("x")
+        (tmp_path / "notes").mkdir()
+
+        discovered = rma._discover_checkpoint_dirs(tmp_path)
+        assert [path.name for path in discovered] == ["checkpoint-2", "checkpoint-10", "final_checkpoint"]
+
+    def test_build_model_specs_from_parent_checkpoint_directory(self, tmp_path):
+        for name in ["checkpoint-35", "checkpoint-105", "final_checkpoint"]:
+            path = tmp_path / name
+            path.mkdir()
+            (path / "model.safetensors").write_text("x")
+
+        args = _make_args(checkpoint_dir=tmp_path, checkpoint_glob=None, model_tag="ESMC_600M_FLU")
+        specs = rma.build_model_specs(args)
+
+        assert [spec["epoch_label"] for spec in specs] == ["checkpoint-35", "checkpoint-105", "final_checkpoint"]
+        assert specs[0]["model_tag"] == "ESMC_600M_FLU_checkpoint-35"
+        assert specs[1]["epoch_value"] == 105.0
+
+    def test_build_model_specs_from_glob(self, tmp_path):
+        for name in ["checkpoint-4", "checkpoint-12"]:
+            path = tmp_path / name
+            path.mkdir()
+            (path / "model.safetensors").write_text("x")
+
+        args = _make_args(
+            checkpoint_dir=None,
+            checkpoint_glob=str(tmp_path / "checkpoint-*"),
+            model_tag="ESMC_600M_FLU",
+        )
+        specs = rma.build_model_specs(args)
+        assert [spec["epoch_label"] for spec in specs] == ["checkpoint-4", "checkpoint-12"]
+
+    def test_build_model_specs_single_checkpoint_fallback(self, tmp_path):
+        checkpoint_dir = tmp_path / "final_checkpoint"
+        checkpoint_dir.mkdir()
+        (checkpoint_dir / "model.safetensors").write_text("x")
+
+        args = _make_args(checkpoint_dir=checkpoint_dir, checkpoint_glob=None, model_tag="ESMC_600M_FLU")
+        specs = rma.build_model_specs(args)
+
+        assert len(specs) == 1
+        assert specs[0]["epoch_label"] == "final_checkpoint"
+        assert specs[0]["checkpoint_dir"] == checkpoint_dir
+
+
+class TestLoadDiversityRecords:
+    def test_translates_nucleotide_records_when_not_expecting_protein(self, tmp_path, monkeypatch):
+        fasta_path = tmp_path / "diversity.fasta"
+        fasta_path.write_text(">seq1\nATGGCC\n>seq2\nATGAAA\n")
+
+        _install_fake_functions_hf(
+            monkeypatch,
+            _is_probably_nucleotide_sequence=lambda sequence: True,
+        )
+
+        processed, any_nucleotide = rma.load_diversity_records(
+            fasta_path,
+            expect_protein_diversity=False,
+            test_mode=False,
+            test_max_records=5,
+        )
+
+        assert any_nucleotide is True
+        assert [str(record.seq) for record in processed] == ["MA", "MK"]
+
+    def test_preserves_records_when_expecting_protein(self, tmp_path, monkeypatch):
+        fasta_path = tmp_path / "diversity.fasta"
+        fasta_path.write_text(">seq1\nATGGCC\n")
+
+        _install_fake_functions_hf(
+            monkeypatch,
+            _is_probably_nucleotide_sequence=lambda sequence: True,
+        )
+
+        processed, any_nucleotide = rma.load_diversity_records(
+            fasta_path,
+            expect_protein_diversity=True,
+            test_mode=False,
+            test_max_records=5,
+        )
+
+        assert any_nucleotide is True
+        assert str(processed[0].seq) == "ATGGCC"
+
+
+class TestRowBuilding:
+    def test_build_combined_rows_filters_fixed_mutations(self):
+        plm_matrix = pd.DataFrame([[0.0], [0.25]], index=["A", "C"], columns=[1])
+        lineage_data = {
+            "coord_map": {0: 0},
+            "full_ref_protein": "A",
+            "mut_profile": pd.DataFrame({1: {"A": 0.0, "C": 0.2}}),
+            "obs_freq": pd.DataFrame({1: {"A": 0.0, "C": 1.0}}),
+            "obs_depth": {1: 12},
+        }
+        args = _make_args(filter_fixed_mutations=True)
+        model_spec = {"model_tag": "m1", "epoch_label": "checkpoint-1", "epoch_value": 1.0}
+
+        rows = rma.build_combined_rows(args, model_spec, "lin1", lineage_data, plm_matrix)
+        assert rows == []
+
+    def test_build_combined_rows_zeroes_singletons_when_requested(self):
+        plm_matrix = pd.DataFrame([[0.0], [0.25]], index=["A", "C"], columns=[1])
+        lineage_data = {
+            "coord_map": {0: 0},
+            "full_ref_protein": "A",
+            "mut_profile": pd.DataFrame({1: {"A": 0.0, "C": 0.2}}),
+            "obs_freq": pd.DataFrame({1: {"A": 0.0, "C": 0.2}}),
+            "obs_depth": {1: 3},
+        }
+        args = _make_args(filter_singleton_mutations=True, min_obs_count=2)
+        model_spec = {"model_tag": "m1", "epoch_label": "checkpoint-1", "epoch_value": 1.0}
+
+        rows = rma.build_combined_rows(args, model_spec, "lin1", lineage_data, plm_matrix)
+        assert len(rows) == 1
+        assert rows[0]["obs_freq"] == 0.0
+        assert rows[0]["obs_present"] == 0
+
+    def test_build_combined_rows_skips_low_count_sites_when_requested(self):
+        plm_matrix = pd.DataFrame([[0.0], [0.25]], index=["A", "C"], columns=[1])
+        lineage_data = {
+            "coord_map": {0: 0},
+            "full_ref_protein": "A",
+            "mut_profile": pd.DataFrame({1: {"A": 0.0, "C": 0.2}}),
+            "obs_freq": pd.DataFrame({1: {"A": 0.0, "C": 0.2}}),
+            "obs_depth": {1: 3},
+        }
+        args = _make_args(filter_singleton_mutations=True, skip_low_count_sites=True, min_obs_count=2)
+        model_spec = {"model_tag": "m1", "epoch_label": "checkpoint-1", "epoch_value": 1.0}
+
+        rows = rma.build_combined_rows(args, model_spec, "lin1", lineage_data, plm_matrix)
+        assert rows == []
+
+
+class TestMetricSummaries:
+    def test_compute_epoch_lineage_metrics_and_summary(self):
+        combined_df = pd.DataFrame(
+            [
+                {"model": "m1", "epoch_label": "checkpoint-1", "epoch_value": 1.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.8, "mut_prob": 0.4, "obs_freq": 0.4, "obs_present": 1, "depth": 10.0},
+                {"model": "m1", "epoch_label": "checkpoint-1", "epoch_value": 1.0, "lineage": "lin1", "position": 2, "ref_aa": "A", "aa": "G", "plm_prob": 0.2, "mut_prob": 0.1, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "m1", "epoch_label": "checkpoint-2", "epoch_value": 2.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.7, "mut_prob": 0.3, "obs_freq": 0.3, "obs_present": 1, "depth": 10.0},
+                {"model": "m1", "epoch_label": "checkpoint-2", "epoch_value": 2.0, "lineage": "lin1", "position": 2, "ref_aa": "A", "aa": "G", "plm_prob": 0.1, "mut_prob": 0.05, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+            ]
+        )
+
+        lineage_metrics = rma.compute_epoch_lineage_metrics(combined_df)
+        summary = rma.summarize_epoch_metrics(lineage_metrics)
+
+        assert len(lineage_metrics) == 2
+        assert list(summary["epoch_label"]) == ["checkpoint-1", "checkpoint-2"]
+
+
+class TestRunAnalysisSmoke:
+    def test_run_analysis_writes_expected_outputs(self, tmp_path, monkeypatch):
+        output_dir = tmp_path / "out"
+        args = _make_args(output_dir=output_dir, checkpoint_dir=tmp_path / "checkpoints")
+
+        lineage_cache = {
+            "lin1": {
+                "lineage_key": "lin1",
+                "records": [object(), object()],
+                "full_ref_protein": "AA",
+                "plm_ref_protein": "AA",
+                "coord_map": {0: 0, 1: 1},
+                "mut_profile": pd.DataFrame({1: {"A": 0.0, "C": 0.4}, 2: {"A": 0.0, "C": 0.2}}),
+                "obs_freq": pd.DataFrame({1: {"A": 0.0, "C": 0.4}, 2: {"A": 0.0, "C": 0.1}}),
+                "obs_depth": {1: 10, 2: 10},
+                "alignment_diff_stats": {
+                    "mapped_sites": 2,
+                    "compared_sites": 2,
+                    "differing_sites": 1,
+                    "fixed_differing_sites": 0,
+                },
+                "diversity_path": "diversity.fasta",
+                "reference_path": "reference.fa",
+                "matched_pairs": 2,
+                "any_nucleotide_diversity": False,
+            }
+        }
+        monkeypatch.setattr(rma, "build_lineage_cache", lambda *a, **k: lineage_cache)
+        monkeypatch.setattr(rma, "export_plots", lambda **kwargs: None)
+
+        checkpoint_root = args.checkpoint_dir
+        for name in ["checkpoint-10", "checkpoint-20"]:
+            path = checkpoint_root / name
+            path.mkdir(parents=True)
+            (path / "model.safetensors").write_text("x")
+
+        def fake_build_codon_aa_mutation_tables(model_name):
+            return {"mutation_model_name": model_name}
+
+        def fake_evaluate_alpha_sweep(df, alpha_grid, **kwargs):
+            return pd.DataFrame(
+                {
+                    "alpha": [-1.0, 0.0],
+                    "site_top10pct_mutated_enrichment": [0.1, 0.2],
+                    "site_top10pct_mutated_precision": [0.1, 0.2],
+                    "site_rank_spearman_r": [0.1, 0.2],
+                    "mut_flat_global_spearman_r": [0.2, 0.3],
+                    "mut_flat_global_pearson_r": [0.2, 0.3],
+                    "mut_flat_mean_site_nll": [1.0, 0.8],
+                }
+            )
+
+        _install_fake_functions_hf(
+            monkeypatch,
+            build_codon_aa_mutation_tables=fake_build_codon_aa_mutation_tables,
+            evaluate_alpha_sweep=fake_evaluate_alpha_sweep,
+        )
+
+        monkeypatch.setattr(
+            rma,
+            "ensure_plm_matrix",
+            lambda *a, **k: (
+                pd.DataFrame([[0.0, 0.0], [0.5, 0.3]], index=["A", "C"], columns=[1, 2]),
+                "plm.csv",
+            ),
+        )
+
+        result = rma.run_analysis(args)
+
+        assert result == 0
+        assert (output_dir / "run_manifest.json").exists()
+        assert (output_dir / "tables" / "combined_long_table.csv").exists()
+        assert (output_dir / "tables" / "epoch_metric_summary.tsv").exists()
+        assert (output_dir / "tables" / "best_alpha_two_methods.tsv").exists()
+
+
+class TestManifest:
+    def test_save_run_manifest_uses_filter_fixed_mutations_key(self, tmp_path):
+        args = _make_args(output_dir=tmp_path, checkpoint_dir=tmp_path / "checkpoint-root")
+        rma.save_run_manifest(args, tmp_path, [{"label": "lin1", "diversity_path": "d.fa", "reference_path": "r.fa"}])
+
+        manifest = pd.read_json(tmp_path / "run_manifest.json", typ="series")
+        assert "filter_fixed_mutations" in manifest.index

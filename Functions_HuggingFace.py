@@ -98,6 +98,131 @@ TRANSITION_MATRICES = {
     },
 }
 
+
+def build_codon_aa_mutation_tables(mutation_model_name: str):
+    """Build reusable nucleotide, codon, and amino-acid mutation tables.
+
+    Returns a dict containing the selected nucleotide transition matrix,
+    nucleotide transition probabilities with diagonal stay-probabilities,
+    the codon->codon probability matrix, and genetic-code lookup tables.
+    """
+    if mutation_model_name not in TRANSITION_MATRICES:
+        raise ValueError(
+            f"Unknown mutation model {mutation_model_name!r}. "
+            f"Available models: {sorted(TRANSITION_MATRICES.keys())}"
+        )
+
+    transitions = np.array(TRANSITION_MATRICES[mutation_model_name]["matrix"], dtype=float)
+    probs = transitions.copy()
+    for i in range(len(bases)):
+        probs[i, i] = 1.0 - np.sum(transitions[i, :])
+
+    codons = ["".join(triplet) for triplet in itertools.product(bases, repeat=3)]
+    n_codons = len(codons)
+    codon_mutation_matrix = np.zeros((n_codons, n_codons), dtype=float)
+
+    for i, codon_from in enumerate(codons):
+        for j, codon_to in enumerate(codons):
+            prob = 1.0
+            for k in range(3):
+                idx_from = bases.index(codon_from[k])
+                idx_to = bases.index(codon_to[k])
+                prob *= probs[idx_from, idx_to]
+            codon_mutation_matrix[i, j] = prob
+
+    codon_mutation_df = pd.DataFrame(codon_mutation_matrix, index=codons, columns=codons)
+
+    standard_table = CodonTable.unambiguous_dna_by_id[1]
+    genetic_code = standard_table.forward_table.copy()
+    for stop_codon in standard_table.stop_codons:
+        genetic_code[stop_codon] = "*"
+
+    aa_to_codons = {}
+    aa_to_codons_all = {}
+    for codon, aa in genetic_code.items():
+        aa_to_codons_all.setdefault(aa, []).append(codon)
+        if aa != "*":
+            aa_to_codons.setdefault(aa, []).append(codon)
+
+    target_aas = sorted(aa_to_codons_all.keys(), key=lambda aa: (aa == "*", aa))
+    ordered_codons = []
+    for aa in target_aas:
+        ordered_codons.extend(sorted(aa_to_codons_all[aa]))
+
+    return {
+        "mutation_model_name": mutation_model_name,
+        "transition_meta": TRANSITION_MATRICES[mutation_model_name],
+        "transitions": transitions,
+        "transition_probabilities": probs,
+        "codons": codons,
+        "codon_mutation_df": codon_mutation_df,
+        "genetic_code": genetic_code,
+        "aa_to_codons": aa_to_codons,
+        "aa_to_codons_all": aa_to_codons_all,
+        "target_aas": target_aas,
+        "ordered_codons": ordered_codons,
+    }
+
+
+def load_analysis_targets(
+    analysis_mode: str,
+    guide_path: Optional[str] = None,
+    diversity_fasta: Optional[str] = None,
+    reference_fasta: Optional[str] = None,
+    default_label: str = "population",
+    test_mode: bool = False,
+    test_max_targets: int = 1,
+):
+    """Resolve either guide-based or single-FASTA analysis inputs.
+
+    Returns a list of dicts with keys: label, diversity_path, reference_path.
+    Guide rows may use either month/label, fasta/path, and optional reference.
+    """
+    resolved_targets = []
+    mode = str(analysis_mode).upper().strip()
+
+    if mode == "MONTHLY_GUIDE":
+        if not guide_path:
+            raise ValueError("guide_path is required when analysis_mode=MONTHLY_GUIDE")
+        if not os.path.exists(guide_path):
+            raise FileNotFoundError(f"Guide file not found: {guide_path}")
+
+        with open(guide_path, "r", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                label = (row.get("month") or row.get("label") or "").strip()
+                fasta_path = (row.get("fasta") or row.get("path") or "").strip()
+                row_reference = (row.get("reference") or reference_fasta or "").strip()
+                if not label or not fasta_path:
+                    continue
+                resolved_targets.append(
+                    {
+                        "label": label,
+                        "diversity_path": fasta_path,
+                        "reference_path": row_reference,
+                    }
+                )
+                if test_mode and len(resolved_targets) >= max(1, int(test_max_targets)):
+                    break
+    elif mode == "SINGLE_FASTA":
+        if not diversity_fasta:
+            raise ValueError("diversity_fasta is required when analysis_mode=SINGLE_FASTA")
+        if not reference_fasta:
+            raise ValueError("reference_fasta is required when analysis_mode=SINGLE_FASTA")
+        resolved_targets.append(
+            {
+                "label": default_label,
+                "diversity_path": diversity_fasta,
+                "reference_path": reference_fasta,
+            }
+        )
+    else:
+        raise ValueError(
+            f"Unsupported analysis_mode {analysis_mode!r}. Expected MONTHLY_GUIDE or SINGLE_FASTA."
+        )
+
+    return resolved_targets
+
 ## Compression Functions ########################################################
 import bz2
 import pickle
