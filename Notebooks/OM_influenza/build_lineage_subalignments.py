@@ -30,6 +30,8 @@ FASTA_PATH = "/home4/lm305z/IAV_DB/flu_vgtk_integrations/tmp/Protein-alignment/s
 ALIGN_ACCESSION = "PV511679"
 CLUSTER_PATH = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/OM_list_cluster_nuc_plus_internal_only.fa"
 OUTPUT_DIR = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/gisaid_data/alignment_based_19feb26/hard"
+
+
 ASSIGNMENT_MODE = "hard"  # "soft" or "hard"
 HARD_MAX_NEXT_MUTATIONS = 2
 # Maximum allowed Hamming distance to assign a sequence to a lineage reference.

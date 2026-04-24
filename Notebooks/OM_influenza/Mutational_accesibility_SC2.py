@@ -97,6 +97,12 @@ ANALYSIS_MODE = "MONTHLY_GUIDE"
 # Guide CSV mapping months to FASTA paths (used if ANALYSIS_MODE == "MONTHLY_GUIDE")
 POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/spike_month_file_guide.csv"
 
+# if in single fasta mode, months/ lineages
+ANALYSIS_MODE = "MONTHLY_GUIDE"
+# Guide CSV mapping months to FASTA paths (used if ANALYSIS_MODE == "MONTHLY_GUIDE")
+POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/spike_month_file_guide.csv"
+
+
 # Focal reference sequence (nucleotide)
 fasta_file = '/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/Jan25/rootseq_CM7YG5RN.fa'
 base_lineage_id = '?'
@@ -105,32 +111,44 @@ base_lineage_id = '?'
 # MODEL SELECTION: Choose which PLM model(s) to run and compare.
 # Options: "ESMC_600M", "ESMC_600M_FT_SC2_99clus", "ESM2_650M_FT", "ESM2_3B_OG"
 
-FILTER_SINGLETON_MUTATIONS = False
+ANALYSIS_MODE = "MONTHLY_GUIDE"
+# Guide CSV mapping months to FASTA paths (used if ANALYSIS_MODE == "MONTHLY_GUIDE")
+POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/lineage_spilts/lineage_guide_soft.csv"
+
 
 NUCLEOTIDE_MUTATION_MODEL = "SC2"
-
-MODEL_SELECTION = ["ESMC_600M_FT_SC2_99clus","ESMC_600M_OG",]
-outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESMC_runs_aa'
+FILTER_SINGLETON_MUTATIONS = False
+MODEL_SELECTION = ["ESMC_600M_FT_SC2_99clus","ESMC_600M_OG",'ESMC_300M_OG']
+outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_lineage_snapshots/ESMC_runs_aa/soft'
 PLM_MAX_AA_LENGTH=1522
 
-#SC2 ESM2 block
+# ##SC2 ESM2 block
+# FILTER_SINGLETON_MUTATIONS = True
 # MODEL_SELECTION = ["sarbeco_SC2_FT_ESM2_650M_2023","ESM2_650M_OG","ESM2_3B_OG"]
-# outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESM2_runs_aa_singles_rounded/1022AA'
+# outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_lineage_snapshots/ESM2_runs_aa/1022AA'
 # PLM_MAX_AA_LENGTH=1022
 
-#IAV block
-NUCLEOTIDE_MUTATION_MODEL = "H3N2"
 
-POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv"
-fasta_file = '/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_files/J_int.nt.fa'
-MODEL_SELECTION = ["IAV_Spyros_finetuned_HA80","ESM2_650M_OG","ESM2_3B_OG"]
-outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_files/IAV_model_comparison_aa'
+# FILTER_SINGLETON_MUTATIONS = False
+# MODEL_SELECTION = ["sarbeco_SC2_FT_ESM2_650M_2023","ESM2_650M_OG","ESM2_3B_OG"]
+# outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/SC2_month_snapshots/ESM2_runs_aa/1022AA'
+# PLM_MAX_AA_LENGTH=1022
+
+# #IAV block
+
+# NUCLEOTIDE_MUTATION_MODEL = "H3N2"
+# FILTER_SINGLETON_MUTATIONS = False
+# POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv"
+# fasta_file = '/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_files/J_int.nt.fa'
+# MODEL_SELECTION = ["IAV_Lytras_finetuned_HA80","ESM2_650M_OG","ESM2_3B_OG"]
+# outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_files/IAV_model_comparison_aa'
 
 # TEST SETTINGS
 
 
 TEST_MODE = False
 TEST_MAX_RECORDS = 5
+MIN_LINEAGE_SEQUENCE_COUNT = 100
 
 # =====================================================================
 # II. DATA PATHS AND LIMITS
@@ -165,17 +183,24 @@ MODEL_PROFILES = {
         "base_model": "esm-c600m",
         "layer": 36,
         "checkpoint_dir": None,
-        "force_recompute": True,
+        "force_recompute": False,
+    },
+    "ESMC_300M_OG": {
+        "tag": "ESMC_300M_OG",
+        "base_model": "esm-c300m",
+        "layer": 30,
+        "checkpoint_dir": None,
+        "force_recompute": False,
     },
     "ESMC_600M_FT_SC2_99clus": {
         "tag": "ESMC_600M_FT_SC2_99clus",
         "base_model": "esm-c600m",
         "layer": 36,
         "checkpoint_dir": "/home3/oml4h/my_SC2_finetunes/magma_ESMC_600M_99_95perc/",
-        "force_recompute": True,
+        "force_recompute": False,
     },
-    "IAV_Spyros_finetuned_HA80": {
-        "tag": "IAV_Spyros_finetuned_HA80",
+    "IAV_Lytras_finetuned_HA80": {
+        "tag": "IAV_Lytras_finetuned_HA80",
         "base_model": "esm2_t33_650M_UR50D",
         "layer": 33,
         "checkpoint_dir": "/home3/oml4h/hugging_face_downloads/model_weights_topublish/ESM2-HA80/",
@@ -313,7 +338,7 @@ def export_rolling_identity_plot(alignment, window_size=50, outdir=".", label=""
     ax.grid(True, linestyle='--', alpha=0.6)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"rolling_identity_{label}.png"), dpi=300)
+    export_publication_figure(os.path.join(outdir, f"rolling_identity_{label}.png"), figure=fig)
     plt.close()
 
 
@@ -361,7 +386,7 @@ def export_alignment_verification_plot(plm_matrix, ref_seq, target_seq, coord_ma
     ax.set_title(f"PLM Prediction vs Sequences ({month_label})\nRed = Mismatch, Green = Match")
     
     plt.tight_layout()
-    plt.savefig(os.path.join(outdir, f"alignment_verification_{month_label}.png"), dpi=300)
+    export_publication_figure(os.path.join(outdir, f"alignment_verification_{month_label}.png"), figure=fig)
     plt.close()
 
 # Global in-memory cache for PLM probability matrices to avoid redundant computation
@@ -378,8 +403,27 @@ ALPHA_SWEEP_MIN_GRID = 8
 ALPHA_SWEEP_MAX_WORKERS = None
 METHOD2_SCATTER_ALPHAS = [-1.0, 0.0, 1.0]
 METHOD2_SCATTER_MAX_POINTS = 200000
+PLOT_EXPORT_PNG_DPI = 600
 
 IGNORE_ALIGNMENT_CHARS = {"-", "*", "."}
+
+
+def export_publication_figure(output_path, figure=None, png_dpi=PLOT_EXPORT_PNG_DPI):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure = figure or plt.gcf()
+
+    figure.savefig(
+        str(output_path),
+        dpi=png_dpi,
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    figure.savefig(
+        str(output_path.with_suffix(".pdf")),
+        bbox_inches="tight",
+        facecolor="white",
+    )
 
 # --- Main Execution Functions ---
 
@@ -557,7 +601,7 @@ ax.set_xlabel("To")
 ax.set_ylabel("From")
 ax.set_title(f"{active_transition_name} Nucleotide Transition Matrix (Diagonal Masked)")
 plt.tight_layout()
-plt.savefig(f"{outdir}/{active_transition_tag}_transition_matrix_heatmap.png", dpi=300)
+export_publication_figure(f"{outdir}/{active_transition_tag}_transition_matrix_heatmap.png")
 # plt.show()
 
 # Log-scaled palette (diagonals masked to white)
@@ -583,7 +627,7 @@ ax.set_xlabel("To")
 ax.set_ylabel("From")
 ax.set_title(f"{active_transition_name} Nucleotide Transition Matrix (Log Scale)")
 plt.tight_layout()
-plt.savefig(f"{outdir}/{active_transition_tag}_transition_matrix_heatmap_log.png", dpi=300)
+export_publication_figure(f"{outdir}/{active_transition_tag}_transition_matrix_heatmap_log.png")
 # plt.show()
 # %%
 
@@ -701,7 +745,7 @@ ax.tick_params(axis="both", labelsize=12)
 ytick_labels = ["*" if lab == "-" else lab for lab in target_aas]
 ax.set_yticklabels(ytick_labels, rotation=279)
 plt.tight_layout()
-plt.savefig(f"{outdir}/codon_to_amino_acid_matrix_heatmap.png", dpi=300)
+export_publication_figure(f"{outdir}/codon_to_amino_acid_matrix_heatmap.png")
 # plt.show()
 
 # Ratio of most to least likely non-synonymous change
@@ -1171,11 +1215,31 @@ matrices_to_plot = {
 # %%
 
 # Create histogram of mutation_prob_matrix values
+hist_values = mutational_prob_matrix.values.flatten()
+hist_values = hist_values[np.isfinite(hist_values) & (hist_values > 0)]
+
 plt.figure(figsize=(10, 6))
-sns.histplot(mutational_prob_matrix.values.flatten(), bins=100, log_scale=(True, True))
+if hist_values.size > 0:
+    log_bins = np.logspace(np.log10(hist_values.min()), np.log10(hist_values.max()), 100)
+    ax = sns.histplot(
+        hist_values,
+        bins=log_bins,
+        stat="count",
+        element="bars",
+        fill=True,
+        color="#4c72b0",
+        edgecolor="white",
+        linewidth=0.4,
+    )
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_ylim(bottom=0.5)
+else:
+    ax = plt.gca()
 plt.title(f'Histogram of Mutational Probability Matrix Values ({PLM_MODEL_TAG})')
 plt.xlabel('Mutational Probability')
-plt.savefig(f"{outdir}/histogram_mutational_prob_{PLM_MODEL_TAG}.png")
+plt.ylabel('Count')
+export_publication_figure(f"{outdir}/histogram_mutational_prob_{PLM_MODEL_TAG}.png")
 
 # which have values of >0.1
 high_values = mutational_prob_matrix.values.flatten() > 0.1
@@ -1226,7 +1290,7 @@ for i, (name, matrix) in enumerate(matrices_to_plot.items()):
     ax.grid(True, which="both", ls="-", alpha=0.2)
 
 plt.tight_layout()
-plt.savefig(f"{outdir}/ranked_mutations_{PLM_MODEL_TAG}.png")
+export_publication_figure(f"{outdir}/ranked_mutations_{PLM_MODEL_TAG}.png")
 # plt.show()
 
 
@@ -1269,7 +1333,7 @@ sns.scatterplot(x=plm_flat_log, y=mut_flat_log, alpha=0.3)
 plt.title(f'PLM ({PLM_MODEL_TAG}) Probability vs Mutational Probability (log10 scale)\n spearman: {spearman_corr:.3f} (p={p_s:.2e}), pearson: {pearson_corr:.3f} (p={p_p:.2e})')
 plt.xlabel('log10(PLM Probability)')
 plt.ylabel('log10(Mutational Probability)')
-plt.savefig(f"{outdir}/plm_vs_mut_correlation_{PLM_MODEL_TAG}.png")
+export_publication_figure(f"{outdir}/plm_vs_mut_correlation_{PLM_MODEL_TAG}.png")
 
 # which ones have values greater than0.1 in either?
 high_plm = plm_flat > 0.1
@@ -1458,14 +1522,85 @@ if RUN_POOLED_PANEL:
         print(f"Warning: Unsupported ANALYSIS_MODE or missing guide: {ANALYSIS_MODE}")
 
     lineage_cache = {}
+    skipped_lineage_rows = []
     # (Mutational profile will be computed inside the loop per reference)
 
     for label, fasta_path, ref_path in diversity_targets:
         if not os.path.exists(fasta_path):
             print(f"Warning: Diversity FASTA does not exist: {fasta_path}. Skipping.")
+            skipped_lineage_rows.append({
+                "lineage": label,
+                "n_sequences": 0,
+                "n_sequences_total": 0,
+                "n_sequences_processed": 0,
+                "reference_length": np.nan,
+                "mapped_ref_sites": np.nan,
+                "compared_sites_non_gap_non_stop": np.nan,
+                "differing_sites_vs_reference_non_gap_non_stop": np.nan,
+                "fixed_differing_sites_vs_reference_non_gap_non_stop": np.nan,
+                "diversity_fasta": fasta_path,
+                "diversity_tag": Path(fasta_path).stem,
+                "plm_profile": "",
+                "sequence_threshold_min": MIN_LINEAGE_SEQUENCE_COUNT,
+                "sequence_threshold_passed": False,
+                "skipped": True,
+                "skip_reason": "missing_fasta",
+            })
+            continue
+
+        total_records = list(SeqIO.parse(fasta_path, "fasta"))
+        total_record_count = len(total_records)
+        if total_record_count == 0:
+            print(f"Warning: No records found in {fasta_path}. Skipping.")
+            skipped_lineage_rows.append({
+                "lineage": label,
+                "n_sequences": 0,
+                "n_sequences_total": 0,
+                "n_sequences_processed": 0,
+                "reference_length": np.nan,
+                "mapped_ref_sites": np.nan,
+                "compared_sites_non_gap_non_stop": np.nan,
+                "differing_sites_vs_reference_non_gap_non_stop": np.nan,
+                "fixed_differing_sites_vs_reference_non_gap_non_stop": np.nan,
+                "diversity_fasta": fasta_path,
+                "diversity_tag": Path(fasta_path).stem,
+                "plm_profile": "",
+                "sequence_threshold_min": MIN_LINEAGE_SEQUENCE_COUNT,
+                "sequence_threshold_passed": False,
+                "skipped": True,
+                "skip_reason": "empty_fasta",
+            })
+            continue
+
+        if total_record_count < MIN_LINEAGE_SEQUENCE_COUNT:
+            print(
+                f"Skipping {label}: {total_record_count} sequences in {fasta_path} "
+                f"(< {MIN_LINEAGE_SEQUENCE_COUNT})."
+            )
+            skipped_lineage_rows.append({
+                "lineage": label,
+                "n_sequences": total_record_count,
+                "n_sequences_total": total_record_count,
+                "n_sequences_processed": 0,
+                "reference_length": np.nan,
+                "mapped_ref_sites": np.nan,
+                "compared_sites_non_gap_non_stop": np.nan,
+                "differing_sites_vs_reference_non_gap_non_stop": np.nan,
+                "fixed_differing_sites_vs_reference_non_gap_non_stop": np.nan,
+                "diversity_fasta": fasta_path,
+                "diversity_tag": Path(fasta_path).stem,
+                "plm_profile": "",
+                "sequence_threshold_min": MIN_LINEAGE_SEQUENCE_COUNT,
+                "sequence_threshold_passed": False,
+                "skipped": True,
+                "skip_reason": "below_min_sequence_threshold",
+            })
             continue
             
-        print(f"Processing {label} diversity from {fasta_path} using reference {ref_path}...")
+        print(
+            f"Processing {label} diversity from {fasta_path} using reference {ref_path} "
+            f"(n={total_record_count})..."
+        )
         
         # Load the focal reference for THIS lineage/month
         try:
@@ -1494,10 +1629,7 @@ if RUN_POOLED_PANEL:
             full_ref_nt, full_ref_protein, aa_to_codons, codon_mutation_df
         )
 
-        records = list(SeqIO.parse(fasta_path, "fasta"))
-        if len(records) == 0:
-            print(f"Warning: No records found in {fasta_path}. Skipping.")
-            continue
+        records = total_records
 
         if TEST_MODE:
             records = records[:TEST_MAX_RECORDS]
@@ -1546,6 +1678,7 @@ if RUN_POOLED_PANEL:
         lineage_cache[label] = {
             "lineage_key": lineage_key,
             "records": processed_records,
+            "n_sequences_total": total_record_count,
             "full_ref_protein": full_ref_protein,
             "plm_ref_protein": plm_ref_protein,
             "coord_map": coord_map,
@@ -1561,6 +1694,7 @@ if RUN_POOLED_PANEL:
     all_alpha_frames = []
     model_status_rows = []
     per_lineage_best_rows = []
+    baseline_combined_df = None
 
     cuda_available = torch.cuda.is_available()
     if GPU_REQUIRED and not cuda_available:
@@ -1580,253 +1714,346 @@ if RUN_POOLED_PANEL:
         model_tag = run_cfg["tag"]
         model_outdir = os.path.join(POOLED_PANEL_OUTDIR, model_tag)
         os.makedirs(model_outdir, exist_ok=True)
+        force_recompute_model = run_cfg.get("force_recompute", False)
+
+        combined_df_path = os.path.join(
+            model_outdir,
+            _tag_output_name("pooled_combined_long_table.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
+        )
+        lineage_meta_path = os.path.join(
+            model_outdir,
+            _tag_output_name("pooled_panel_metadata.tsv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
+        )
+        alpha_df_path = os.path.join(
+            model_outdir,
+            _tag_output_name("alpha_sweep_fit_metrics.tsv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
+        )
+        lineage_alpha_path = os.path.join(
+            model_outdir,
+            _tag_output_name("alpha_sweep_fit_metrics_by_lineage.tsv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
+        )
 
         model = None
         alphabet = None
         batch_converter = None
         model_ready = False
         used_cached_plm = False
+        used_cached_downstream = False
+        used_cached_alpha = False
+        used_cached_lineage_alpha = False
         model_load_attempted = False # will be set in logic
         model_load_failed_reason = ""
         model_runtime_failed = False
         model_runtime_failed_reason = ""
 
+        combined_df = None
+        lineage_meta_df = None
+        alpha_df = None
+        lineage_alpha_all_df = None
+
+        if not force_recompute_model and os.path.exists(combined_df_path) and os.path.exists(lineage_meta_path):
+            try:
+                combined_df = pd.read_csv(combined_df_path)
+                lineage_meta_df = pd.read_csv(lineage_meta_path, sep="\t")
+                required_lineage_meta_cols = {
+                    "skipped",
+                    "skip_reason",
+                    "n_sequences_total",
+                    "n_sequences_processed",
+                    "sequence_threshold_min",
+                    "sequence_threshold_passed",
+                }
+                if not required_lineage_meta_cols.issubset(lineage_meta_df.columns):
+                    combined_df = None
+                    lineage_meta_df = None
+                    print(
+                        f"Cached pooled tables for {model_tag} are missing lineage-threshold metadata; recomputing."
+                    )
+                else:
+                    threshold_matches = pd.to_numeric(
+                        lineage_meta_df["sequence_threshold_min"], errors="coerce"
+                    ).eq(MIN_LINEAGE_SEQUENCE_COUNT)
+                    active_lineage_meta_df = lineage_meta_df.loc[
+                        ~lineage_meta_df["skipped"].fillna(False)
+                    ].copy()
+                    active_counts = pd.to_numeric(
+                        active_lineage_meta_df["n_sequences_total"], errors="coerce"
+                    )
+                    cached_lineages_valid = threshold_matches.all() and not (
+                        active_counts < MIN_LINEAGE_SEQUENCE_COUNT
+                    ).fillna(False).any()
+                    cached_combined_lineages = set(combined_df["lineage"]) if "lineage" in combined_df.columns else set()
+                    active_lineages = set(active_lineage_meta_df["lineage"])
+                    if not cached_lineages_valid or not cached_combined_lineages.issubset(active_lineages):
+                        combined_df = None
+                        lineage_meta_df = None
+                        print(
+                            f"Cached pooled tables for {model_tag} do not satisfy the current lineage threshold; recomputing."
+                        )
+                    else:
+                        used_cached_downstream = True
+                        print(f"Reusing cached pooled tables for {model_tag}: {combined_df_path}")
+            except Exception as exc:
+                combined_df = None
+                lineage_meta_df = None
+                print(f"Failed to load cached pooled tables for {model_tag}: {exc}")
+
         combined_rows = []
-        per_lineage_summaries = []
+        per_lineage_summaries = [
+            {
+                "model": model_tag,
+                **row,
+            }
+            for row in skipped_lineage_rows
+        ]
 
-        for lineage, data in lineage_cache.items():
-            plm_ref_protein = data["plm_ref_protein"]
-            full_ref_protein = data["full_ref_protein"]
-            coord_map = data["coord_map"]
-            
-            print(f"Processing lineage {lineage} with {model_tag}: n_seq={len(data['records'])}, plm_ref_len={len(plm_ref_protein)}, full_ref_len={len(full_ref_protein)}")
-
-            plm_profile_path = os.path.join(
-                model_outdir,
-                _tag_output_name(f"{data['lineage_key']}_plm_probability_profile.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
-            )
-
-            plm_matrix = None
-            if os.path.exists(plm_profile_path) and not run_cfg.get("force_recompute", False):
-                try:
-                    plm_matrix = pd.read_csv(plm_profile_path, index_col=0)
-                    used_cached_plm = True
-                    print(f"Using existing PLM matrix from disk: {plm_profile_path}")
-                except Exception as exc:
-                    print(f"Failed to load existing PLM matrix for {lineage} ({plm_profile_path}): {exc}")
-
-            if plm_matrix is None:
-                cache_key = (model_tag, plm_ref_protein)
-                plm_out = None
+        if combined_df is None or lineage_meta_df is None:
+            for lineage, data in lineage_cache.items():
+                plm_ref_protein = data["plm_ref_protein"]
+                full_ref_protein = data["full_ref_protein"]
+                coord_map = data["coord_map"]
                 
-                if cache_key in PLM_MATRIX_CACHE and not run_cfg.get("force_recompute", False):
-                    print(f"Using in-memory cached PLM matrix for {model_tag}")
-                    plm_out = PLM_MATRIX_CACHE[cache_key]
-                else:
-                    if not model_ready and not model_load_attempted:
-                        model_load_attempted = True
-                        try:
-                            print(f"\nLoading model config: {model_tag}")
-                            model, device, batch_converter, alphabet = _load_plm_runtime(
-                                run_cfg["base_model"], 
-                                checkpoint_dir=run_cfg.get("checkpoint_dir")
-                            )
-                            model_ready = True
-                            # Infer per-model maximum input length (aa) and set PLM_MAX_NT_LENGTH (nt)
+                print(f"Processing lineage {lineage} with {model_tag}: n_seq={len(data['records'])}, plm_ref_len={len(plm_ref_protein)}, full_ref_len={len(full_ref_protein)}")
+
+                plm_profile_path = os.path.join(
+                    model_outdir,
+                    _tag_output_name(f"{data['lineage_key']}_plm_probability_profile.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
+                )
+
+                plm_matrix = None
+                if os.path.exists(plm_profile_path) and not force_recompute_model:
+                    try:
+                        plm_matrix = pd.read_csv(plm_profile_path, index_col=0)
+                        used_cached_plm = True
+                        print(f"Using existing PLM matrix from disk: {plm_profile_path}")
+                    except Exception as exc:
+                        print(f"Failed to load existing PLM matrix for {lineage} ({plm_profile_path}): {exc}")
+
+                if plm_matrix is None:
+                    cache_key = (model_tag, plm_ref_protein)
+                    plm_out = None
+                    
+                    if cache_key in PLM_MATRIX_CACHE and not force_recompute_model:
+                        print(f"Using in-memory cached PLM matrix for {model_tag}")
+                        plm_out = PLM_MATRIX_CACHE[cache_key]
+                    else:
+                        if not model_ready and not model_load_attempted:
+                            model_load_attempted = True
                             try:
-                                max_aa = None
-                                # Common places to find model/tokenizer length
-                                if hasattr(alphabet, "max_seq_len") and alphabet.max_seq_len:
-                                    max_aa = int(alphabet.max_seq_len)
-                                elif hasattr(alphabet, "_tokenizer") and hasattr(alphabet._tokenizer, "model_max_length"):
-                                    max_aa = int(alphabet._tokenizer.model_max_length)
-                                elif hasattr(alphabet, "tokenizer") and hasattr(alphabet.tokenizer, "model_max_length"):
-                                    max_aa = int(alphabet.tokenizer.model_max_length)
-                                elif hasattr(model, "config") and hasattr(model.config, "max_position_embeddings"):
-                                    max_aa = int(model.config.max_position_embeddings)
-                                # Fallback for ESM-C models: allow large context
-                                if max_aa is None and ("esmc" in run_cfg["base_model"].lower() or "esm-c" in run_cfg["base_model"].lower()):
-                                    max_aa = 2048
+                                print(f"\nLoading model config: {model_tag}")
+                                model, device, batch_converter, alphabet = _load_plm_runtime(
+                                    run_cfg["base_model"], 
+                                    checkpoint_dir=run_cfg.get("checkpoint_dir")
+                                )
+                                model_ready = True
+                                # Infer per-model maximum input length (aa) and set PLM_MAX_NT_LENGTH (nt)
+                                try:
+                                    max_aa = None
+                                    # Common places to find model/tokenizer length
+                                    if hasattr(alphabet, "max_seq_len") and alphabet.max_seq_len:
+                                        max_aa = int(alphabet.max_seq_len)
+                                    elif hasattr(alphabet, "_tokenizer") and hasattr(alphabet._tokenizer, "model_max_length"):
+                                        max_aa = int(alphabet._tokenizer.model_max_length)
+                                    elif hasattr(alphabet, "tokenizer") and hasattr(alphabet.tokenizer, "model_max_length"):
+                                        max_aa = int(alphabet.tokenizer.model_max_length)
+                                    elif hasattr(model, "config") and hasattr(model.config, "max_position_embeddings"):
+                                        max_aa = int(model.config.max_position_embeddings)
+                                    # Fallback for ESM-C models: allow large context
+                                    if max_aa is None and ("esmc" in run_cfg["base_model"].lower() or "esm-c" in run_cfg["base_model"].lower()):
+                                        max_aa = 2048
 
-                                if max_aa is not None:
-                                    PLM_MAX_NT_LENGTH = max_aa * 3
-                                    print(f"Inferred PLM max aa={max_aa}, setting PLM_MAX_NT_LENGTH={PLM_MAX_NT_LENGTH}")
+                                    if max_aa is not None:
+                                        PLM_MAX_NT_LENGTH = max_aa * 3
+                                        print(f"Inferred PLM max aa={max_aa}, setting PLM_MAX_NT_LENGTH={PLM_MAX_NT_LENGTH}")
+                                except Exception as exc:
+                                    print(f"Warning: failed to infer PLM max length for {model_tag}: {exc}")
                             except Exception as exc:
-                                print(f"Warning: failed to infer PLM max length for {model_tag}: {exc}")
-                        except Exception as exc:
-                            model_load_failed_reason = str(exc)
-                            print(f"Skipping PLM generation for {model_tag}: failed to load. Reason: {exc}")
+                                model_load_failed_reason = str(exc)
+                                print(f"Skipping PLM generation for {model_tag}: failed to load. Reason: {exc}")
 
-                    if model_ready:
-                        try:
-                            plm_out = get_mutation_prob_matrix(
-                                plm_ref_protein,
-                                model,
-                                run_cfg["layer"],
-                                device,
-                                batch_converter,
-                                alphabet,
-                            )
-                            PLM_MATRIX_CACHE[cache_key] = plm_out
-                        except Exception as exc:
-                            model_runtime_failed = True
-                            model_runtime_failed_reason = str(exc)
-                            print(f"Skipping model {model_tag}: runtime failure for {lineage}. Reason: {exc}")
-                            break
+                        if model_ready:
+                            try:
+                                plm_out = get_mutation_prob_matrix(
+                                    plm_ref_protein,
+                                    model,
+                                    run_cfg["layer"],
+                                    device,
+                                    batch_converter,
+                                    alphabet,
+                                )
+                                PLM_MATRIX_CACHE[cache_key] = plm_out
+                            except Exception as exc:
+                                model_runtime_failed = True
+                                model_runtime_failed_reason = str(exc)
+                                print(f"Skipping model {model_tag}: runtime failure for {lineage}. Reason: {exc}")
+                                break
 
-                if plm_out is not None:
-                    plm_matrix = pd.DataFrame(
-                        plm_out["mutation_matrix"],
-                        index=plm_out["amino_acids"],
-                        columns=plm_out["positions"],
-                    )
-                    plm_matrix.to_csv(plm_profile_path)
+                    if plm_out is not None:
+                        plm_matrix = pd.DataFrame(
+                            plm_out["mutation_matrix"],
+                            index=plm_out["amino_acids"],
+                            columns=plm_out["positions"],
+                        )
+                        plm_matrix.to_csv(plm_profile_path)
 
-            if plm_matrix is None:
-                continue
-
-            # Assuming 'focal_protein_seq' is your global root reference that generated the PLM
-            global_to_monthly_map = {}
-            if USE_GLOBAL_PLM_REFERENCE:
-                try:
-                    # Uses the robust generator we set up previously
-                    global_to_monthly_map, alignment_obj = generate_verified_coordinate_map(focal_protein_seq, plm_ref_protein)
-
-                    verify_dir = os.path.join(model_outdir, "alignment_verifications")
-                    
-                    # 1. Generate the type-safe verification heatmap
-                    export_alignment_verification_plot(
-                        plm_matrix=plm_matrix,
-                        ref_seq=focal_protein_seq,
-                        target_seq=plm_ref_protein,
-                        coord_map=global_to_monthly_map,
-                        month_label=lineage,
-                        outdir=verify_dir,
-                    )
-                    
-                    # 2. Generate the rolling % identity curve
-                    export_rolling_identity_plot(
-                        alignment=alignment_obj,
-                        window_size=30, # Adjustable window 
-                        outdir=verify_dir,
-                        label=lineage
-                    )
-
-                    # Calculate a simple metric for sanity checking
-                    mapped_target_aas = [plm_ref_protein[global_to_monthly_map[i]] for i in range(len(focal_protein_seq)) if i in global_to_monthly_map]
-                    print(f"[{lineage}] Mapping complete. Captured {len(mapped_target_aas)} aligned residues.")
-                except Exception as exc:
-                    print(f"[{lineage}] Alignment failed: {exc}")
-            
-
-            # --- ROBUST COORDINATE MAPPING ---
-            for j, pos_label in enumerate(plm_matrix.columns):
-                # j is the guaranteed 0-based column index
-                pos_plm_0 = j
-                
-                # Transpose coordinates using the alignment map
-                if USE_GLOBAL_PLM_REFERENCE:
-                    if pos_plm_0 not in global_to_monthly_map:
-                        continue # Global position deleted in monthly reference
-                    mapped_monthly_0 = global_to_monthly_map[pos_plm_0]
-                    
-                    if mapped_monthly_0 not in coord_map:
-                        continue
-                    pos_full_0 = coord_map[mapped_monthly_0]
-                else:
-                    if pos_plm_0 not in coord_map:
-                        continue 
-                    pos_full_0 = coord_map[pos_plm_0]
-
-                pos_full_1 = pos_full_0 + 1 # 1-based index in full reference
-                
-                ref_aa = plm_ref_protein[pos_plm_0]
-                
-                # Verify that this position exists in the mutational accessibility profile
-                if pos_full_1 not in data["mut_profile"].columns:
+                if plm_matrix is None:
                     continue
 
-                for aa in plm_matrix.index:
-                    if aa == ref_aa:
-                        continue
-                    if aa not in data["mut_profile"].index or aa not in data["obs_freq"].index:
-                        continue
+                # Assuming 'focal_protein_seq' is your global root reference that generated the PLM
+                global_to_monthly_map = {}
+                if USE_GLOBAL_PLM_REFERENCE:
+                    try:
+                        # Uses the robust generator we set up previously
+                        global_to_monthly_map, alignment_obj = generate_verified_coordinate_map(focal_protein_seq, plm_ref_protein)
 
-                    # Use .iloc to fetch by absolute coordinate rather than label
-                    row_idx = plm_matrix.index.get_loc(aa)
-                    plm_prob = float(plm_matrix.iloc[row_idx, j])
+                        verify_dir = os.path.join(model_outdir, "alignment_verifications")
+                        
+                        # 1. Generate the type-safe verification heatmap
+                        export_alignment_verification_plot(
+                            plm_matrix=plm_matrix,
+                            ref_seq=focal_protein_seq,
+                            target_seq=plm_ref_protein,
+                            coord_map=global_to_monthly_map,
+                            month_label=lineage,
+                            outdir=verify_dir,
+                        )
+                        
+                        # 2. Generate the rolling % identity curve
+                        export_rolling_identity_plot(
+                            alignment=alignment_obj,
+                            window_size=30,
+                            outdir=verify_dir,
+                            label=lineage
+                        )
+
+                        mapped_target_aas = [plm_ref_protein[global_to_monthly_map[i]] for i in range(len(focal_protein_seq)) if i in global_to_monthly_map]
+                        print(f"[{lineage}] Mapping complete. Captured {len(mapped_target_aas)} aligned residues.")
+                    except Exception as exc:
+                        print(f"[{lineage}] Alignment failed: {exc}")
+                
+
+                # --- ROBUST COORDINATE MAPPING ---
+                for j, pos_label in enumerate(plm_matrix.columns):
+                    pos_plm_0 = j
                     
-                    mut_prob = float(data["mut_profile"].loc[aa, pos_full_1])
-                    obs = float(data["obs_freq"].loc[aa, pos_full_1])
-                    
-                    # Calculate approximate observed counts at this site for this AA
-                    depth_here = int(data["obs_depth"].get(pos_full_1, 0)) if pos_full_1 in data["obs_depth"].index else int(data["obs_depth"].loc[pos_full_1])
-                    obs_count_est = int(round(obs * depth_here)) if depth_here > 0 else 0
+                    if USE_GLOBAL_PLM_REFERENCE:
+                        if pos_plm_0 not in global_to_monthly_map:
+                            continue
+                        mapped_monthly_0 = global_to_monthly_map[pos_plm_0]
+                        
+                        if mapped_monthly_0 not in coord_map:
+                            continue
+                        pos_full_0 = coord_map[mapped_monthly_0]
+                    else:
+                        if pos_plm_0 not in coord_map:
+                            continue
+                        pos_full_0 = coord_map[pos_plm_0]
 
-                    if FILTER_FIXED_MUTATIONS and obs >= 1.0:
+                    pos_full_1 = pos_full_0 + 1
+                    ref_aa = plm_ref_protein[pos_plm_0]
+                    
+                    if pos_full_1 not in data["mut_profile"].columns:
                         continue
 
-                    # If singleton filtering is enabled, round small observed counts down to zero
-                    obs_final = obs
-                    obs_present_final = 1 if obs > 0 else 0
-                    if FILTER_SINGLETON_MUTATIONS and obs_count_est < MIN_OBS_COUNT:
-                        if SKIP_FILTER:
-                            continue #<- to only look at circulating sites
-                        else:
-                            obs_final = 0.0
-                            obs_present_final = 0
+                    for aa in plm_matrix.index:
+                        if aa == ref_aa:
+                            continue
+                        if aa not in data["mut_profile"].index or aa not in data["obs_freq"].index:
+                            continue
 
-                    combined_rows.append({
-                        "model": model_tag,
-                        "lineage": lineage,
-                        "position": int(pos_full_1),
-                        "ref_aa": ref_aa,
-                        "aa": aa,
-                        "plm_prob": plm_prob,
-                        "mut_prob": mut_prob,
-                        "obs_freq": obs_final,
-                        "obs_present": obs_present_final,
-                        "depth": float(data["obs_depth"][pos_full_1]),
-                    })
+                        row_idx = plm_matrix.index.get_loc(aa)
+                        plm_prob = float(plm_matrix.iloc[row_idx, j])
+                        mut_prob = float(data["mut_profile"].loc[aa, pos_full_1])
+                        obs = float(data["obs_freq"].loc[aa, pos_full_1])
+                        
+                        depth_here = int(data["obs_depth"].get(pos_full_1, 0)) if pos_full_1 in data["obs_depth"].index else int(data["obs_depth"].loc[pos_full_1])
+                        obs_count_est = int(round(obs * depth_here)) if depth_here > 0 else 0
 
-            data["mut_profile"].to_csv(
-                os.path.join(model_outdir, _tag_output_name(f"{data['lineage_key']}_mutation_accessibility_profile.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG))
-            )
-            data["obs_freq"].to_csv(
-                os.path.join(model_outdir, _tag_output_name(f"{data['lineage_key']}_observed_diversity_profile.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG))
-            )
+                        if FILTER_FIXED_MUTATIONS and obs >= 1.0:
+                            continue
 
-            per_lineage_summaries.append({
-                "model": model_tag,
-                "lineage": lineage,
-                "n_sequences": len(data["records"]),
-                "reference_length": len(data["full_ref_protein"]),
-                "mapped_ref_sites": int(data["alignment_diff_stats"]["mapped_sites"]),
-                "compared_sites_non_gap_non_stop": int(data["alignment_diff_stats"]["compared_sites"]),
-                "differing_sites_vs_reference_non_gap_non_stop": int(data["alignment_diff_stats"]["differing_sites"]),
-                "fixed_differing_sites_vs_reference_non_gap_non_stop": int(data["alignment_diff_stats"]["fixed_differing_sites"]),
-                "diversity_fasta": data["diversity_path"],
-                "diversity_tag": data["diversity_tag"],
-                "plm_profile": plm_profile_path,
-            })
+                        obs_final = obs
+                        obs_present_final = 1 if obs > 0 else 0
+                        if FILTER_SINGLETON_MUTATIONS and obs_count_est < MIN_OBS_COUNT:
+                            if SKIP_FILTER:
+                                continue
+                            else:
+                                obs_final = 0.0
+                                obs_present_final = 0
 
-        if model_runtime_failed:
-            combined_rows = []
-            per_lineage_summaries = []
-            model_status_rows.append({
-                "model": model_tag,
-                "status": "skipped",
-                "reason": f"runtime failure: {model_runtime_failed_reason}",
-                "load_failed_reason": model_load_failed_reason,
-                "runtime_failed_reason": model_runtime_failed_reason,
-                "used_cached_plm": used_cached_plm,
-            })
-            continue
+                        combined_rows.append({
+                            "model": model_tag,
+                            "lineage": lineage,
+                            "position": int(pos_full_1),
+                            "ref_aa": ref_aa,
+                            "aa": aa,
+                            "plm_prob": plm_prob,
+                            "mut_prob": mut_prob,
+                            "obs_freq": obs_final,
+                            "obs_present": obs_present_final,
+                            "depth": float(data["obs_depth"][pos_full_1]),
+                        })
+
+                data["mut_profile"].to_csv(
+                    os.path.join(model_outdir, _tag_output_name(f"{data['lineage_key']}_mutation_accessibility_profile.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG))
+                )
+                data["obs_freq"].to_csv(
+                    os.path.join(model_outdir, _tag_output_name(f"{data['lineage_key']}_observed_diversity_profile.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG))
+                )
+
+                per_lineage_summaries.append({
+                    "model": model_tag,
+                    "lineage": lineage,
+                    "n_sequences": data["n_sequences_total"],
+                    "n_sequences_total": data["n_sequences_total"],
+                    "n_sequences_processed": len(data["records"]),
+                    "reference_length": len(data["full_ref_protein"]),
+                    "mapped_ref_sites": int(data["alignment_diff_stats"]["mapped_sites"]),
+                    "compared_sites_non_gap_non_stop": int(data["alignment_diff_stats"]["compared_sites"]),
+                    "differing_sites_vs_reference_non_gap_non_stop": int(data["alignment_diff_stats"]["differing_sites"]),
+                    "fixed_differing_sites_vs_reference_non_gap_non_stop": int(data["alignment_diff_stats"]["fixed_differing_sites"]),
+                    "diversity_fasta": data["diversity_path"],
+                    "diversity_tag": data["diversity_tag"],
+                    "plm_profile": plm_profile_path,
+                    "sequence_threshold_min": MIN_LINEAGE_SEQUENCE_COUNT,
+                    "sequence_threshold_passed": True,
+                    "skipped": False,
+                    "skip_reason": "",
+                })
+
+            if model_runtime_failed:
+                combined_rows = []
+                per_lineage_summaries = []
+                model_status_rows.append({
+                    "model": model_tag,
+                    "status": "skipped",
+                    "reason": f"runtime failure: {model_runtime_failed_reason}",
+                    "load_failed_reason": model_load_failed_reason,
+                    "runtime_failed_reason": model_runtime_failed_reason,
+                    "used_cached_plm": used_cached_plm,
+                    "used_cached_downstream": used_cached_downstream,
+                    "used_cached_alpha": used_cached_alpha,
+                    "used_cached_lineage_alpha": used_cached_lineage_alpha,
+                })
+                continue
+
+            combined_df = pd.DataFrame(combined_rows)
+            if combined_df.empty:
+                print(f"No combined rows produced for {model_tag}; skipping alpha sweep.")
+                continue
+
+            combined_df.to_csv(combined_df_path, index=False)
+            lineage_meta_df = pd.DataFrame(per_lineage_summaries)
+            lineage_meta_df.to_csv(lineage_meta_path, sep="\t", index=False)
+            print(f"Saved cached pooled tables for {model_tag}: {combined_df_path}")
 
         # Ensure we always append a status row with explicit reasons and diagnostics
         if model_ready:
             status = "loaded"
             reason = "used for PLM generation"
+        elif used_cached_downstream:
+            status = "cached_only"
+            reason = "reused cached pooled tables"
         elif used_cached_plm:
             status = "cached_only"
             reason = "all PLM profiles reused from disk"
@@ -1837,24 +2064,12 @@ if RUN_POOLED_PANEL:
             status = "skipped"
             reason = "no PLM profiles generated and no load error captured (no model loaded, no cached matrices)"
 
-        model_status_rows.append({
-            "model": model_tag,
-            "status": status,
-            "reason": reason,
-            "load_failed_reason": model_load_failed_reason,
-            "runtime_failed_reason": model_runtime_failed_reason,
-            "used_cached_plm": used_cached_plm,
-        })
-
-        combined_df = pd.DataFrame(combined_rows)
-        if combined_df.empty:
+        if combined_df is None or combined_df.empty:
             print(f"No combined rows produced for {model_tag}; skipping alpha sweep.")
             continue
 
-        combined_df.to_csv(
-            os.path.join(model_outdir, _tag_output_name("pooled_combined_long_table.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
-            index=False,
-        )
+        if baseline_combined_df is None and not combined_df.empty:
+            baseline_combined_df = combined_df.copy()
 
         # Output specific PLM vs Mutation probability comparison for this model
         comparison_columns = ["position", "ref_aa", "aa", "plm_prob", "mut_prob"]
@@ -1873,52 +2088,80 @@ if RUN_POOLED_PANEL:
                 plot_data = comparison_df[mask]
                 
                 if not plot_data.empty:
-                    rho, pval = spearmanr(plot_data["plm_prob"], plot_data["mut_prob"])
-                    
+                    sp_rho, sp_p = spearmanr(plot_data["plm_prob"], plot_data["mut_prob"])
+                    try:
+                        pe_r, pe_p = pearsonr(plot_data["plm_prob"], plot_data["mut_prob"])
+                    except Exception:
+                        pe_r, pe_p = (np.nan, np.nan)
+
                     plt.scatter(plot_data["plm_prob"], plot_data["mut_prob"], alpha=0.3, s=10, edgecolors="none")
                     plt.xscale("log")
                     plt.yscale("log")
                     plt.xlabel("PLM Probability")
                     plt.ylabel("Mutation Probability (Codon Model)")
-                    plt.title(f"{model_tag} Correlation\nSpearman rho={rho:.3f}")
+                    plt.title(
+                        f"{model_tag} Correlation\n"
+                        f"Spearman rho={sp_rho:.3f} (p={sp_p:.2e}); "
+                        f"Pearson r={pe_r:.3f} (p={pe_p:.2e})"
+                    )
                     plt.grid(True, which="both", ls="--", alpha=0.5)
                     
                     plot_path = os.path.join(model_outdir, _tag_output_name("plm_vs_mut_prob_scatter.png", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG))
                     plt.tight_layout()
-                    plt.savefig(plot_path, dpi=300)
+                    export_publication_figure(plot_path)
                     plt.close()
             except Exception as plot_exc:
                 print(f"Warning: Failed to generate comparison plot for {model_tag}: {plot_exc}")
 
-        lineage_meta_df = pd.DataFrame(per_lineage_summaries)
-        lineage_meta_df.to_csv(
-            os.path.join(model_outdir, _tag_output_name("pooled_panel_metadata.tsv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
-            sep="\t",
-            index=False,
-        )
+        if lineage_meta_df is None:
+            lineage_meta_df = pd.DataFrame(per_lineage_summaries)
+            lineage_meta_df.to_csv(lineage_meta_path, sep="\t", index=False)
 
         use_parallel_alpha = ALPHA_SWEEP_PARALLEL and len(ALPHA_GRID) >= ALPHA_SWEEP_MIN_GRID
         if use_parallel_alpha:
             print(f"Running alpha sweep in parallel for {model_tag} (n_alpha={len(ALPHA_GRID)})")
 
-        n_seq_pooled = int(lineage_meta_df["n_sequences"].max()) if not lineage_meta_df.empty else 1000
+        active_lineage_meta_df = lineage_meta_df.loc[~lineage_meta_df["skipped"].fillna(False)].copy()
+        n_seq_pooled = int(active_lineage_meta_df["n_sequences"].max()) if not active_lineage_meta_df.empty else 1000
         dynamic_pseudocount = float(10 ** -round(np.log10(10 * n_seq_pooled)))
         print(f"Using dynamic pseudocount for obs_freq plotting: {dynamic_pseudocount:.1e} based on {n_seq_pooled} max sequences")
-        
-        # Model probabilities (plm_prob, mut_prob) need a tiny pseudocount (e.g. 1e-16) to not squash the long tail
-        alpha_df = evaluate_alpha_sweep(
-            combined_df,
-            ALPHA_GRID,
-            parallel=use_parallel_alpha,
-            max_workers=ALPHA_SWEEP_MAX_WORKERS,
-            pseudocount=1e-16,
-        )
-        alpha_df["model"] = model_tag
-        alpha_df.to_csv(
-            os.path.join(model_outdir, _tag_output_name("alpha_sweep_fit_metrics.tsv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
-            sep="\t",
-            index=False,
-        )
+
+        required_alpha_cols = {
+            "alpha",
+            "mut_flat_global_pearson_r",
+            "mut_flat_nonzero_spearman_r",
+            "mut_flat_nonzero_pearson_r",
+            "mut_flat_logfreq_global_pearson_r",
+            "mut_flat_logfreq_nonzero_pearson_r",
+            "site_top10pct_mutated_enrichment",
+            "mut_flat_global_spearman_r",
+        }
+        if not force_recompute_model and os.path.exists(alpha_df_path):
+            try:
+                alpha_df = pd.read_csv(alpha_df_path, sep="\t")
+                if required_alpha_cols.issubset(alpha_df.columns):
+                    used_cached_alpha = True
+                    print(f"Reusing cached alpha sweep for {model_tag}: {alpha_df_path}")
+                else:
+                    alpha_df = None
+                    print(f"Cached alpha sweep missing required columns for {model_tag}; recomputing.")
+            except Exception as exc:
+                alpha_df = None
+                print(f"Failed to load cached alpha sweep for {model_tag}: {exc}")
+
+        if alpha_df is None:
+            alpha_df = evaluate_alpha_sweep(
+                combined_df,
+                ALPHA_GRID,
+                parallel=use_parallel_alpha,
+                max_workers=ALPHA_SWEEP_MAX_WORKERS,
+                pseudocount=1e-16,
+            )
+            alpha_df["model"] = model_tag
+            alpha_df.to_csv(alpha_df_path, sep="\t", index=False)
+            print(f"Saved alpha sweep cache for {model_tag}: {alpha_df_path}")
+        elif "model" not in alpha_df.columns:
+            alpha_df["model"] = model_tag
 
         scatter_alphas = list(dict.fromkeys([float(a) for a in METHOD2_SCATTER_ALPHAS]))
 
@@ -2005,44 +2248,100 @@ if RUN_POOLED_PANEL:
                     "row = pooled population, columns = alpha values"
                 )
                 plt.tight_layout(rect=(0, 0, 1, 0.95))
-                plt.savefig(
+                export_publication_figure(
                     os.path.join(
                         model_outdir,
                         _tag_output_name("method2_obsfreq_vs_plm_mut_scatter_pooled_grid.png", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
                     ),
-                    dpi=300,
+                    figure=fig_sc,
                 )
+                plt.close(fig_sc)
 
-        # Per-lineage best-alpha extraction
-        for lineage_name, lineage_df in combined_df.groupby("lineage"):
-            lineage_alpha = evaluate_alpha_sweep(
-                lineage_df,
-                ALPHA_GRID,
-                parallel=use_parallel_alpha,
-                max_workers=ALPHA_SWEEP_MAX_WORKERS,
-            )
-            if lineage_alpha.empty:
-                continue
+        required_lineage_alpha_cols = {
+            "model",
+            "lineage",
+            "alpha",
+            "site_top10pct_mutated_enrichment",
+            "mut_flat_global_spearman_r",
+        }
+        if not force_recompute_model and os.path.exists(lineage_alpha_path):
+            try:
+                lineage_alpha_all_df = pd.read_csv(lineage_alpha_path, sep="\t")
+                if required_lineage_alpha_cols.issubset(lineage_alpha_all_df.columns):
+                    used_cached_lineage_alpha = True
+                    print(f"Reusing cached per-lineage alpha sweeps for {model_tag}: {lineage_alpha_path}")
+                else:
+                    lineage_alpha_all_df = None
+                    print(f"Cached per-lineage alpha sweeps missing required columns for {model_tag}; recomputing.")
+            except Exception as exc:
+                lineage_alpha_all_df = None
+                print(f"Failed to load cached per-lineage alpha sweeps for {model_tag}: {exc}")
 
-            idx_a = lineage_alpha["site_top10pct_mutated_enrichment"].idxmax()
-            idx_b = lineage_alpha["mut_flat_global_spearman_r"].idxmax()
+        if lineage_alpha_all_df is None:
+            lineage_alpha_frames = []
+            for lineage_name, lineage_df in combined_df.groupby("lineage"):
+                lineage_alpha = evaluate_alpha_sweep(
+                    lineage_df,
+                    ALPHA_GRID,
+                    parallel=use_parallel_alpha,
+                    max_workers=ALPHA_SWEEP_MAX_WORKERS,
+                )
+                if lineage_alpha.empty:
+                    continue
+                lineage_alpha["model"] = model_tag
+                lineage_alpha["lineage"] = lineage_name
+                lineage_alpha_frames.append(lineage_alpha)
 
-            per_lineage_best_rows.append({
-                "model": model_tag,
-                "lineage": lineage_name,
-                "method": "Method A (Site-level)",
-                "criterion": "max site_top10pct_mutated_enrichment",
-                "best_alpha": float(lineage_alpha.loc[idx_a, "alpha"]),
-                "best_value": float(lineage_alpha.loc[idx_a, "site_top10pct_mutated_enrichment"]),
-            })
-            per_lineage_best_rows.append({
-                "model": model_tag,
-                "lineage": lineage_name,
-                "method": "Method B (Mutation-level flattened)",
-                "criterion": "max mut_flat_global_spearman_r",
-                "best_alpha": float(lineage_alpha.loc[idx_b, "alpha"]),
-                "best_value": float(lineage_alpha.loc[idx_b, "mut_flat_global_spearman_r"]),
-            })
+            if len(lineage_alpha_frames) > 0:
+                lineage_alpha_all_df = pd.concat(lineage_alpha_frames, ignore_index=True)
+                lineage_alpha_all_df.to_csv(lineage_alpha_path, sep="\t", index=False)
+                print(f"Saved per-lineage alpha sweep cache for {model_tag}: {lineage_alpha_path}")
+            else:
+                lineage_alpha_all_df = pd.DataFrame()
+
+        def _select_best_alpha_index(df, metric_col):
+            if metric_col not in df.columns or "alpha" not in df.columns:
+                return None
+            valid = df.loc[df[metric_col].notna() & df["alpha"].notna()]
+            if valid.empty:
+                return None
+            return valid[metric_col].idxmax()
+
+        if not lineage_alpha_all_df.empty:
+            for lineage_name, lineage_alpha in lineage_alpha_all_df.groupby("lineage"):
+                idx_a = _select_best_alpha_index(lineage_alpha, "site_top10pct_mutated_enrichment")
+                if idx_a is not None:
+                    per_lineage_best_rows.append({
+                        "model": model_tag,
+                        "lineage": lineage_name,
+                        "method": "Method A (Site-level)",
+                        "criterion": "max site_top10pct_mutated_enrichment",
+                        "best_alpha": float(lineage_alpha.loc[idx_a, "alpha"]),
+                        "best_value": float(lineage_alpha.loc[idx_a, "site_top10pct_mutated_enrichment"]),
+                    })
+
+                idx_b = _select_best_alpha_index(lineage_alpha, "mut_flat_global_spearman_r")
+                if idx_b is not None:
+                    per_lineage_best_rows.append({
+                        "model": model_tag,
+                        "lineage": lineage_name,
+                        "method": "Method B (Mutation-level flattened)",
+                        "criterion": "max mut_flat_global_spearman_r",
+                        "best_alpha": float(lineage_alpha.loc[idx_b, "alpha"]),
+                        "best_value": float(lineage_alpha.loc[idx_b, "mut_flat_global_spearman_r"]),
+                    })
+
+        model_status_rows.append({
+            "model": model_tag,
+            "status": status,
+            "reason": reason,
+            "load_failed_reason": model_load_failed_reason,
+            "runtime_failed_reason": model_runtime_failed_reason,
+            "used_cached_plm": used_cached_plm,
+            "used_cached_downstream": used_cached_downstream,
+            "used_cached_alpha": used_cached_alpha,
+            "used_cached_lineage_alpha": used_cached_lineage_alpha,
+        })
 
         all_alpha_frames.append(alpha_df)
         print(f"Saved per-model alpha sweep for {model_tag} in {model_outdir}")
@@ -2055,23 +2354,114 @@ if RUN_POOLED_PANEL:
     )
 
     if len(all_alpha_frames) > 0:
-        alpha_all_df = pd.concat(all_alpha_frames, ignore_index=True)
+        method2_overlay_required_cols = [
+            "mut_flat_nonzero_spearman_r",
+            "mut_flat_nonzero_pearson_r",
+            "mut_flat_logfreq_global_pearson_r",
+            "mut_flat_logfreq_nonzero_pearson_r",
+        ]
+
+        alpha_frames_by_model = {}
+        for alpha_frame in all_alpha_frames:
+            if alpha_frame is None or len(alpha_frame) == 0 or "model" not in alpha_frame.columns:
+                continue
+            frame_models = pd.Series(alpha_frame["model"]).dropna().unique().tolist()
+            if len(frame_models) != 1:
+                continue
+            alpha_frames_by_model[frame_models[0]] = alpha_frame.copy()
+
+        rebuilt_alpha_frames = []
+        for run_cfg in MODEL_RUNS:
+            model_tag = run_cfg["tag"]
+            model_outdir = os.path.join(POOLED_PANEL_OUTDIR, model_tag)
+            combined_df_path = os.path.join(
+                model_outdir,
+                _tag_output_name("pooled_combined_long_table.csv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
+            )
+            alpha_df_path = os.path.join(
+                model_outdir,
+                _tag_output_name("alpha_sweep_fit_metrics.tsv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
+            )
+
+            alpha_frame = alpha_frames_by_model.get(model_tag)
+            missing_overlay_cols = [] if alpha_frame is None else [
+                col for col in method2_overlay_required_cols if col not in alpha_frame.columns
+            ]
+
+            if alpha_frame is None or missing_overlay_cols:
+                reason = "missing in-memory alpha sweep" if alpha_frame is None else f"missing metrics {missing_overlay_cols}"
+                print(f"Recomputing alpha sweep for {model_tag} ({reason}).")
+                if not os.path.exists(combined_df_path):
+                    raise FileNotFoundError(
+                        f"Cannot recompute alpha sweep for {model_tag}; combined table not found: {combined_df_path}"
+                    )
+                combined_rebuild_df = pd.read_csv(combined_df_path)
+                if combined_rebuild_df.empty:
+                    raise ValueError(
+                        f"Cannot recompute alpha sweep for {model_tag}; combined table is empty: {combined_df_path}"
+                    )
+                alpha_frame = evaluate_alpha_sweep(
+                    combined_rebuild_df,
+                    ALPHA_GRID,
+                    parallel=ALPHA_SWEEP_PARALLEL and len(ALPHA_GRID) >= ALPHA_SWEEP_MIN_GRID,
+                    max_workers=ALPHA_SWEEP_MAX_WORKERS,
+                    pseudocount=1e-16,
+                )
+                alpha_frame["model"] = model_tag
+                alpha_frame.to_csv(alpha_df_path, sep="\t", index=False)
+                print(f"Saved recomputed alpha sweep cache for {model_tag}: {alpha_df_path}")
+            elif "model" not in alpha_frame.columns:
+                alpha_frame = alpha_frame.copy()
+                alpha_frame["model"] = model_tag
+
+            rebuilt_alpha_frames.append(alpha_frame)
+
+        alpha_all_df = pd.concat(rebuilt_alpha_frames, ignore_index=True)
+
         alpha_all_df.to_csv(
             os.path.join(POOLED_PANEL_OUTDIR, _tag_output_name("alpha_sweep_fit_metrics_all_models.tsv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
             sep="\t",
             index=False,
         )
 
+        mut_baseline_metrics = None
+        mut_baseline_path = os.path.join(
+            POOLED_PANEL_OUTDIR,
+            _tag_output_name("alpha_sweep_fit_metrics_mutation_only.tsv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
+        )
+
         # Compute baseline for mutation probability alone
-        if not combined_df.empty:
-            mut_only_df = combined_df.copy()
-            mut_only_df["plm_prob"] = 1.0  # log(1.0) = 0, so score = alpha * log_mut
-            mut_baseline_df = evaluate_alpha_sweep(
-                mut_only_df,
-                np.array([1.0]),
-                parallel=False,
-                pseudocount=1e-16
-            )
+        if baseline_combined_df is not None and not baseline_combined_df.empty:
+            mut_baseline_df = None
+            if os.path.exists(mut_baseline_path):
+                try:
+                    mut_baseline_df = pd.read_csv(mut_baseline_path, sep="\t")
+                    missing_mut_baseline_cols = [
+                        col for col in method2_overlay_required_cols if col not in mut_baseline_df.columns
+                    ]
+                    if missing_mut_baseline_cols:
+                        mut_baseline_df = None
+                        print(
+                            "Cached mutation-only alpha baseline missing required columns; recomputing. "
+                            f"Missing: {missing_mut_baseline_cols}"
+                        )
+                    else:
+                        print(f"Reusing cached mutation-only alpha baseline: {mut_baseline_path}")
+                except Exception as exc:
+                    mut_baseline_df = None
+                    print(f"Failed to load cached mutation-only alpha baseline: {exc}")
+
+            if mut_baseline_df is None:
+                mut_only_df = baseline_combined_df.copy()
+                mut_only_df["plm_prob"] = 1.0  # log(1.0) = 0, so score = alpha * log_mut
+                mut_baseline_df = evaluate_alpha_sweep(
+                    mut_only_df,
+                    np.array([1.0]),
+                    parallel=False,
+                    pseudocount=1e-16
+                )
+                mut_baseline_df.to_csv(mut_baseline_path, sep="\t", index=False)
+                print(f"Saved mutation-only alpha baseline cache: {mut_baseline_path}")
             if not mut_baseline_df.empty:
                 mut_baseline_metrics = mut_baseline_df.iloc[0]
 
@@ -2099,62 +2489,184 @@ if RUN_POOLED_PANEL:
 
         model_palette, model_order = _build_model_palette(alpha_all_df)
 
-        def plot_overlay(plot_df, file_suffix):
+        def _choose_legend_corner(ax):
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            x_span = xlim[1] - xlim[0]
+            y_span = ylim[1] - ylim[0]
+            if not np.isfinite(x_span) or not np.isfinite(y_span) or x_span == 0 or y_span == 0:
+                return "best"
+
+            corner_boxes = {
+                "upper left": (0.0, 0.35, 0.65, 1.0),
+                "upper right": (0.65, 1.0, 0.65, 1.0),
+                "lower left": (0.0, 0.35, 0.0, 0.35),
+                "lower right": (0.65, 1.0, 0.0, 0.35),
+            }
+            occupancy = {corner: 0 for corner in corner_boxes}
+
+            def _accumulate_points(x_vals, y_vals):
+                x_vals = np.asarray(x_vals, dtype=float)
+                y_vals = np.asarray(y_vals, dtype=float)
+                valid = np.isfinite(x_vals) & np.isfinite(y_vals)
+                if not np.any(valid):
+                    return
+
+                x_norm = (x_vals[valid] - xlim[0]) / x_span
+                y_norm = (y_vals[valid] - ylim[0]) / y_span
+                for corner, (xmin, xmax, ymin, ymax) in corner_boxes.items():
+                    in_corner = (
+                        (x_norm >= xmin) & (x_norm <= xmax) &
+                        (y_norm >= ymin) & (y_norm <= ymax)
+                    )
+                    occupancy[corner] += int(np.count_nonzero(in_corner))
+
+            for line in ax.get_lines():
+                _accumulate_points(line.get_xdata(), line.get_ydata())
+
+            for collection in ax.collections:
+                try:
+                    offsets = collection.get_offsets()
+                except Exception:
+                    offsets = None
+                if offsets is None or len(offsets) == 0:
+                    continue
+                _accumulate_points(offsets[:, 0], offsets[:, 1])
+
+            return min(
+                occupancy,
+                key=lambda corner: (occupancy[corner], list(corner_boxes).index(corner)),
+            )
+
+        def _add_plm_only_reference(ax, color="black"):
+            ax.axvline(0.0, color=color, linestyle="--", linewidth=1.2, alpha=0.9, zorder=1)
+            ax.annotate(
+                "PLM_only",
+                xy=(0.0, 0.02),
+                xycoords=ax.get_xaxis_transform(),
+                xytext=(4, 0),
+                textcoords="offset points",
+                ha="left",
+                va="bottom",
+                rotation=90,
+                fontsize=8,
+                color=color,
+                clip_on=False,
+            )
+
+        def plot_overlay(plot_df, metric_cols, title_map, file_suffix, nrows, ncols, figsize):
             if len(plot_df) == 0:
                 return
-            fig, axes = plt.subplots(2, 3, figsize=(18, 9), sharex=True)
-            axes = axes.flatten()
+            fig, axes = plt.subplots(nrows, ncols, figsize=figsize, sharex=True)
+            if isinstance(axes, np.ndarray):
+                axes = list(axes.flat)
+            else:
+                axes = [axes]
             for i, metric_col in enumerate(metric_cols):
                 ax = axes[i]
                 for model_tag, sub in plot_df.groupby("model"):
                     color = model_palette.get(model_tag)
                     ax.plot(sub["alpha"], sub[metric_col], marker="o", label=model_tag, color=color)
-                    
-                if "mut_baseline_metrics" in locals() and metric_col in mut_baseline_metrics:
-                    ax.axhline(mut_baseline_metrics[metric_col], color="black", linestyle="--", label="Mut Prob Only")
 
-                title_map = {
-                    "site_top10pct_mutated_enrichment": "Method A (site-level): enrichment of mutated sites in top 10%",
-                    "site_top10pct_mutated_precision": "Method A (site-level): fraction of top 10% sites mutated",
-                    "site_rank_spearman_r": "Method A (site-level): Spearman(site score vs burden)",
-                    "mut_flat_global_spearman_r": "Method B (mutation-level): Spearman(score vs freq)",
-                    "mut_flat_global_pearson_r": "Method B (mutation-level): Pearson(score vs freq)",
-                    "mut_flat_mean_site_nll": "Method B (mutation-level): mean site-level NLL",
-                }
+                if mut_baseline_metrics is not None and metric_col in mut_baseline_metrics.index:
+                    ax.scatter(
+                        [float(mut_baseline_metrics["alpha"])],
+                        [float(mut_baseline_metrics[metric_col])],
+                        marker="s",
+                        s=110,
+                        color="#d62728",
+                        edgecolors="black",
+                        linewidths=1.0,
+                        zorder=6,
+                        label="Mut Prob Only",
+                    )
+
+                _add_plm_only_reference(ax)
                 ax.set_title(title_map.get(metric_col, metric_col))
                 ax.set_xlabel("Alpha weight")
                 ax.set_ylabel("Metric value")
                 ax.grid(alpha=0.3)
-                if i == 0:
+                legend_loc = _choose_legend_corner(ax)
+                try:
+                    ax.legend(loc=legend_loc, fontsize=8)
+                except Exception:
                     ax.legend()
 
+            for ax in axes[len(metric_cols):]:
+                ax.axis("off")
+
             plt.tight_layout()
-            plt.savefig(
+            export_publication_figure(
                 os.path.join(POOLED_PANEL_OUTDIR, _tag_output_name(f"alpha_sweep_model_comparison_{file_suffix}.png", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
-                dpi=300,
+                figure=fig,
             )
             plt.close()
 
         # Plot overlays
-        plot_overlay(alpha_all_df, "all")
+        plot_overlay(
+            alpha_all_df,
+            metric_cols=[
+                "site_top10pct_mutated_enrichment",
+                "site_top10pct_mutated_precision",
+                "site_rank_spearman_r",
+                "mut_flat_global_spearman_r",
+                "mut_flat_global_pearson_r",
+                "mut_flat_mean_site_nll",
+            ],
+            title_map={
+                "site_top10pct_mutated_enrichment": "Method A (site-level): enrichment of mutated sites in top 10%",
+                "site_top10pct_mutated_precision": "Method A (site-level): fraction of top 10% sites mutated",
+                "site_rank_spearman_r": "Method A (site-level): Spearman(site score vs burden)",
+                "mut_flat_global_spearman_r": "Method B (mutation-level): Spearman(score vs freq)",
+                "mut_flat_global_pearson_r": "Method B (mutation-level): Pearson(score vs freq)",
+                "mut_flat_mean_site_nll": "Method B (mutation-level): mean site-level NLL",
+            },
+            file_suffix="all",
+            nrows=2,
+            ncols=3,
+            figsize=(18, 9),
+        )
+        plot_overlay(
+            alpha_all_df,
+            metric_cols=[
+                "mut_flat_nonzero_spearman_r",
+                "mut_flat_nonzero_pearson_r",
+                "mut_flat_logfreq_global_pearson_r",
+                "mut_flat_logfreq_nonzero_pearson_r",
+            ],
+            title_map={
+                "mut_flat_nonzero_spearman_r": "Method B (mutation-level): Spearman RANK(score vs freq), non-zero obs only",
+                "mut_flat_nonzero_pearson_r": "Method B (mutation-level): Pearson(score vs freq), non-zero obs only",
+                "mut_flat_logfreq_global_pearson_r": "Method B (mutation-level): Pearson(score vs log(freq + pc)), zeroes included",
+                "mut_flat_logfreq_nonzero_pearson_r": "Method B (mutation-level): Pearson(score vs log(freq)), non-zero obs only",
+            },
+            file_suffix="nonzero_and_logfreq",
+            nrows=2,
+            ncols=2,
+            figsize=(14, 10),
+        )
         
         # Explicit two-method best-alpha summary table
         best_rows = []
         for model_tag, sub in alpha_all_df.groupby("model"):
             if sub.empty:
                 continue
-            best_rows.append({
-                "model": model_tag,
-                "method": "Method A (Site-level)",
-                "criterion": "max site_top10pct_mutated_enrichment",
-                "best_alpha": float(sub.loc[sub["site_top10pct_mutated_enrichment"].idxmax(), "alpha"]),
-            })
-            best_rows.append({
-                "model": model_tag,
-                "method": "Method B (Mutation-level flattened)",
-                "criterion": "max mut_flat_global_spearman_r",
-                "best_alpha": float(sub.loc[sub["mut_flat_global_spearman_r"].idxmax(), "alpha"]),
-            })
+            idx_a = _select_best_alpha_index(sub, "site_top10pct_mutated_enrichment")
+            if idx_a is not None:
+                best_rows.append({
+                    "model": model_tag,
+                    "method": "Method A (Site-level)",
+                    "criterion": "max site_top10pct_mutated_enrichment",
+                    "best_alpha": float(sub.loc[idx_a, "alpha"]),
+                })
+            idx_b = _select_best_alpha_index(sub, "mut_flat_global_spearman_r")
+            if idx_b is not None:
+                best_rows.append({
+                    "model": model_tag,
+                    "method": "Method B (Mutation-level flattened)",
+                    "criterion": "max mut_flat_global_spearman_r",
+                    "best_alpha": float(sub.loc[idx_b, "alpha"]),
+                })
         pd.DataFrame(best_rows).to_csv(
             os.path.join(POOLED_PANEL_OUTDIR, _tag_output_name("best_alpha_two_methods.tsv", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
             sep="\t",
@@ -2203,9 +2715,9 @@ if RUN_POOLED_PANEL:
             handles, labels = axes_overlay[0].get_legend_handles_labels()
             fig_overlay.legend(handles, labels, loc="upper center", ncol=max(1, len(labels)))
             plt.tight_layout(rect=[0, 0, 1, 0.92])
-            plt.savefig(
+            export_publication_figure(
                 os.path.join(POOLED_PANEL_OUTDIR, _tag_output_name("best_alpha_per_group_overlay.png", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG)),
-                dpi=300,
+                figure=fig_overlay,
             )
             plt.close()
 

@@ -1580,6 +1580,22 @@ if RUN_LINEAGE_PANEL:
             "site precision = fraction of top-scored sites (top 10%) that have any observed mutation in the lineage set."
         )
 
+        def _add_plm_only_reference(ax, color="black"):
+            ax.axvline(0.0, color=color, linestyle="--", linewidth=1.2, alpha=0.9, zorder=1)
+            ax.annotate(
+                "PLM_only",
+                xy=(0.0, 0.02),
+                xycoords=ax.get_xaxis_transform(),
+                xytext=(4, 0),
+                textcoords="offset points",
+                ha="left",
+                va="bottom",
+                rotation=90,
+                fontsize=8,
+                color=color,
+                clip_on=False,
+            )
+
         # Cross-model overlay plots
         metric_cols = [
             "site_top10pct_mutated_enrichment",
@@ -1614,6 +1630,7 @@ if RUN_LINEAGE_PANEL:
             ax.set_title(title_map.get(metric_col, metric_col))
             ax.set_xlabel("Alpha weight on mutation accessibility in log-space combination")
             ax.set_ylabel(ylabel_map.get(metric_col, "Metric value"))
+            _add_plm_only_reference(ax)
             ax.grid(alpha=0.3)
             if i == 0:
                 ax.legend()
