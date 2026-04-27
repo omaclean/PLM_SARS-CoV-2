@@ -153,6 +153,12 @@ class TestHelpers:
         assert mut_script.infer_epoch_value("epoch_12.5", 0) == 12.5
         assert mut_script.infer_epoch_value("final_checkpoint", 7) == 7.0
 
+    def test_format_epoch_tick_label_prefers_epoch_numbers(self):
+        assert mut_script._format_epoch_tick_label("raw_model", 0.0) == "raw"
+        assert mut_script._format_epoch_tick_label("checkpoint-525", 15.0) == "15"
+        assert mut_script._format_epoch_tick_label("epoch_12.5", 7.0) == "7"
+        assert mut_script._format_epoch_tick_label("final_checkpoint", 16.0) == "final"
+
     def test_load_diversity_records_translates_nucleotide_when_requested(self, tmp_path: Path):
         fasta_path = tmp_path / "diversity_nt.fasta"
         write_fasta(fasta_path, [("nt1", "ATGGCTGAA"), ("nt2", "ATGTCTGAA")])
@@ -197,11 +203,11 @@ class TestBuildModelSpecs:
     def test_discovers_child_checkpoint_directories(self, tmp_path: Path):
         checkpoint_root = tmp_path / "model"
         (checkpoint_root / "checkpoint-10").mkdir(parents=True)
-        (checkpoint_root / "checkpoint-10" / "model.safetensors").write_text("", encoding="utf-8")
+        (checkpoint_root / "checkpoint-10" / "model.safetensors").write_text("ckpt-10", encoding="utf-8")
         (checkpoint_root / "checkpoint-2").mkdir(parents=True)
-        (checkpoint_root / "checkpoint-2" / "model.safetensors").write_text("", encoding="utf-8")
+        (checkpoint_root / "checkpoint-2" / "model.safetensors").write_text("ckpt-2", encoding="utf-8")
         (checkpoint_root / "final_checkpoint").mkdir(parents=True)
-        (checkpoint_root / "final_checkpoint" / "model.safetensors").write_text("", encoding="utf-8")
+        (checkpoint_root / "final_checkpoint" / "model.safetensors").write_text("ckpt-10", encoding="utf-8")
 
         parser = mut_script.build_parser()
         args = parser.parse_args(
@@ -227,13 +233,15 @@ class TestBuildModelSpecs:
 
         specs = mut_script.build_model_specs(args)
 
-        assert [spec["epoch_label"] for spec in specs] == ["checkpoint-2", "checkpoint-10", "final_checkpoint"]
-        assert [spec["epoch_value"] for spec in specs] == [2.0, 10.0, pytest.approx(float(sys.maxsize), rel=0, abs=0)]
+        assert [spec["epoch_label"] for spec in specs] == ["raw_model", "checkpoint-2", "checkpoint-10"]
+        assert [spec["epoch_value"] for spec in specs] == [0.0, 1.0, 2.0]
 
     def test_supports_checkpoint_glob(self, tmp_path: Path):
         checkpoint_root = tmp_path / "model"
         (checkpoint_root / "checkpoint-4").mkdir(parents=True)
+        (checkpoint_root / "checkpoint-4" / "model.safetensors").write_text("ckpt-4", encoding="utf-8")
         (checkpoint_root / "checkpoint-8").mkdir(parents=True)
+        (checkpoint_root / "checkpoint-8" / "model.safetensors").write_text("ckpt-8", encoding="utf-8")
 
         parser = mut_script.build_parser()
         args = parser.parse_args(
@@ -259,7 +267,8 @@ class TestBuildModelSpecs:
 
         specs = mut_script.build_model_specs(args)
 
-        assert [spec["epoch_label"] for spec in specs] == ["checkpoint-4", "checkpoint-8"]
+        assert [spec["epoch_label"] for spec in specs] == ["raw_model", "checkpoint-4", "checkpoint-8"]
+        assert [spec["epoch_value"] for spec in specs] == [0.0, 1.0, 2.0]
 
 
 class TestMainErrors:
@@ -505,33 +514,33 @@ class TestParsingHelpers:
 
 class TestCheckpointDiscovery:
     def test_discover_checkpoint_dirs_finds_only_safetensor_children(self, tmp_path):
-        for name in ["checkpoint-10", "checkpoint-2", "final_checkpoint"]:
+        for name, text in [("checkpoint-10", "ckpt-10"), ("checkpoint-2", "ckpt-2"), ("final_checkpoint", "ckpt-10")]:
             path = tmp_path / name
             path.mkdir()
-            (path / "model.safetensors").write_text("x")
+            (path / "model.safetensors").write_text(text)
         (tmp_path / "notes").mkdir()
 
         discovered = rma._discover_checkpoint_dirs(tmp_path)
         assert [path.name for path in discovered] == ["checkpoint-2", "checkpoint-10", "final_checkpoint"]
 
     def test_build_model_specs_from_parent_checkpoint_directory(self, tmp_path):
-        for name in ["checkpoint-35", "checkpoint-105", "final_checkpoint"]:
+        for name, text in [("checkpoint-35", "ckpt-35"), ("checkpoint-105", "ckpt-105"), ("final_checkpoint", "ckpt-105")]:
             path = tmp_path / name
             path.mkdir()
-            (path / "model.safetensors").write_text("x")
+            (path / "model.safetensors").write_text(text)
 
         args = _make_args(checkpoint_dir=tmp_path, checkpoint_glob=None, model_tag="ESMC_600M_FLU")
         specs = rma.build_model_specs(args)
 
-        assert [spec["epoch_label"] for spec in specs] == ["checkpoint-35", "checkpoint-105", "final_checkpoint"]
-        assert specs[0]["model_tag"] == "ESMC_600M_FLU_checkpoint-35"
-        assert specs[1]["epoch_value"] == 105.0
+        assert [spec["epoch_label"] for spec in specs] == ["raw_model", "checkpoint-35", "checkpoint-105"]
+        assert specs[0]["model_tag"] == "ESMC_600M_FLU_raw"
+        assert specs[2]["epoch_value"] == 2.0
 
     def test_build_model_specs_from_glob(self, tmp_path):
-        for name in ["checkpoint-4", "checkpoint-12"]:
+        for name, text in [("checkpoint-4", "ckpt-4"), ("checkpoint-12", "ckpt-12")]:
             path = tmp_path / name
             path.mkdir()
-            (path / "model.safetensors").write_text("x")
+            (path / "model.safetensors").write_text(text)
 
         args = _make_args(
             checkpoint_dir=None,
@@ -539,12 +548,13 @@ class TestCheckpointDiscovery:
             model_tag="ESMC_600M_FLU",
         )
         specs = rma.build_model_specs(args)
-        assert [spec["epoch_label"] for spec in specs] == ["checkpoint-4", "checkpoint-12"]
+        assert [spec["epoch_label"] for spec in specs] == ["raw_model", "checkpoint-4", "checkpoint-12"]
+        assert [spec["epoch_value"] for spec in specs] == [0.0, 1.0, 2.0]
 
     def test_build_model_specs_single_checkpoint_fallback(self, tmp_path):
         checkpoint_dir = tmp_path / "final_checkpoint"
         checkpoint_dir.mkdir()
-        (checkpoint_dir / "model.safetensors").write_text("x")
+        (checkpoint_dir / "model.safetensors").write_text("final-only")
 
         args = _make_args(checkpoint_dir=checkpoint_dir, checkpoint_glob=None, model_tag="ESMC_600M_FLU")
         specs = rma.build_model_specs(args)
@@ -643,6 +653,75 @@ class TestRowBuilding:
         assert rows == []
 
 
+class TestAlignmentAndCorrelations:
+    def test_resolve_plm_coordinate_maps_handles_free_end_gap_alignment(self):
+        args = _make_args(use_global_plm_reference=True)
+        lineage_data = {
+            "coord_map": {0: 5, 1: 6, 2: 8, 3: 9},
+            "plm_ref_protein": "ACDE",
+        }
+
+        resolved_map, global_to_lineage_trim, alignment = rma.resolve_plm_coordinate_maps(
+            args,
+            "AQCDE",
+            lineage_data,
+        )
+
+        assert resolved_map == {1: 5, 2: 6, 3: 8, 4: 9}
+        assert global_to_lineage_trim == {1: 0, 2: 1, 3: 2, 4: 3}
+        assert alignment is not None
+
+    def test_remapped_alignment_preserves_perfect_correlations(self):
+        args = _make_args(use_global_plm_reference=True)
+        model_spec = {"model_tag": "m1", "epoch_label": "checkpoint-1", "epoch_value": 1.0}
+        lineage_data = {
+            "coord_map": {0: 0, 1: 1, 2: 2, 3: 3},
+            "full_ref_protein": "ACDE",
+            "plm_ref_protein": "ACDE",
+            "mut_profile": pd.DataFrame({
+                1: {"Y": 0.8},
+                2: {"Y": 0.5},
+                3: {"Y": 0.2},
+                4: {"Y": 0.0},
+            }),
+            "obs_freq": pd.DataFrame({
+                1: {"Y": 0.8},
+                2: {"Y": 0.5},
+                3: {"Y": 0.2},
+                4: {"Y": 0.0},
+            }),
+            "obs_depth": {1: 10, 2: 10, 3: 10, 4: 10},
+        }
+        plm_matrix = pd.DataFrame([[0.13, 0.8, 0.5, 0.2, 0.0]], index=["Y"], columns=[1, 2, 3, 4, 5])
+
+        resolved_map, _, _ = rma.resolve_plm_coordinate_maps(args, "AQCDE", lineage_data)
+        rows = rma.build_combined_rows(
+            args,
+            model_spec,
+            "lin1",
+            lineage_data,
+            plm_matrix,
+            coord_map=resolved_map,
+        )
+        combined_df = pd.DataFrame(rows)
+        lineage_metrics = rma.compute_epoch_lineage_metrics(combined_df)
+        summary = rma.summarize_epoch_metrics(lineage_metrics)
+
+        assert combined_df["position"].tolist() == [1, 2, 3, 4]
+        assert combined_df["plm_prob"].tolist() == pytest.approx([0.8, 0.5, 0.2, 0.0])
+        assert combined_df["mut_prob"].tolist() == pytest.approx([0.8, 0.5, 0.2, 0.0])
+        assert combined_df["obs_freq"].tolist() == pytest.approx([0.8, 0.5, 0.2, 0.0])
+        assert lineage_metrics.loc[0, "spearman_obs_freq_vs_plm"] == pytest.approx(1.0)
+        assert lineage_metrics.loc[0, "pearson_obs_freq_vs_plm"] == pytest.approx(1.0)
+        assert lineage_metrics.loc[0, "spearman_obs_freq_vs_mut_baseline"] == pytest.approx(1.0)
+        assert lineage_metrics.loc[0, "pearson_obs_freq_vs_mut_baseline"] == pytest.approx(1.0)
+        assert lineage_metrics.loc[0, "spearman_plm_vs_mut"] == pytest.approx(1.0)
+        assert lineage_metrics.loc[0, "pearson_plm_vs_mut"] == pytest.approx(1.0)
+        assert summary.loc[0, "spearman_obs_freq_vs_plm"] == pytest.approx(1.0)
+        assert summary.loc[0, "pearson_obs_freq_vs_plm"] == pytest.approx(1.0)
+        assert summary.loc[0, "pearson_plm_vs_mut"] == pytest.approx(1.0)
+
+
 class TestMetricSummaries:
     def test_compute_epoch_lineage_metrics_and_summary(self):
         combined_df = pd.DataFrame(
@@ -659,6 +738,27 @@ class TestMetricSummaries:
 
         assert len(lineage_metrics) == 2
         assert list(summary["epoch_label"]) == ["checkpoint-1", "checkpoint-2"]
+
+    def test_alpha_sweep_exports_unique_and_pooled_site_counts(self, monkeypatch):
+        import Functions_HuggingFace as fhf
+
+        combined_df = pd.DataFrame(
+            [
+                {"lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.8, "mut_prob": 0.8, "obs_freq": 0.4, "obs_present": 1},
+                {"lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "G", "plm_prob": 0.2, "mut_prob": 0.2, "obs_freq": 0.0, "obs_present": 0},
+                {"lineage": "lin2", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.7, "mut_prob": 0.7, "obs_freq": 0.3, "obs_present": 1},
+                {"lineage": "lin2", "position": 1, "ref_aa": "A", "aa": "G", "plm_prob": 0.3, "mut_prob": 0.3, "obs_freq": 0.0, "obs_present": 0},
+                {"lineage": "lin2", "position": 2, "ref_aa": "T", "aa": "C", "plm_prob": 0.6, "mut_prob": 0.6, "obs_freq": 0.2, "obs_present": 1},
+                {"lineage": "lin2", "position": 2, "ref_aa": "T", "aa": "G", "plm_prob": 0.4, "mut_prob": 0.4, "obs_freq": 0.0, "obs_present": 0},
+                {"lineage": "lin1", "position": 3, "ref_aa": "V", "aa": "C", "plm_prob": 0.9, "mut_prob": 0.9, "obs_freq": 0.0, "obs_present": 0},
+                {"lineage": "lin1", "position": 3, "ref_aa": "V", "aa": "G", "plm_prob": 0.1, "mut_prob": 0.1, "obs_freq": 0.0, "obs_present": 0},
+            ]
+        )
+
+        result = fhf.evaluate_alpha_sweep(combined_df, np.array([0.0]), parallel=False, pseudocount=1e-16)
+
+        assert result.loc[0, "n_sites_used"] == 2
+        assert result.loc[0, "n_pooled_lineage_sites_used"] == 3
 
 
 class TestRunAnalysisSmoke:
@@ -735,6 +835,107 @@ class TestRunAnalysisSmoke:
         assert (output_dir / "tables" / "combined_long_table.csv").exists()
         assert (output_dir / "tables" / "epoch_metric_summary.tsv").exists()
         assert (output_dir / "tables" / "best_alpha_two_methods.tsv").exists()
+        assert (output_dir / "tables" / "per_model" / "ESMC_600M_FLU_raw_mutation_baseline_summary.tsv").exists()
+
+    def test_run_analysis_uses_cached_per_model_tables_without_rebuilding_lineages(self, tmp_path, monkeypatch):
+        output_dir = tmp_path / "out"
+        model_tables_dir = output_dir / "tables" / "per_model"
+        model_tables_dir.mkdir(parents=True)
+        checkpoint_root = tmp_path / "checkpoints"
+        checkpoint_dir = checkpoint_root / "checkpoint-10"
+        checkpoint_dir.mkdir(parents=True)
+        (checkpoint_dir / "model.safetensors").write_text("ckpt-10")
+
+        args = _make_args(output_dir=output_dir, checkpoint_dir=checkpoint_root)
+
+        panel_metadata = pd.DataFrame(
+            [
+                {
+                    "model": "ESMC_600M_FLU_raw",
+                    "epoch_label": "raw_model",
+                    "epoch_value": 0.0,
+                    "lineage": "lin1",
+                    "n_sequences": 2,
+                    "reference_length": 2,
+                    "mapped_ref_sites": 2,
+                    "compared_sites_non_gap_non_stop": 2,
+                    "differing_sites_vs_reference_non_gap_non_stop": 1,
+                    "fixed_differing_sites_vs_reference_non_gap_non_stop": 0,
+                    "diversity_fasta": "diversity.fasta",
+                    "reference_fasta": "reference.fa",
+                    "plm_profile": "plm_raw.csv",
+                    "diversity_sequences_detected_as_nucleotide": False,
+                },
+                {
+                    "model": "ESMC_600M_FLU_checkpoint-10",
+                    "epoch_label": "checkpoint-10",
+                    "epoch_value": 1.0,
+                    "lineage": "lin1",
+                    "n_sequences": 2,
+                    "reference_length": 2,
+                    "mapped_ref_sites": 2,
+                    "compared_sites_non_gap_non_stop": 2,
+                    "differing_sites_vs_reference_non_gap_non_stop": 1,
+                    "fixed_differing_sites_vs_reference_non_gap_non_stop": 0,
+                    "diversity_fasta": "diversity.fasta",
+                    "reference_fasta": "reference.fa",
+                    "plm_profile": "plm_ckpt.csv",
+                    "diversity_sequences_detected_as_nucleotide": False,
+                },
+            ]
+        )
+        (output_dir / "tables").mkdir(parents=True, exist_ok=True)
+        panel_metadata.to_csv(output_dir / "tables" / "panel_metadata.tsv", sep="\t", index=False)
+
+        combined_df = pd.DataFrame(
+            [
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.2, "mut_prob": 0.4, "obs_freq": 0.4, "obs_present": 1, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 2, "ref_aa": "A", "aa": "C", "plm_prob": 0.1, "mut_prob": 0.2, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+            ]
+        )
+        alpha_df = pd.DataFrame(
+            [
+                {
+                    "alpha": 0.0,
+                    "site_top10pct_mutated_enrichment": 0.2,
+                    "site_top10pct_mutated_precision": 0.2,
+                    "site_rank_spearman_r": 0.1,
+                    "mut_flat_global_spearman_r": 0.3,
+                    "mut_flat_global_pearson_r": 0.3,
+                    "mut_flat_mean_site_nll": 0.8,
+                    "model": "ESMC_600M_FLU_raw",
+                    "epoch_label": "raw_model",
+                    "epoch_value": 0.0,
+                }
+            ]
+        )
+        combined_df.to_csv(model_tables_dir / "ESMC_600M_FLU_raw_combined_long_table.csv", index=False)
+        alpha_df.to_csv(model_tables_dir / "ESMC_600M_FLU_raw_alpha_sweep_fit_metrics.tsv", sep="\t", index=False)
+
+        combined_df_ckpt = combined_df.copy()
+        combined_df_ckpt["model"] = "ESMC_600M_FLU_checkpoint-10"
+        combined_df_ckpt["epoch_label"] = "checkpoint-10"
+        combined_df_ckpt["epoch_value"] = 1.0
+        alpha_df_ckpt = alpha_df.copy()
+        alpha_df_ckpt["model"] = "ESMC_600M_FLU_checkpoint-10"
+        alpha_df_ckpt["epoch_label"] = "checkpoint-10"
+        alpha_df_ckpt["epoch_value"] = 1.0
+        combined_df_ckpt.to_csv(model_tables_dir / "ESMC_600M_FLU_checkpoint-10_combined_long_table.csv", index=False)
+        alpha_df_ckpt.to_csv(model_tables_dir / "ESMC_600M_FLU_checkpoint-10_alpha_sweep_fit_metrics.tsv", sep="\t", index=False)
+
+        monkeypatch.setattr(rma, "build_lineage_cache", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not rebuild lineage cache")))
+        monkeypatch.setattr(rma, "export_plots", lambda **kwargs: None)
+
+        result = rma.run_analysis(args)
+
+        assert result == 0
+        status_df = pd.read_csv(output_dir / "tables" / "model_run_status.tsv", sep="\t")
+        cached_rows = status_df.loc[
+            (status_df["lineage"] == "all")
+            & (status_df["model"].isin(["ESMC_600M_FLU_raw", "ESMC_600M_FLU_checkpoint-10"]))
+            & (status_df["reason"] == "cached")
+        ]
+        assert set(cached_rows["model"]) == {"ESMC_600M_FLU_raw", "ESMC_600M_FLU_checkpoint-10"}
 
 
 class TestManifest:

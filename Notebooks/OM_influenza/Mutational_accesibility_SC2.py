@@ -12,6 +12,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import csv
 from matplotlib.colors import LogNorm
+from matplotlib.ticker import NullLocator
 from scipy.stats import pearsonr, spearmanr
 from adjustText import adjust_text
 
@@ -136,12 +137,12 @@ PLM_MAX_AA_LENGTH=1522
 
 # #IAV block
 
-# NUCLEOTIDE_MUTATION_MODEL = "H3N2"
-# FILTER_SINGLETON_MUTATIONS = False
-# POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv"
-# fasta_file = '/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_files/J_int.nt.fa'
-# MODEL_SELECTION = ["IAV_Lytras_finetuned_HA80","ESM2_650M_OG","ESM2_3B_OG"]
-# outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_files/IAV_model_comparison_aa'
+NUCLEOTIDE_MUTATION_MODEL = "H3N2"
+FILTER_SINGLETON_MUTATIONS = False
+POOLED_DIVERSITY_GUIDE = "/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv"
+fasta_file = '/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_files/J_int.nt.fa'
+MODEL_SELECTION = ["IAV_Lytras_finetuned_HA80","ESM2_650M_OG","ESM2_3B_OG"]
+outdir='/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_files/IAV_model_comparison_aa'
 
 # TEST SETTINGS
 
@@ -404,6 +405,7 @@ ALPHA_SWEEP_MAX_WORKERS = None
 METHOD2_SCATTER_ALPHAS = [-1.0, 0.0, 1.0]
 METHOD2_SCATTER_MAX_POINTS = 200000
 PLOT_EXPORT_PNG_DPI = 600
+POOLED_PANEL_CACHE_VERSION = 2
 
 IGNORE_ALIGNMENT_CHARS = {"-", "*", "."}
 
@@ -424,6 +426,12 @@ def export_publication_figure(output_path, figure=None, png_dpi=PLOT_EXPORT_PNG_
         bbox_inches="tight",
         facecolor="white",
     )
+
+
+def _hide_log_minor_ticks(ax):
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.yaxis.set_minor_locator(NullLocator())
+    ax.tick_params(axis="both", which="minor", bottom=False, top=False, left=False, right=False)
 
 # --- Main Execution Functions ---
 
@@ -1756,6 +1764,8 @@ if RUN_POOLED_PANEL:
                 combined_df = pd.read_csv(combined_df_path)
                 lineage_meta_df = pd.read_csv(lineage_meta_path, sep="\t")
                 required_lineage_meta_cols = {
+                    "cache_version",
+                    "mutation_model",
                     "skipped",
                     "skip_reason",
                     "n_sequences_total",
@@ -1770,6 +1780,12 @@ if RUN_POOLED_PANEL:
                         f"Cached pooled tables for {model_tag} are missing lineage-threshold metadata; recomputing."
                     )
                 else:
+                    cache_version_matches = pd.to_numeric(
+                        lineage_meta_df["cache_version"], errors="coerce"
+                    ).eq(POOLED_PANEL_CACHE_VERSION).all()
+                    mutation_model_matches = lineage_meta_df["mutation_model"].astype(str).eq(
+                        NUCLEOTIDE_MUTATION_MODEL
+                    ).all()
                     threshold_matches = pd.to_numeric(
                         lineage_meta_df["sequence_threshold_min"], errors="coerce"
                     ).eq(MIN_LINEAGE_SEQUENCE_COUNT)
@@ -1784,7 +1800,19 @@ if RUN_POOLED_PANEL:
                     ).fillna(False).any()
                     cached_combined_lineages = set(combined_df["lineage"]) if "lineage" in combined_df.columns else set()
                     active_lineages = set(active_lineage_meta_df["lineage"])
-                    if not cached_lineages_valid or not cached_combined_lineages.issubset(active_lineages):
+                    if not cache_version_matches:
+                        combined_df = None
+                        lineage_meta_df = None
+                        print(
+                            f"Cached pooled tables for {model_tag} use an older cache version; recomputing."
+                        )
+                    elif not mutation_model_matches:
+                        combined_df = None
+                        lineage_meta_df = None
+                        print(
+                            f"Cached pooled tables for {model_tag} were built with a different mutation model; recomputing."
+                        )
+                    elif not cached_lineages_valid or not cached_combined_lineages.issubset(active_lineages):
                         combined_df = None
                         lineage_meta_df = None
                         print(
@@ -2044,6 +2072,8 @@ if RUN_POOLED_PANEL:
 
             combined_df.to_csv(combined_df_path, index=False)
             lineage_meta_df = pd.DataFrame(per_lineage_summaries)
+            lineage_meta_df["cache_version"] = POOLED_PANEL_CACHE_VERSION
+            lineage_meta_df["mutation_model"] = NUCLEOTIDE_MUTATION_MODEL
             lineage_meta_df.to_csv(lineage_meta_path, sep="\t", index=False)
             print(f"Saved cached pooled tables for {model_tag}: {combined_df_path}")
 
@@ -2082,7 +2112,6 @@ if RUN_POOLED_PANEL:
 
             # Generate scatter plot for PLM vs Mut Prob
             try:
-                plt.figure(figsize=(6, 5))
                 # Add tiny pseudocount for log plotting
                 mask = (comparison_df["plm_prob"] > 0) & (comparison_df["mut_prob"] > 0)
                 plot_data = comparison_df[mask]
@@ -2094,22 +2123,45 @@ if RUN_POOLED_PANEL:
                     except Exception:
                         pe_r, pe_p = (np.nan, np.nan)
 
-                    plt.scatter(plot_data["plm_prob"], plot_data["mut_prob"], alpha=0.3, s=10, edgecolors="none")
-                    plt.xscale("log")
-                    plt.yscale("log")
-                    plt.xlabel("PLM Probability")
-                    plt.ylabel("Mutation Probability (Codon Model)")
-                    plt.title(
-                        f"{model_tag} Correlation\n"
-                        f"Spearman rho={sp_rho:.3f} (p={sp_p:.2e}); "
-                        f"Pearson r={pe_r:.3f} (p={pe_p:.2e})"
-                    )
-                    plt.grid(True, which="both", ls="--", alpha=0.5)
-                    
-                    plot_path = os.path.join(model_outdir, _tag_output_name("plm_vs_mut_prob_scatter.png", TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG))
-                    plt.tight_layout()
-                    export_publication_figure(plot_path)
-                    plt.close()
+                    scatter_specs = [
+                        {
+                            "x": plot_data["plm_prob"],
+                            "y": plot_data["mut_prob"],
+                            "xlabel": "PLM Probability",
+                            "ylabel": "Mutation Probability (Codon Model)",
+                            "filename": "plm_vs_mut_prob_scatter.png",
+                        },
+                        {
+                            "x": plot_data["mut_prob"],
+                            "y": plot_data["plm_prob"],
+                            "xlabel": "Mutation Probability (Codon Model)",
+                            "ylabel": "PLM Probability",
+                            "filename": "mut_vs_plm_prob_scatter.png",
+                        },
+                    ]
+
+                    for scatter_spec in scatter_specs:
+                        fig, ax = plt.subplots(figsize=(6, 5))
+                        ax.scatter(scatter_spec["x"], scatter_spec["y"], alpha=0.3, s=10, edgecolors="none")
+                        ax.set_xscale("log")
+                        ax.set_yscale("log")
+                        _hide_log_minor_ticks(ax)
+                        ax.set_xlabel(scatter_spec["xlabel"])
+                        ax.set_ylabel(scatter_spec["ylabel"])
+                        ax.set_title(
+                            f"{model_tag} Correlation\n"
+                            f"Spearman rho={sp_rho:.3f} (p={sp_p:.2e}); "
+                            f"Pearson r={pe_r:.3f} (p={pe_p:.2e})"
+                        )
+                        ax.grid(True, which="major", ls="--", alpha=0.5)
+
+                        plot_path = os.path.join(
+                            model_outdir,
+                            _tag_output_name(scatter_spec["filename"], TEST_MODE, DIVERSITY_PATTERN_TAG, OUTPUT_TAG),
+                        )
+                        fig.tight_layout()
+                        export_publication_figure(plot_path, figure=fig)
+                        plt.close(fig)
             except Exception as plot_exc:
                 print(f"Warning: Failed to generate comparison plot for {model_tag}: {plot_exc}")
 

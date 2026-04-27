@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mut-access-esmc-flu
-#SBATCH --output=/home/u6dr/omaclean.u6dr/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/slurm-%j.out
-#SBATCH --error=/home/u6dr/omaclean.u6dr/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/slurm-%j.err
+#SBATCH --output=/home3/oml4h/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/slurm-%j.out
+#SBATCH --error=/home3/oml4h/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/slurm-%j.err
 #SBATCH --partition=workq
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
@@ -11,13 +11,24 @@
 
 set -euo pipefail
 
-WORKDIR=/home/u6dr/omaclean.u6dr/PLM_SARS-CoV-2
+WORKDIR=/home3/oml4h/PLM_SARS-CoV-2
 ENV_PREFIX=/projects/u6dr/OM/envs/plm_entropy
 JOB_ID=${SLURM_JOB_ID:-manual}
 
-GUIDE_PATH='/home/u6dr/omaclean.u6dr/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv'
-CHECKPOINT_ROOT='/projects/u6dr/OM/PLM_Out/magma_esmc_esmc_600m_1node_FLU/full_job4243186/model'
-OUTPUT_DIR='/home/u6dr/omaclean.u6dr/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/esmc_flu_full_job4154992_epochX'
+GUIDE_PATH='/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv'
+CHECKPOINT_ROOT='/home3/oml4h/my_SC2_finetunes/myflu/full_job4243186/model/'
+OUTPUT_DIR='/home3/oml4h/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/esmc_flu_full_job4154992_epochX'
+MODEL_TAG='ESMC_600M_FLU'
+BASE_MODEL_NAME='esm-c600m'
+MODEL_LAYER=33
+
+# CHECKPOINT_ROOT='/home3/oml4h/hugging_face_downloads/model_weights_topublish/ESM2-HA80/'
+# OUTPUT_DIR='/home3/oml4h/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/Lytras_OG'
+# MODEL_TAG='ESM2_650M_HA80'
+# BASE_MODEL_NAME='esm2_t33_650M_UR50D'
+# MODEL_LAYER=33
+
+export GUIDE_PATH CHECKPOINT_ROOT OUTPUT_DIR MODEL_TAG BASE_MODEL_NAME MODEL_LAYER
 LOG_DIR=${OUTPUT_DIR}/slurm_logs/${JOB_ID}
 STDOUT_LOG=${LOG_DIR}/console.stdout.log
 STDERR_LOG=${LOG_DIR}/console.stderr.log
@@ -36,6 +47,9 @@ echo "workdir=${WORKDIR}"
 echo "guide_path=${GUIDE_PATH}"
 echo "checkpoint_root=${CHECKPOINT_ROOT}"
 echo "output_dir=${OUTPUT_DIR}"
+echo "model_tag=${MODEL_TAG}"
+echo "base_model_name=${BASE_MODEL_NAME}"
+echo "model_layer=${MODEL_LAYER}"
 echo "log_dir=${LOG_DIR}"
 echo "hostname=$(hostname)  nodelist=${SLURM_NODELIST:-manual}"
 
@@ -45,64 +59,87 @@ if command -v scontrol >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then
   scontrol show job "${SLURM_JOB_ID}" > "${LOG_DIR}/slurm_job.txt" 2>&1 || true
 fi
 
-if command -v conda >/dev/null 2>&1; then
-  source "$(conda info --base)/etc/profile.d/conda.sh"
-else
-  echo "conda command not found in PATH" >&2
-  exit 1
-fi
+# if command -v conda >/dev/null 2>&1; then
+#   source "$(conda info --base)/etc/profile.d/conda.sh"
+# else
+#   echo "conda command not found in PATH" >&2
+#   exit 1
+# fi
 
-conda activate "${ENV_PREFIX}"
+#PYTHON_CMD=(conda run -p "${ENV_PREFIX}" --no-capture-output python)
 
+PYTHON_CMD=(python)
 export TOKENIZERS_PARALLELISM=false
 export PYTHONFAULTHANDLER=1
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 
 nvidia-smi > "${LOG_DIR}/nvidia-smi.txt" 2>&1 || true
 cat "${LOG_DIR}/nvidia-smi.txt"
-python --version | tee "${LOG_DIR}/python_version.txt"
-which python | tee "${LOG_DIR}/python_path.txt"
+"${PYTHON_CMD[@]}" --version | tee "${LOG_DIR}/python_version.txt"
+"${PYTHON_CMD[@]}" -c 'import sys; print(sys.executable)' | tee "${LOG_DIR}/python_path.txt"
 conda info --envs > "${LOG_DIR}/conda_envs.txt" 2>&1 || true
 
-python - <<'PY' | tee "${LOG_DIR}/preflight.txt"
-import os
+"${PYTHON_CMD[@]}" - <<'PY' | tee "${LOG_DIR}/preflight.txt"
+import os, sys
 from pathlib import Path
 
 guide_path = Path(os.environ["GUIDE_PATH"])
 checkpoint_root = Path(os.environ["CHECKPOINT_ROOT"])
 print('guide_exists=', guide_path.exists())
 print('checkpoint_root_exists=', checkpoint_root.exists())
-if checkpoint_root.exists():
-  child_checkpoints = sorted(
-    path.name for path in checkpoint_root.iterdir()
-    if path.is_dir() and (path / 'model.safetensors').exists()
-  )
-  print('discovered_checkpoints=', child_checkpoints)
+
+errors = []
+if not guide_path.exists():
+    errors.append(f"ERROR: guide file not found: {guide_path}")
+
+if not checkpoint_root.exists():
+    errors.append(f"ERROR: checkpoint root not found: {checkpoint_root}")
+else:
+    child_checkpoints = sorted(
+        path.name for path in checkpoint_root.iterdir()
+        if path.is_dir() and (path / 'model.safetensors').exists()
+    )
+    direct_weights = (checkpoint_root / 'model.safetensors').exists()
+    print('discovered_checkpoints=', child_checkpoints)
+    print('direct_model_safetensors=', direct_weights)
+    if not child_checkpoints and not direct_weights:
+        errors.append(
+            f"ERROR: no model.safetensors found in {checkpoint_root} or any of its subdirectories"
+        )
+
+for msg in errors:
+    print(msg, file=sys.stderr)
+if errors:
+    sys.exit(1)
 PY
+if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+  echo "ERROR: preflight checks failed — see ${LOG_DIR}/preflight.txt" >&2
+  exit 1
+fi
 
 {
-  printf 'python %q' "/home/u6dr/omaclean.u6dr/PLM_SARS-CoV-2/scripts/run_mutational_accessibility.py"
+  printf 'conda run -p %q --no-capture-output python %q' "${ENV_PREFIX}" "/home3/oml4h/PLM_SARS-CoV-2/scripts/run_mutational_accessibility.py"
   printf ' --analysis-mode %q' "MONTHLY_GUIDE"
   printf ' --guide-path %q' "${GUIDE_PATH}"
   printf ' --mutation-model %q' "H3N2"
   printf ' --output-dir %q' "${OUTPUT_DIR}"
   printf ' --expect-protein-diversity'
-  printf ' --model-tag %q' "ESMC_600M_FLU"
-  printf ' --base-model %q' "esm-c600m"
-  printf ' --model-layer %q' "36"
+  printf ' --model-tag %q' "${MODEL_TAG}"
+  printf ' --base-model %q' "${BASE_MODEL_NAME}"
+  printf ' --model-layer %q' "${MODEL_LAYER}"
   printf ' --checkpoint-dir %q' "${CHECKPOINT_ROOT}"
   printf '\n'
 } > "${LOG_DIR}/command.txt"
 
-python /home/u6dr/omaclean.u6dr/PLM_SARS-CoV-2/scripts/run_mutational_accessibility.py \
+"${PYTHON_CMD[@]}" /home3/oml4h/PLM_SARS-CoV-2/scripts/run_mutational_accessibility.py \
   --analysis-mode MONTHLY_GUIDE \
   --guide-path "${GUIDE_PATH}" \
   --mutation-model H3N2 \
   --output-dir "${OUTPUT_DIR}" \
   --expect-protein-diversity \
-  --model-tag ESMC_600M_FLU \
-  --base-model esm-c600m \
-  --model-layer 36 \
+  --model-tag "${MODEL_TAG}" \
+  --base-model "${BASE_MODEL_NAME}" \
+  --model-layer "${MODEL_LAYER}" \
   --checkpoint-dir "${CHECKPOINT_ROOT}" \
   2>&1 | tee -a "${RUN_LOG}"
 

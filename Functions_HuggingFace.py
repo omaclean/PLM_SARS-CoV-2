@@ -1,4 +1,6 @@
 
+import csv
+
 from Bio import SeqIO
 from Bio.Seq import Seq
 import pandas as pd
@@ -2764,12 +2766,15 @@ def _evaluate_single_alpha(alpha: float, base_df: pd.DataFrame, pseudocount: flo
 
     site_nlls = []
     site_rhos = []
+    sites_with_nonzero_burden = set()
     grouped = working.groupby(["lineage", "position", "ref_aa"], sort=False)
-    for (_, _, _), site_df in grouped:
+    for (lineage_name, position, ref_aa), site_df in grouped:
         obs_vec = site_df["obs_freq"].to_numpy(dtype=float)
         score_vec = site_df["combined_log_score"].to_numpy(dtype=float)
         if np.nansum(obs_vec) <= 0:
             continue
+
+        sites_with_nonzero_burden.add((lineage_name, position, ref_aa))
 
         obs_norm = obs_vec / np.nansum(obs_vec)
         pred_prob = softmax_from_log_scores(score_vec)
@@ -2805,7 +2810,8 @@ def _evaluate_single_alpha(alpha: float, base_df: pd.DataFrame, pseudocount: flo
         "site_rank_spearman_p": float(site_sp_p) if np.isfinite(site_sp_p) else np.nan,
         "site_top10pct_mutated_precision": float(site_top_precision) if np.isfinite(site_top_precision) else np.nan,
         "site_top10pct_mutated_enrichment": float(site_top_enrichment) if np.isfinite(site_top_enrichment) else np.nan,
-        "n_sites_used": int(len(site_nlls)),
+        "n_sites_used": int(len({position for _, position, _ in sites_with_nonzero_burden})),
+        "n_pooled_lineage_sites_used": int(len(sites_with_nonzero_burden)),
     }
 
 
