@@ -363,12 +363,21 @@ class TestIntegration:
         combined_path = inputs["output_dir"] / "tables" / "combined_long_table.csv"
         status_path = inputs["output_dir"] / "tables" / "model_run_status.tsv"
         manifest_path = inputs["output_dir"] / "run_manifest.json"
-        plot_path = inputs["output_dir"] / "plots" / "epoch_metric_summary.png"
+        plots_dir = inputs["output_dir"] / "plots"
+        plot_path = plots_dir / "epoch_metric_summary.png"
+        focused_alpha_plot_path = plots_dir / "alpha_sweep_metrics_selected.png"
+        epoch_logistic_plot_path = plots_dir / "epoch_metric_logistic.png"
+        epoch_spearman_plot_path = plots_dir / "epoch_metric_spearman_plm_vs_mut.png"
+        per_model_plot_path = plots_dir / "per_model" / "toy_plm" / "alpha_sweep_metrics_selected.png"
 
         assert combined_path.exists()
         assert manifest_path.exists()
         assert status_path.exists()
         assert plot_path.exists()
+        assert focused_alpha_plot_path.exists()
+        assert epoch_logistic_plot_path.exists()
+        assert epoch_spearman_plot_path.exists()
+        assert per_model_plot_path.exists()
 
         combined_df = pd.read_csv(combined_path)
         status_df = pd.read_csv(status_path, sep="\t")
@@ -510,6 +519,17 @@ class TestParsingHelpers:
         assert rma.infer_epoch_value("checkpoint-525", 0) == 525.0
         assert rma.infer_epoch_value("epoch_3.5_snapshot", 0) == 3.5
         assert rma.infer_epoch_value("final_checkpoint", 7) == 7.0
+
+    def test_fit_logistic_site_correlation_returns_finite_fit_for_near_separated_signal(self):
+        score_values = pd.Series([1e-10, 2e-10, 5e-10, 1e-8, 2e-8, 5e-8, 1e-6, 2e-6, 5e-6, 1e-4])
+        binary_outcome = pd.Series([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
+
+        corr, intercept, slope = rma.fit_logistic_site_correlation(score_values, binary_outcome)
+
+        assert np.isfinite(corr)
+        assert np.isfinite(intercept)
+        assert np.isfinite(slope)
+        assert corr > 0
 
 
 class TestCheckpointDiscovery:
@@ -792,10 +812,10 @@ class TestRunAnalysisSmoke:
         monkeypatch.setattr(rma, "export_plots", lambda **kwargs: None)
 
         checkpoint_root = args.checkpoint_dir
-        for name in ["checkpoint-10", "checkpoint-20"]:
+        for name in ["checkpoint-10", "final_checkpoint"]:
             path = checkpoint_root / name
             path.mkdir(parents=True)
-            (path / "model.safetensors").write_text("x")
+            (path / "model.safetensors").write_text(name)
 
         def fake_build_codon_aa_mutation_tables(model_name):
             return {"mutation_model_name": model_name}
@@ -836,6 +856,79 @@ class TestRunAnalysisSmoke:
         assert (output_dir / "tables" / "epoch_metric_summary.tsv").exists()
         assert (output_dir / "tables" / "best_alpha_two_methods.tsv").exists()
         assert (output_dir / "tables" / "per_model" / "ESMC_600M_FLU_raw_mutation_baseline_summary.tsv").exists()
+
+    def test_export_plots_writes_latest_checkpoint_focused_plot_with_raw(self, tmp_path, monkeypatch):
+        def fake_evaluate_alpha_sweep(df, alpha_grid, **kwargs):
+            return pd.DataFrame(
+                {
+                    "alpha": [1.0],
+                    "mut_flat_global_spearman_r": [0.25],
+                    "mut_flat_nonzero_pearson_r": [0.2],
+                }
+            )
+
+        _install_fake_functions_hf(monkeypatch, evaluate_alpha_sweep=fake_evaluate_alpha_sweep)
+
+        combined_df = pd.DataFrame(
+            [
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.2, "mut_prob": 0.4, "obs_freq": 0.4, "obs_present": 1, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 2, "ref_aa": "A", "aa": "C", "plm_prob": 0.1, "mut_prob": 0.2, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_final_checkpoint", "epoch_label": "final_checkpoint", "epoch_value": 1.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.3, "mut_prob": 0.4, "obs_freq": 0.4, "obs_present": 1, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_final_checkpoint", "epoch_label": "final_checkpoint", "epoch_value": 1.0, "lineage": "lin1", "position": 2, "ref_aa": "A", "aa": "C", "plm_prob": 0.2, "mut_prob": 0.2, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+            ]
+        )
+        alpha_df = pd.DataFrame(
+            [
+                {
+                    "alpha": 0.0,
+                    "site_top10pct_mutated_enrichment": 0.2,
+                    "site_top10pct_mutated_precision": 0.2,
+                    "site_rank_spearman_r": 0.1,
+                    "mut_flat_global_spearman_r": 0.3,
+                    "mut_flat_global_pearson_r": 0.3,
+                    "mut_flat_mean_site_nll": 0.8,
+                    "mut_flat_nonzero_spearman_r": 0.3,
+                    "mut_flat_nonzero_pearson_r": 0.3,
+                    "mut_flat_logfreq_global_pearson_r": 0.3,
+                    "mut_flat_logfreq_nonzero_pearson_r": 0.3,
+                    "model": "ESMC_600M_FLU_raw",
+                    "epoch_label": "raw_model",
+                    "epoch_value": 0.0,
+                },
+                {
+                    "alpha": 0.0,
+                    "site_top10pct_mutated_enrichment": 0.4,
+                    "site_top10pct_mutated_precision": 0.4,
+                    "site_rank_spearman_r": 0.2,
+                    "mut_flat_global_spearman_r": 0.5,
+                    "mut_flat_global_pearson_r": 0.5,
+                    "mut_flat_mean_site_nll": 0.6,
+                    "mut_flat_nonzero_spearman_r": 0.5,
+                    "mut_flat_nonzero_pearson_r": 0.5,
+                    "mut_flat_logfreq_global_pearson_r": 0.5,
+                    "mut_flat_logfreq_nonzero_pearson_r": 0.5,
+                    "model": "ESMC_600M_FLU_final_checkpoint",
+                    "epoch_label": "final_checkpoint",
+                    "epoch_value": 1.0,
+                },
+            ]
+        )
+
+        rma.export_plots(
+            output_dir=tmp_path,
+            combined_df=combined_df,
+            alpha_df=alpha_df,
+            epoch_summary_df=pd.DataFrame(),
+            scatter_alphas=[],
+            scatter_max_points=100,
+            lineage_cache={"lin1": {"n_sequences": 2}},
+            dynamic_pseudocount=1e-3,
+            mutation_baseline_x=-2.0,
+        )
+
+        latest_plot_dir = tmp_path / "per_model" / "ESMC_600M_FLU_final_checkpoint"
+        assert (latest_plot_dir / "alpha_sweep_metrics_selected.png").exists()
+        assert (latest_plot_dir / "alpha_sweep_metrics_selected_with_raw.png").exists()
 
     def test_run_analysis_uses_cached_per_model_tables_without_rebuilding_lineages(self, tmp_path, monkeypatch):
         output_dir = tmp_path / "out"

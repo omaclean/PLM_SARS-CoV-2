@@ -22,11 +22,38 @@ MODEL_TAG='ESMC_600M_FLU'
 BASE_MODEL_NAME='esm-c600m'
 MODEL_LAYER=33
 
-# CHECKPOINT_ROOT='/home3/oml4h/hugging_face_downloads/model_weights_topublish/ESM2-HA80/'
-# OUTPUT_DIR='/home3/oml4h/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/Lytras_OG'
-# MODEL_TAG='ESM2_650M_HA80'
+# GUIDE_PATH='/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv'
+# CHECKPOINT_ROOT='/home3/oml4h/my_SC2_finetunes/myflu/fulldatasetESMcMagma/model'
+# OUTPUT_DIR='/home3/oml4h/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/esmc_flu_fullrun_magma'
+# MODEL_TAG='ESMC_600M_FLU'
+# BASE_MODEL_NAME='esm-c600m'
+# MODEL_LAYER=33
+
+
+
+# ENV_PREFIX=/projects/u6dr/OM/envs/plm_entropy
+# GUIDE_PATH='/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv'
+# CHECKPOINT_ROOT='/home3/oml4h/my_SC2_finetunes/myflu/full_data_esm2_AdamW'
+# OUTPUT_DIR='/home3/oml4h/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/esm2_flu_full_AdamW'
+# MODEL_TAG='ESM2_600M_FLU_AdamW'
 # BASE_MODEL_NAME='esm2_t33_650M_UR50D'
 # MODEL_LAYER=33
+
+# ENV_PREFIX=/projects/u6dr/OM/envs/plm_entropy
+# GUIDE_PATH='/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv'
+# CHECKPOINT_ROOT='/home3/oml4h/my_SC2_finetunes/myflu/full_data_esm2_magma'
+# OUTPUT_DIR='/home3/oml4h/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/esm2_flu_full_magma'
+# MODEL_TAG='ESM2_600M_FLU_magma'
+# BASE_MODEL_NAME='esm2_t33_650M_UR50D'
+# MODEL_LAYER=33
+
+
+
+CHECKPOINT_ROOT='/home3/oml4h/hugging_face_downloads/model_weights_topublish/ESM2-HA80/'
+OUTPUT_DIR='/home3/oml4h/PLM_SARS-CoV-2/Results/iav_mutational_accessibility/Lytras_OG'
+MODEL_TAG='ESM2_650M_HA80'
+BASE_MODEL_NAME='esm2_t33_650M_UR50D'
+MODEL_LAYER=33
 
 export GUIDE_PATH CHECKPOINT_ROOT OUTPUT_DIR MODEL_TAG BASE_MODEL_NAME MODEL_LAYER
 LOG_DIR=${OUTPUT_DIR}/slurm_logs/${JOB_ID}
