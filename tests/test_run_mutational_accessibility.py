@@ -531,6 +531,48 @@ class TestParsingHelpers:
         assert np.isfinite(slope)
         assert corr > 0
 
+    def test_logistic_feature_model_matches_site_helper_when_given_same_site_level_question(self):
+        score_values = pd.Series([1e-10, 2e-10, 5e-10, 1e-8, 2e-8, 5e-8, 1e-6, 2e-6, 5e-6, 1e-4])
+        binary_outcome = pd.Series([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
+
+        site_corr, _, _ = rma.fit_logistic_site_correlation(score_values, binary_outcome)
+        feature_result = rma.fit_logistic_feature_model(
+            pd.DataFrame({"log10_score": np.log10(score_values)}),
+            binary_outcome,
+        )
+
+        assert feature_result["logistic_fitted_prob_corr"] == pytest.approx(site_corr, abs=1e-6)
+
+    def test_site_logistic_and_hurdle_logistic_diverge_when_row_definitions_differ(self):
+        combined_df = pd.DataFrame(
+            [
+                {"lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.90, "mut_prob": 0.70, "obs_freq": 0.20, "obs_present": 1},
+                {"lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "G", "plm_prob": 0.80, "mut_prob": 0.20, "obs_freq": 0.00, "obs_present": 0},
+                {"lineage": "lin1", "position": 2, "ref_aa": "T", "aa": "C", "plm_prob": 0.70, "mut_prob": 0.60, "obs_freq": 0.15, "obs_present": 1},
+                {"lineage": "lin1", "position": 2, "ref_aa": "T", "aa": "G", "plm_prob": 0.60, "mut_prob": 0.20, "obs_freq": 0.00, "obs_present": 0},
+                {"lineage": "lin1", "position": 3, "ref_aa": "L", "aa": "C", "plm_prob": 0.65, "mut_prob": 0.25, "obs_freq": 0.00, "obs_present": 0},
+                {"lineage": "lin1", "position": 3, "ref_aa": "L", "aa": "G", "plm_prob": 0.50, "mut_prob": 0.15, "obs_freq": 0.00, "obs_present": 0},
+                {"lineage": "lin1", "position": 4, "ref_aa": "V", "aa": "C", "plm_prob": 0.40, "mut_prob": 0.20, "obs_freq": 0.00, "obs_present": 0},
+                {"lineage": "lin1", "position": 4, "ref_aa": "V", "aa": "G", "plm_prob": 0.30, "mut_prob": 0.10, "obs_freq": 0.00, "obs_present": 0},
+            ]
+        )
+
+        site_df = (
+            combined_df.groupby(["lineage", "position", "ref_aa"], as_index=False)
+            .agg(site_score=("plm_prob", "max"), site_mutated=("obs_present", "max"))
+        )
+        site_corr, _, _ = rma.fit_logistic_site_correlation(site_df["site_score"], site_df["site_mutated"])
+
+        base_df = rma.build_hurdle_base_frame(combined_df)
+        hurdle_logistic = rma.fit_logistic_feature_model(
+            pd.DataFrame({"combined_score": base_df["log_plm_prob"]}),
+            base_df["obs_present"],
+        )
+
+        assert np.isfinite(site_corr)
+        assert np.isfinite(hurdle_logistic["logistic_fitted_prob_corr"])
+        assert hurdle_logistic["logistic_fitted_prob_corr"] != pytest.approx(site_corr, abs=1e-3)
+
 
 class TestCheckpointDiscovery:
     def test_discover_checkpoint_dirs_finds_only_safetensor_children(self, tmp_path):
@@ -856,14 +898,17 @@ class TestRunAnalysisSmoke:
         assert (output_dir / "tables" / "epoch_metric_summary.tsv").exists()
         assert (output_dir / "tables" / "best_alpha_two_methods.tsv").exists()
         assert (output_dir / "tables" / "per_model" / "ESMC_600M_FLU_raw_mutation_baseline_summary.tsv").exists()
+        alpha_table = pd.read_csv(output_dir / "tables" / "per_model" / "ESMC_600M_FLU_raw_alpha_sweep_fit_metrics.tsv", sep="\t")
+        assert "model_variant" in alpha_table.columns
+        assert "mutation_accessibility_only" in set(alpha_table["model_variant"])
 
     def test_export_plots_writes_latest_checkpoint_focused_plot_with_raw(self, tmp_path, monkeypatch):
         def fake_evaluate_alpha_sweep(df, alpha_grid, **kwargs):
             return pd.DataFrame(
                 {
-                    "alpha": [1.0],
-                    "mut_flat_global_spearman_r": [0.25],
-                    "mut_flat_nonzero_pearson_r": [0.2],
+                    "alpha": [0.0, 1.0],
+                    "mut_flat_global_spearman_r": [0.25, 0.3],
+                    "mut_flat_nonzero_pearson_r": [0.2, 0.25],
                 }
             )
 
@@ -924,11 +969,64 @@ class TestRunAnalysisSmoke:
             lineage_cache={"lin1": {"n_sequences": 2}},
             dynamic_pseudocount=1e-3,
             mutation_baseline_x=-2.0,
+            metrics_output_dir=tmp_path / "metrics",
         )
 
         latest_plot_dir = tmp_path / "per_model" / "ESMC_600M_FLU_final_checkpoint"
         assert (latest_plot_dir / "alpha_sweep_metrics_selected.png").exists()
+        assert (latest_plot_dir / "alpha_sweep_logistic_metrics_selected.png").exists()
         assert (latest_plot_dir / "alpha_sweep_metrics_selected_with_raw.png").exists()
+        assert (tmp_path / "alpha_sweep_logistic_metrics_selected.png").exists()
+        assert (tmp_path / "hurdle_alpha_sweep.png").exists()
+        assert (tmp_path / "hurdle_regression_diagnostics.png").exists()
+        assert (latest_plot_dir / "hurdle_alpha_sweep.png").exists()
+        assert (latest_plot_dir / "hurdle_regression_diagnostics.png").exists()
+        assert (tmp_path / "metrics" / "hurdle_alpha_sweep_metrics.csv").exists()
+        assert (tmp_path / "metrics" / "hurdle_model_summary.csv").exists()
+        assert (tmp_path / "metrics" / "per_model" / "ESMC_600M_FLU_final_checkpoint" / "hurdle_alpha_sweep_metrics.csv").exists()
+        assert (tmp_path / "metrics" / "per_model" / "ESMC_600M_FLU_final_checkpoint" / "hurdle_model_summary.csv").exists()
+
+        hurdle_summary = pd.read_csv(tmp_path / "metrics" / "hurdle_model_summary.csv")
+        assert {"mutation_only", "plm_only_alpha0", "best_alpha_hurdle", "two_input_hurdle"}.issubset(set(hurdle_summary["model_variant"]))
+        baseline_rows = hurdle_summary.loc[hurdle_summary["model_variant"] == "mutation_only"]
+        assert baseline_rows["alpha_presence"].eq(1.1).all()
+        assert baseline_rows["alpha_frequency"].eq(1.1).all()
+        plm_only_rows = hurdle_summary.loc[hurdle_summary["model_variant"] == "plm_only_alpha0"]
+        assert plm_only_rows["alpha_presence"].eq(0.0).all()
+        assert plm_only_rows["alpha_frequency"].eq(0.0).all()
+        hurdle_points = pd.read_csv(tmp_path / "metrics" / "hurdle_alpha_sweep_metrics.csv")
+        assert {"ESMC_600M_FLU_raw", "ESMC_600M_FLU_final_checkpoint"}.issubset(set(hurdle_points["model"]))
+        assert {"presence_score_formula", "frequency_score_formula", "freq_response_definition", "freq_raw_response_definition", "freq_raw_r2"}.issubset(hurdle_points.columns)
+        assert hurdle_points["presence_score_formula"].eq("log10(plm_prob) + alpha_presence * log10(mut_prob)").all()
+
+    def test_hurdle_alpha_sweep_summary_includes_expected_models(self):
+        combined_df = pd.DataFrame(
+            [
+                {"lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.80, "mut_prob": 0.70, "obs_freq": 0.30, "obs_present": 1},
+                {"lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "G", "plm_prob": 0.20, "mut_prob": 0.20, "obs_freq": 0.00, "obs_present": 0},
+                {"lineage": "lin1", "position": 2, "ref_aa": "T", "aa": "C", "plm_prob": 0.60, "mut_prob": 0.50, "obs_freq": 0.15, "obs_present": 1},
+                {"lineage": "lin1", "position": 2, "ref_aa": "T", "aa": "G", "plm_prob": 0.10, "mut_prob": 0.15, "obs_freq": 0.00, "obs_present": 0},
+                {"lineage": "lin2", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.75, "mut_prob": 0.65, "obs_freq": 0.25, "obs_present": 1},
+                {"lineage": "lin2", "position": 1, "ref_aa": "A", "aa": "G", "plm_prob": 0.25, "mut_prob": 0.25, "obs_freq": 0.00, "obs_present": 0},
+                {"lineage": "lin2", "position": 2, "ref_aa": "T", "aa": "C", "plm_prob": 0.55, "mut_prob": 0.45, "obs_freq": 0.12, "obs_present": 1},
+                {"lineage": "lin2", "position": 2, "ref_aa": "T", "aa": "G", "plm_prob": 0.15, "mut_prob": 0.10, "obs_freq": 0.00, "obs_present": 0},
+            ]
+        )
+
+        hurdle_alpha_df = rma.evaluate_hurdle_alpha_sweep(combined_df, [0.0, 1.0])
+        hurdle_summary_df = rma.summarize_hurdle_models(combined_df, hurdle_alpha_df)
+
+        assert len(hurdle_alpha_df) == 4
+        assert {"alpha_presence", "alpha_frequency", "logistic_tjur_r2", "freq_log10_r2", "freq_raw_r2", "hurdle_mean_r2", "hurdle_mean_r2_raw_frequency"}.issubset(hurdle_alpha_df.columns)
+        assert hurdle_alpha_df["presence_score_formula"].eq("log10(plm_prob) + alpha_presence * log10(mut_prob)").all()
+        assert {"mutation_only", "plm_only_alpha0", "best_alpha_hurdle", "two_input_hurdle"}.issubset(set(hurdle_summary_df["model_variant"]))
+        assert {"logistic_intercept", "freq_intercept", "freq_raw_intercept", "hurdle_mean_r2", "hurdle_mean_r2_raw_frequency"}.issubset(hurdle_summary_df.columns)
+        mutation_only_row = hurdle_summary_df.loc[hurdle_summary_df["model_variant"] == "mutation_only"].iloc[0]
+        assert float(mutation_only_row["alpha_presence"]) == 1.1
+        assert float(mutation_only_row["alpha_frequency"]) == 1.1
+        plm_only_row = hurdle_summary_df.loc[hurdle_summary_df["model_variant"] == "plm_only_alpha0"].iloc[0]
+        assert float(plm_only_row["alpha_presence"]) == 0.0
+        assert float(plm_only_row["alpha_frequency"]) == 0.0
 
     def test_run_analysis_uses_cached_per_model_tables_without_rebuilding_lineages(self, tmp_path, monkeypatch):
         output_dir = tmp_path / "out"

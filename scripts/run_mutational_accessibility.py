@@ -1447,6 +1447,27 @@ def safe_pearson(x_vals: pd.Series, y_vals: pd.Series) -> float:
     return float(np.corrcoef(x, y)[0, 1])
 
 
+def safe_auroc(score_values: pd.Series, binary_outcome: pd.Series) -> float:
+    from scipy.stats import rankdata
+
+    scores = np.asarray(score_values, dtype=float)
+    outcome = np.asarray(binary_outcome, dtype=float)
+    valid = np.isfinite(scores) & np.isfinite(outcome)
+    if valid.sum() < 2:
+        return np.nan
+    scores = scores[valid]
+    outcome = outcome[valid]
+    pos_mask = outcome > 0.5
+    neg_mask = ~pos_mask
+    n_pos = int(np.sum(pos_mask))
+    n_neg = int(np.sum(neg_mask))
+    if n_pos == 0 or n_neg == 0:
+        return np.nan
+    ranks = rankdata(scores, method="average")
+    pos_rank_sum = float(np.sum(ranks[pos_mask]))
+    return float((pos_rank_sum - (n_pos * (n_pos + 1) / 2.0)) / (n_pos * n_neg))
+
+
 def fit_logistic_site_correlation(score_values: pd.Series, binary_outcome: pd.Series) -> Tuple[float, float, float]:
     from scipy.optimize import minimize
     from scipy.special import expit
@@ -1531,6 +1552,504 @@ def fit_logistic_site_correlation(score_values: pd.Series, binary_outcome: pd.Se
     return fitted_corr, float(intercept), float(slope)
 
 
+def validate_site_logistic_fit_agreement(
+    score_values: pd.Series,
+    binary_outcome: pd.Series,
+    *,
+    context_label: str,
+    atol: float = 1e-6,
+) -> Tuple[float, float, float]:
+    site_corr, site_intercept, site_slope = fit_logistic_site_correlation(score_values, binary_outcome)
+    if not np.isfinite(site_corr):
+        return site_corr, site_intercept, site_slope
+
+    feature_result = fit_logistic_feature_model(
+        pd.DataFrame({"log10_score": np.log10(np.clip(np.asarray(score_values, dtype=float), 1e-32, None))}),
+        pd.Series(binary_outcome, copy=False),
+    )
+    feature_corr = float(feature_result.get("logistic_fitted_prob_corr", np.nan))
+    if np.isfinite(feature_corr) and not np.isclose(site_corr, feature_corr, atol=atol, rtol=0.0):
+        raise AssertionError(
+            f"Site logistic validation failed for {context_label}: "
+            f"site helper corr={site_corr:.12f}, generic fitter corr={feature_corr:.12f}"
+        )
+    return site_corr, site_intercept, site_slope
+
+
+def compute_site_logistic_metrics(
+    score_values: pd.Series,
+    binary_outcome: pd.Series,
+    *,
+    context_label: str,
+) -> Dict[str, float]:
+    site_corr, site_intercept, site_slope = validate_site_logistic_fit_agreement(
+        score_values,
+        binary_outcome,
+        context_label=context_label,
+    )
+    feature_result = fit_logistic_feature_model(
+        pd.DataFrame({"log10_score": np.log10(np.clip(np.asarray(score_values, dtype=float), 1e-32, None))}),
+        pd.Series(binary_outcome, copy=False),
+    )
+    return {
+        "site_logistic_mutated_corr": float(site_corr),
+        "site_logistic_mutated_intercept": float(site_intercept),
+        "site_logistic_mutated_slope": float(site_slope),
+        "site_logistic_tjur_r2": float(feature_result.get("logistic_tjur_r2", np.nan)),
+        "site_logistic_mcfadden_r2": float(feature_result.get("logistic_mcfadden_r2", np.nan)),
+        "site_logistic_brier_score": float(feature_result.get("logistic_brier_score", np.nan)),
+        "site_logistic_auroc": float(feature_result.get("logistic_auroc", np.nan)),
+    }
+
+
+def mean_finite(values: List[float]) -> float:
+    finite_values = [float(value) for value in values if np.isfinite(value)]
+    if not finite_values:
+        return np.nan
+    return float(np.mean(finite_values))
+
+
+def compute_baseline_alpha_position(alpha_values: pd.Series | List[float] | np.ndarray, offset: float = 0.1) -> float:
+    values = np.asarray(alpha_values, dtype=float)
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        return 1.1
+    return float(np.round(max(1.1, float(np.max(finite_values) + offset)), 6))
+
+
+def compute_mutation_only_alpha_baseline_row(combined_df: pd.DataFrame, pseudocount: float = 1e-16) -> Optional[Dict[str, object]]:
+    from Functions_HuggingFace import evaluate_alpha_sweep
+
+    required_cols = {"lineage", "position", "ref_aa", "aa", "mut_prob", "obs_freq", "obs_present", "depth"}
+    if combined_df.empty or not required_cols.issubset(combined_df.columns):
+        return None
+
+    baseline_df = combined_df.loc[:, sorted(required_cols)].drop_duplicates().copy()
+    if baseline_df.empty:
+        return None
+
+    baseline_df["plm_prob"] = 1.0
+    baseline_metrics = evaluate_alpha_sweep(
+        baseline_df,
+        np.array([1.0]),
+        parallel=False,
+        pseudocount=pseudocount,
+    )
+    if baseline_metrics.empty:
+        return None
+
+    site_df = (
+        baseline_df.loc[:, ["lineage", "position", "ref_aa", "mut_prob", "obs_present"]]
+        .groupby(["lineage", "position", "ref_aa"], as_index=False)
+        .agg(
+            site_score=("mut_prob", "max"),
+            site_mutated=("obs_present", "max"),
+        )
+    )
+    logistic_metrics = compute_site_logistic_metrics(
+        site_df["site_score"],
+        site_df["site_mutated"],
+        context_label="mutation-only alpha baseline",
+    )
+
+    row = baseline_metrics.iloc[0].to_dict()
+    row.update(
+        {
+            "alpha": np.nan,
+            "alpha_label": "mutation_only",
+            "model_variant": "mutation_accessibility_only",
+            "is_mutation_only_baseline": True,
+            "input_score_formula": "mut_prob",
+        }
+    )
+    row.update(logistic_metrics)
+    return row
+
+
+def fit_logistic_feature_model(feature_frame: pd.DataFrame, binary_outcome: pd.Series) -> Dict[str, object]:
+    from scipy.optimize import minimize
+    from scipy.special import expit
+
+    feature_names = list(feature_frame.columns)
+    result: Dict[str, object] = {
+        "logistic_n_obs": 0,
+        "logistic_positive_rate": np.nan,
+        "logistic_intercept": np.nan,
+        "logistic_tjur_r2": np.nan,
+        "logistic_fitted_prob_corr": np.nan,
+        "logistic_auroc": np.nan,
+        "logistic_mcfadden_r2": np.nan,
+        "logistic_brier_score": np.nan,
+        "logistic_log_likelihood": np.nan,
+        "logistic_null_log_likelihood": np.nan,
+        "logistic_active_predictors": "",
+        "logistic_response_definition": "binary_mutation_observed",
+    }
+    for feature_name in feature_names:
+        result[f"logistic_coef_{feature_name}"] = np.nan
+
+    x = np.asarray(feature_frame, dtype=float)
+    if x.ndim == 1:
+        x = x.reshape(-1, 1)
+    y = np.asarray(binary_outcome, dtype=float)
+    valid = np.isfinite(y) & np.all(np.isfinite(x), axis=1)
+    if valid.sum() < 3:
+        return result
+
+    x = x[valid]
+    y = y[valid]
+    result["logistic_n_obs"] = int(len(y))
+    result["logistic_positive_rate"] = float(np.mean(y)) if len(y) > 0 else np.nan
+    if np.unique(y).size < 2:
+        return result
+
+    x_mean = np.mean(x, axis=0)
+    x_std = np.std(x, axis=0)
+    active_mask = np.isfinite(x_std) & (x_std > 0)
+    result["logistic_active_predictors"] = ",".join([name for name, is_active in zip(feature_names, active_mask) if is_active])
+    if not np.any(active_mask):
+        return result
+
+    x_active = x[:, active_mask]
+    mean_active = x_mean[active_mask]
+    std_active = x_std[active_mask]
+    x_scaled = (x_active - mean_active) / std_active
+
+    y_mean = float(np.clip(np.mean(y), 1e-6, 1.0 - 1e-6))
+    intercept_seed = float(np.log(y_mean / (1.0 - y_mean)))
+    slope_seed = np.zeros(x_scaled.shape[1], dtype=float)
+    if np.std(y) > 0:
+        for feature_idx in range(x_scaled.shape[1]):
+            corr_seed = float(np.corrcoef(x_scaled[:, feature_idx], y)[0, 1])
+            if not np.isfinite(corr_seed):
+                corr_seed = 0.0
+            slope_seed[feature_idx] = float(np.clip(4.0 * corr_seed, -8.0, 8.0))
+
+    def neg_log_likelihood(params: np.ndarray) -> float:
+        intercept = params[0]
+        slopes = params[1:]
+        logits = intercept + np.dot(x_scaled, slopes)
+        probs = np.clip(expit(logits), 1e-9, 1.0 - 1e-9)
+        return float(-np.sum(y * np.log(probs) + (1.0 - y) * np.log(1.0 - probs)))
+
+    bounds = [(-20.0, 20.0)] * (x_scaled.shape[1] + 1)
+    initial_guesses = [
+        np.concatenate(([0.0], np.zeros(x_scaled.shape[1], dtype=float))),
+        np.concatenate(([intercept_seed], np.zeros(x_scaled.shape[1], dtype=float))),
+        np.concatenate(([intercept_seed], slope_seed)),
+        np.concatenate(([intercept_seed], -slope_seed)),
+        np.concatenate(([0.0], slope_seed)),
+        np.concatenate(([0.0], -slope_seed)),
+    ]
+    methods = [
+        ("L-BFGS-B", {"bounds": bounds}),
+        ("Powell", {"bounds": bounds}),
+        ("Nelder-Mead", {}),
+        ("BFGS", {}),
+    ]
+    best_fit = None
+    best_nll = np.inf
+    for x0 in initial_guesses:
+        for method_name, extra_kwargs in methods:
+            try:
+                fit = minimize(
+                    neg_log_likelihood,
+                    x0=x0,
+                    method=method_name,
+                    options={"maxiter": 2000},
+                    **extra_kwargs,
+                )
+            except Exception:
+                continue
+            fit_nll = float(fit.fun) if np.isfinite(fit.fun) else np.inf
+            if fit.success and fit_nll < best_nll and np.all(np.isfinite(fit.x)):
+                best_fit = fit
+                best_nll = fit_nll
+
+    if best_fit is None:
+        return result
+
+    intercept_scaled = float(best_fit.x[0])
+    slopes_scaled = np.asarray(best_fit.x[1:], dtype=float)
+    raw_coefs_active = slopes_scaled / std_active
+    raw_intercept = intercept_scaled - float(np.sum((slopes_scaled * mean_active) / std_active))
+    raw_coefs = np.zeros(len(feature_names), dtype=float)
+    raw_coefs[active_mask] = raw_coefs_active
+    fitted_probs = expit(raw_intercept + np.dot(x, raw_coefs))
+    base_prob = float(np.clip(np.mean(y), 1e-9, 1.0 - 1e-9))
+    null_nll = float(-np.sum(y * np.log(base_prob) + (1.0 - y) * np.log(1.0 - base_prob)))
+    pos_mask = y > 0.5
+    neg_mask = ~pos_mask
+    tjur_r2 = float(np.mean(fitted_probs[pos_mask]) - np.mean(fitted_probs[neg_mask])) if pos_mask.any() and neg_mask.any() else np.nan
+    fitted_prob_corr = float(np.corrcoef(fitted_probs, y)[0, 1]) if np.std(fitted_probs) > 0 and np.std(y) > 0 else np.nan
+    auroc = safe_auroc(pd.Series(fitted_probs), pd.Series(y))
+
+    result.update(
+        {
+            "logistic_intercept": raw_intercept,
+            "logistic_tjur_r2": tjur_r2,
+            "logistic_fitted_prob_corr": fitted_prob_corr,
+            "logistic_auroc": auroc,
+            "logistic_mcfadden_r2": float(1.0 - (best_nll / null_nll)) if np.isfinite(null_nll) and null_nll > 0 else np.nan,
+            "logistic_brier_score": float(np.mean(np.square(y - fitted_probs))),
+            "logistic_log_likelihood": float(-best_nll),
+            "logistic_null_log_likelihood": float(-null_nll) if np.isfinite(null_nll) else np.nan,
+        }
+    )
+    for feature_name, coef_value in zip(feature_names, raw_coefs):
+        result[f"logistic_coef_{feature_name}"] = float(coef_value)
+    return result
+
+
+def fit_linear_frequency_model(feature_frame: pd.DataFrame, obs_freq: pd.Series) -> Dict[str, object]:
+    feature_names = list(feature_frame.columns)
+    result: Dict[str, object] = {
+        "freq_regression_method": "ordinary_least_squares",
+        "freq_n_obs": 0,
+        "freq_intercept": np.nan,
+        "freq_log10_r2": np.nan,
+        "freq_log10_adjusted_r2": np.nan,
+        "freq_log10_rmse": np.nan,
+        "freq_log10_pearson_r": np.nan,
+        "freq_log10_spearman_r": np.nan,
+        "freq_raw_intercept": np.nan,
+        "freq_raw_r2": np.nan,
+        "freq_raw_adjusted_r2": np.nan,
+        "freq_raw_rmse": np.nan,
+        "freq_raw_pearson_r": np.nan,
+        "freq_raw_spearman_r": np.nan,
+        "freq_active_predictors": "",
+        "freq_response_definition": "log10_nonzero_observed_frequency",
+        "freq_raw_response_definition": "nonzero_observed_frequency",
+        "freq_mean_observed_frequency": np.nan,
+        "freq_mean_log10_observed_frequency": np.nan,
+    }
+    for feature_name in feature_names:
+        result[f"freq_coef_{feature_name}"] = np.nan
+        result[f"freq_raw_coef_{feature_name}"] = np.nan
+
+    x = np.asarray(feature_frame, dtype=float)
+    if x.ndim == 1:
+        x = x.reshape(-1, 1)
+    y_raw = np.asarray(obs_freq, dtype=float)
+    valid = np.isfinite(y_raw) & (y_raw > 0) & np.all(np.isfinite(x), axis=1)
+    if valid.sum() < 2:
+        return result
+
+    x = x[valid]
+    y_log = np.log10(np.clip(y_raw[valid], 1e-32, None))
+    result["freq_n_obs"] = int(len(y_log))
+    result["freq_mean_observed_frequency"] = float(np.mean(y_raw[valid]))
+    result["freq_mean_log10_observed_frequency"] = float(np.mean(y_log))
+    x_std = np.std(x, axis=0)
+    active_mask = np.isfinite(x_std) & (x_std > 0)
+    result["freq_active_predictors"] = ",".join([name for name, is_active in zip(feature_names, active_mask) if is_active])
+    if not np.any(active_mask):
+        return result
+
+    x_active = x[:, active_mask]
+    design = np.column_stack([np.ones(len(y_log), dtype=float), x_active])
+    try:
+        coeffs, _, _, _ = np.linalg.lstsq(design, y_log, rcond=None)
+    except np.linalg.LinAlgError:
+        return result
+
+    fitted = design @ coeffs
+    residuals = y_log - fitted
+    rss = float(np.sum(np.square(residuals)))
+    tss = float(np.sum(np.square(y_log - np.mean(y_log))))
+    r2 = float(1.0 - (rss / tss)) if tss > 0 else np.nan
+    n_obs = len(y_log)
+    n_params = int(1 + np.sum(active_mask))
+    adjusted_r2 = float(1.0 - ((1.0 - r2) * (n_obs - 1) / (n_obs - n_params))) if np.isfinite(r2) and n_obs > n_params else np.nan
+    raw_coefs = np.zeros(len(feature_names), dtype=float)
+    raw_coefs[active_mask] = np.asarray(coeffs[1:], dtype=float)
+
+    y_nonzero = y_raw[valid]
+    try:
+        coeffs_raw, _, _, _ = np.linalg.lstsq(design, y_nonzero, rcond=None)
+    except np.linalg.LinAlgError:
+        coeffs_raw = None
+
+    raw_fit = np.full(len(y_nonzero), np.nan, dtype=float)
+    raw_residuals = np.full(len(y_nonzero), np.nan, dtype=float)
+    raw_r2 = np.nan
+    raw_adjusted_r2 = np.nan
+    raw_rmse = np.nan
+    raw_pearson_r = np.nan
+    raw_spearman_r = np.nan
+    raw_scale_coefs = np.zeros(len(feature_names), dtype=float)
+    raw_intercept = np.nan
+    if coeffs_raw is not None:
+        raw_fit = design @ coeffs_raw
+        raw_residuals = y_nonzero - raw_fit
+        raw_rss = float(np.sum(np.square(raw_residuals)))
+        raw_tss = float(np.sum(np.square(y_nonzero - np.mean(y_nonzero))))
+        raw_r2 = float(1.0 - (raw_rss / raw_tss)) if raw_tss > 0 else np.nan
+        raw_adjusted_r2 = float(1.0 - ((1.0 - raw_r2) * (n_obs - 1) / (n_obs - n_params))) if np.isfinite(raw_r2) and n_obs > n_params else np.nan
+        raw_rmse = float(np.sqrt(np.mean(np.square(raw_residuals))))
+        raw_pearson_r = safe_pearson(pd.Series(raw_fit), pd.Series(y_nonzero))
+        raw_spearman_r = safe_spearman(pd.Series(raw_fit), pd.Series(y_nonzero))
+        raw_scale_coefs[active_mask] = np.asarray(coeffs_raw[1:], dtype=float)
+        raw_intercept = float(coeffs_raw[0])
+
+    result.update(
+        {
+            "freq_intercept": float(coeffs[0]),
+            "freq_log10_r2": r2,
+            "freq_log10_adjusted_r2": adjusted_r2,
+            "freq_log10_rmse": float(np.sqrt(np.mean(np.square(residuals)))),
+            "freq_log10_pearson_r": safe_pearson(pd.Series(fitted), pd.Series(y_log)),
+            "freq_log10_spearman_r": safe_spearman(pd.Series(fitted), pd.Series(y_log)),
+            "freq_raw_intercept": raw_intercept,
+            "freq_raw_r2": raw_r2,
+            "freq_raw_adjusted_r2": raw_adjusted_r2,
+            "freq_raw_rmse": raw_rmse,
+            "freq_raw_pearson_r": raw_pearson_r,
+            "freq_raw_spearman_r": raw_spearman_r,
+        }
+    )
+    for feature_name, coef_value in zip(feature_names, raw_coefs):
+        result[f"freq_coef_{feature_name}"] = float(coef_value)
+    for feature_name, coef_value in zip(feature_names, raw_scale_coefs):
+        result[f"freq_raw_coef_{feature_name}"] = float(coef_value)
+    return result
+
+
+def build_hurdle_base_frame(plot_frame: pd.DataFrame) -> pd.DataFrame:
+    required_cols = {"obs_present", "obs_freq", "plm_prob", "mut_prob"}
+    if plot_frame.empty or not required_cols.issubset(plot_frame.columns):
+        return pd.DataFrame()
+    base_df = plot_frame.loc[:, sorted(required_cols)].copy()
+    base_df["obs_present"] = pd.to_numeric(base_df["obs_present"], errors="coerce")
+    base_df["obs_freq"] = pd.to_numeric(base_df["obs_freq"], errors="coerce")
+    base_df["plm_prob"] = pd.to_numeric(base_df["plm_prob"], errors="coerce").clip(lower=1e-32)
+    base_df["mut_prob"] = pd.to_numeric(base_df["mut_prob"], errors="coerce").clip(lower=1e-32)
+    base_df["log_plm_prob"] = np.log10(base_df["plm_prob"])
+    base_df["log_mut_prob"] = np.log10(base_df["mut_prob"])
+    valid = np.isfinite(base_df["obs_present"]) & np.isfinite(base_df["obs_freq"]) & np.isfinite(base_df["log_plm_prob"]) & np.isfinite(base_df["log_mut_prob"])
+    return base_df.loc[valid].reset_index(drop=True)
+
+
+def evaluate_hurdle_alpha_sweep(plot_frame: pd.DataFrame, alpha_values: List[float]) -> pd.DataFrame:
+    base_df = build_hurdle_base_frame(plot_frame)
+    if base_df.empty or not alpha_values:
+        return pd.DataFrame()
+    rows: List[Dict[str, object]] = []
+    sorted_alphas = sorted({float(alpha) for alpha in alpha_values})
+    for alpha_presence in sorted_alphas:
+        binary_score = base_df["log_plm_prob"] + (alpha_presence * base_df["log_mut_prob"])
+        logistic_metrics = fit_logistic_feature_model(pd.DataFrame({"combined_score": binary_score}), base_df["obs_present"])
+        for alpha_frequency in sorted_alphas:
+            positive_score = base_df["log_plm_prob"] + (alpha_frequency * base_df["log_mut_prob"])
+            freq_metrics = fit_linear_frequency_model(pd.DataFrame({"combined_score": positive_score}), base_df["obs_freq"])
+            row: Dict[str, object] = {
+                "alpha_presence": float(alpha_presence),
+                "alpha_frequency": float(alpha_frequency),
+                "presence_score_formula": "log10(plm_prob) + alpha_presence * log10(mut_prob)",
+                "frequency_score_formula": "log10(plm_prob) + alpha_frequency * log10(mut_prob)",
+                "presence_stage_feature_set": "combined_score",
+                "frequency_stage_feature_set": "combined_score",
+                "hurdle_mean_r2": mean_finite([
+                    float(logistic_metrics.get("logistic_tjur_r2", np.nan)),
+                    float(freq_metrics.get("freq_log10_r2", np.nan)),
+                ]),
+                "hurdle_mean_r2_raw_frequency": mean_finite([
+                    float(logistic_metrics.get("logistic_tjur_r2", np.nan)),
+                    float(freq_metrics.get("freq_raw_r2", np.nan)),
+                ]),
+            }
+            row.update(logistic_metrics)
+            row.update(freq_metrics)
+            rows.append(row)
+    return pd.DataFrame(rows).sort_values(["alpha_presence", "alpha_frequency"]).reset_index(drop=True)
+
+
+def summarize_hurdle_models(plot_frame: pd.DataFrame, hurdle_alpha_df: pd.DataFrame) -> pd.DataFrame:
+    base_df = build_hurdle_base_frame(plot_frame)
+    if base_df.empty:
+        return pd.DataFrame()
+    rows: List[Dict[str, object]] = []
+    baseline_presence_alpha = compute_baseline_alpha_position(hurdle_alpha_df["alpha_presence"]) if not hurdle_alpha_df.empty else 1.1
+    baseline_frequency_alpha = compute_baseline_alpha_position(hurdle_alpha_df["alpha_frequency"]) if not hurdle_alpha_df.empty else 1.1
+    mutation_only_logistic = fit_logistic_feature_model(base_df.loc[:, ["log_mut_prob"]], base_df["obs_present"])
+    mutation_only_freq = fit_linear_frequency_model(base_df.loc[:, ["log_mut_prob"]], base_df["obs_freq"])
+    mutation_only_row: Dict[str, object] = {
+        "model_variant": "mutation_only",
+        "alpha_presence": baseline_presence_alpha,
+        "alpha_frequency": baseline_frequency_alpha,
+        "presence_stage_feature_set": "log_mut_prob",
+        "frequency_stage_feature_set": "log_mut_prob",
+        "hurdle_mean_r2": mean_finite([
+            float(mutation_only_logistic.get("logistic_tjur_r2", np.nan)),
+            float(mutation_only_freq.get("freq_log10_r2", np.nan)),
+        ]),
+        "hurdle_mean_r2_raw_frequency": mean_finite([
+            float(mutation_only_logistic.get("logistic_tjur_r2", np.nan)),
+            float(mutation_only_freq.get("freq_raw_r2", np.nan)),
+        ]),
+    }
+    mutation_only_row.update(mutation_only_logistic)
+    mutation_only_row.update(mutation_only_freq)
+    rows.append(mutation_only_row)
+    plm_only_rows = hurdle_alpha_df.loc[
+        np.isclose(pd.to_numeric(hurdle_alpha_df["alpha_presence"], errors="coerce"), 0.0)
+        & np.isclose(pd.to_numeric(hurdle_alpha_df["alpha_frequency"], errors="coerce"), 0.0)
+    ] if not hurdle_alpha_df.empty else pd.DataFrame()
+    if not plm_only_rows.empty:
+        plm_only_row = plm_only_rows.iloc[0].to_dict()
+    else:
+        plm_only_logistic = fit_logistic_feature_model(base_df.loc[:, ["log_plm_prob"]], base_df["obs_present"])
+        plm_only_freq = fit_linear_frequency_model(base_df.loc[:, ["log_plm_prob"]], base_df["obs_freq"])
+        plm_only_row = {
+            "alpha_presence": 0.0,
+            "alpha_frequency": 0.0,
+            "presence_score_formula": "log10(plm_prob) + alpha_presence * log10(mut_prob)",
+            "frequency_score_formula": "log10(plm_prob) + alpha_frequency * log10(mut_prob)",
+            "presence_stage_feature_set": "combined_score",
+            "frequency_stage_feature_set": "combined_score",
+            "hurdle_mean_r2": mean_finite([
+                float(plm_only_logistic.get("logistic_tjur_r2", np.nan)),
+                float(plm_only_freq.get("freq_log10_r2", np.nan)),
+            ]),
+            "hurdle_mean_r2_raw_frequency": mean_finite([
+                float(plm_only_logistic.get("logistic_tjur_r2", np.nan)),
+                float(plm_only_freq.get("freq_raw_r2", np.nan)),
+            ]),
+        }
+        plm_only_row.update(plm_only_logistic)
+        plm_only_row.update(plm_only_freq)
+    plm_only_row["model_variant"] = "plm_only_alpha0"
+    rows.append(plm_only_row)
+    if not hurdle_alpha_df.empty:
+        best_idx = hurdle_alpha_df["hurdle_mean_r2"].astype(float).idxmax() if hurdle_alpha_df["hurdle_mean_r2"].notna().any() else hurdle_alpha_df.index[0]
+        best_row = hurdle_alpha_df.loc[best_idx].to_dict()
+        best_row["model_variant"] = "best_alpha_hurdle"
+        rows.append(best_row)
+    two_input_features = base_df.loc[:, ["log_mut_prob", "log_plm_prob"]]
+    two_input_logistic = fit_logistic_feature_model(two_input_features, base_df["obs_present"])
+    two_input_freq = fit_linear_frequency_model(two_input_features, base_df["obs_freq"])
+    two_input_row = {
+        "model_variant": "two_input_hurdle",
+        "alpha_presence": np.nan,
+        "alpha_frequency": np.nan,
+        "presence_stage_feature_set": "log_mut_prob,log_plm_prob",
+        "frequency_stage_feature_set": "log_mut_prob,log_plm_prob",
+        "hurdle_mean_r2": mean_finite([
+            float(two_input_logistic.get("logistic_tjur_r2", np.nan)),
+            float(two_input_freq.get("freq_log10_r2", np.nan)),
+        ]),
+        "hurdle_mean_r2_raw_frequency": mean_finite([
+            float(two_input_logistic.get("logistic_tjur_r2", np.nan)),
+            float(two_input_freq.get("freq_raw_r2", np.nan)),
+        ]),
+    }
+    two_input_row.update(two_input_logistic)
+    two_input_row.update(two_input_freq)
+    rows.append(two_input_row)
+    return pd.DataFrame(rows)
+
+
 def compute_epoch_lineage_metrics(combined_df: pd.DataFrame) -> pd.DataFrame:
     if combined_df.empty:
         return pd.DataFrame()
@@ -1548,13 +2067,15 @@ def compute_epoch_lineage_metrics(combined_df: pd.DataFrame) -> pd.DataFrame:
             )
         )
 
-        logit_plm_corr, logit_plm_intercept, logit_plm_slope = fit_logistic_site_correlation(
+        logit_plm_corr, logit_plm_intercept, logit_plm_slope = validate_site_logistic_fit_agreement(
             site_df["site_plm_score"],
             site_df["site_mutated"],
+            context_label=f"epoch lineage metrics PLM ({model_tag}, {lineage_name})",
         )
-        logit_mut_corr, logit_mut_intercept, logit_mut_slope = fit_logistic_site_correlation(
+        logit_mut_corr, logit_mut_intercept, logit_mut_slope = validate_site_logistic_fit_agreement(
             site_df["site_mut_score"],
             site_df["site_mutated"],
+            context_label=f"epoch lineage metrics mutational accessibility ({model_tag}, {lineage_name})",
         )
 
         rows.append(
@@ -1639,20 +2160,96 @@ def export_plots(
     lineage_cache: Dict[str, Dict[str, object]],
     dynamic_pseudocount: float,
     mutation_baseline_x: float,
+    metrics_output_dir: Optional[Path] = None,
 ) -> None:
     import matplotlib.pyplot as plt
     import seaborn as sns
-    from matplotlib.ticker import NullLocator
+    from matplotlib.ticker import FuncFormatter, NullLocator
+    from scipy.special import expit
     from scipy.stats import spearmanr
     from Functions_HuggingFace import evaluate_alpha_sweep
 
+    metrics_output_dir = ensure_dir(Path(metrics_output_dir) if metrics_output_dir is not None else output_dir)
+    alpha_xlabel = "mutational accessibility weighting Alpha\n(mut_acc^alpha) 0= PLM only"
+    title_fontsize = 14
+    label_fontsize = 13
+    tick_fontsize = 11
+    legend_fontsize = 11
+    plot_name_overrides = {
+        "ESM2_650M_HA80": "HA80_fine-tune",
+    }
+
+    model_label_lookup = (
+        combined_df.loc[:, [
+            col for col in ["model", "model_display_label", "base_model", "checkpoint_label", "epoch_label"]
+            if col in combined_df.columns
+        ]]
+        .drop_duplicates(subset=["model"], keep="first")
+        .set_index("model")
+        .to_dict("index")
+        if "model" in combined_df.columns else {}
+    )
+
     def _safe_output_label(text: object) -> str:
         return re.sub(r"[^A-Za-z0-9._-]+", "_", str(text)).strip("_") or "model"
+
+    def _epoch_colour_sequence(n_values: int) -> List[Tuple[float, float, float]]:
+        return sns.color_palette("viridis", n_colors=max(1, n_values))
+
+    def _plm_epoch_label(epoch_label: object, epoch_value: object, model_name: Optional[object] = None, model_display_label: Optional[object] = None) -> str:
+        model_text = "" if model_name is None or pd.isna(model_name) else str(model_name).strip()
+        if model_text in plot_name_overrides:
+            return plot_name_overrides[model_text]
+
+        display_text = "" if model_display_label is None or pd.isna(model_display_label) else str(model_display_label).strip()
+        if display_text and display_text not in {"PLM raw"} and not display_text.startswith("PLM epoch "):
+            return display_text
+
+        metadata = model_label_lookup.get(model_text, {}) if model_name is not None else {}
+        metadata_display = str(metadata.get("model_display_label", "")).strip() if metadata.get("model_display_label") is not None and not pd.isna(metadata.get("model_display_label")) else ""
+        metadata_base_model = str(metadata.get("base_model", "")).strip() if metadata.get("base_model") is not None and not pd.isna(metadata.get("base_model")) else ""
+        metadata_checkpoint = str(metadata.get("checkpoint_label", "")).strip() if metadata.get("checkpoint_label") is not None and not pd.isna(metadata.get("checkpoint_label")) else ""
+        epoch_text = str(epoch_label)
+
+        if epoch_text == "raw_model":
+            if metadata_base_model:
+                return metadata_base_model
+            if metadata_display:
+                return re.sub(r"\s+raw\s+base\s+model$", "", metadata_display, flags=re.IGNORECASE).strip() or metadata_display
+            if model_text:
+                return re.sub(r"(?:_raw| raw)$", "", model_text).strip("_ ") or model_text
+            return "Base model"
+
+        if metadata_display and metadata_display not in {"PLM raw"} and not metadata_display.startswith("PLM epoch "):
+            return metadata_display
+        if metadata_checkpoint and metadata_base_model:
+            return f"{metadata_checkpoint} fine tuned ({metadata_base_model})"
+        if metadata_checkpoint:
+            return metadata_checkpoint
+        if model_text:
+            return model_text
+        return str(epoch_label)
 
     def _hide_log_minor_ticks(ax) -> None:
         ax.xaxis.set_minor_locator(NullLocator())
         ax.yaxis.set_minor_locator(NullLocator())
         ax.tick_params(axis="both", which="minor", bottom=False, top=False, left=False, right=False)
+
+    def _two_dp_formatter(value, _pos) -> str:
+        return f"{value:.2f}"
+
+    def _style_axis_text(ax, *, is_alpha_x: bool = False) -> None:
+        if ax.get_xscale() == "linear":
+            ax.xaxis.set_major_formatter(FuncFormatter(_two_dp_formatter))
+        if ax.get_yscale() == "linear":
+            ax.yaxis.set_major_formatter(FuncFormatter(_two_dp_formatter))
+        if is_alpha_x:
+            ax.set_xlabel(alpha_xlabel, fontsize=label_fontsize)
+        else:
+            ax.xaxis.label.set_size(label_fontsize)
+        ax.yaxis.label.set_size(label_fontsize)
+        ax.title.set_fontsize(title_fontsize)
+        ax.tick_params(axis="both", which="major", labelsize=tick_fontsize)
 
     def _dedupe_legend_entries(handles, labels):
         unique_handles = []
@@ -1715,6 +2312,11 @@ def export_plots(
             baseline_metrics.to_csv(baseline_output_path, sep="\t", index=False)
         return baseline_metrics.iloc[0]
 
+    def _baseline_alpha_x(alpha_frame: pd.DataFrame) -> float:
+        if "alpha" not in alpha_frame.columns:
+            return 1.1
+        return compute_baseline_alpha_position(alpha_frame["alpha"])
+
     def _compute_site_logistic_alpha_metrics(
         plot_frame: pd.DataFrame,
         alpha_frame: pd.DataFrame,
@@ -1765,19 +2367,39 @@ def export_plots(
                     )
                 )
                 try:
-                    logistic_corr, _, _ = fit_logistic_site_correlation(site_df["site_score"], site_df["site_mutated"])
+                    logistic_row = compute_site_logistic_metrics(
+                        site_df["site_score"],
+                        site_df["site_mutated"],
+                        context_label=f"selected alpha site logistic (alpha={float(alpha_value):.6g})",
+                    )
                 except Exception:
-                    logistic_corr = np.nan
-                logistic_row: Dict[str, object] = {"alpha": float(alpha_value), "site_logistic_mutated_corr": logistic_corr}
+                    logistic_row = {
+                        "site_logistic_mutated_corr": np.nan,
+                        "site_logistic_mutated_intercept": np.nan,
+                        "site_logistic_mutated_slope": np.nan,
+                        "site_logistic_tjur_r2": np.nan,
+                        "site_logistic_mcfadden_r2": np.nan,
+                        "site_logistic_brier_score": np.nan,
+                        "site_logistic_auroc": np.nan,
+                    }
+                logistic_row["alpha"] = float(alpha_value)
                 logistic_row.update(group_key)
                 logistic_rows.append(logistic_row)
 
         return pd.DataFrame(logistic_rows)
 
-    def _compute_mutation_only_logistic_baseline(plot_frame: pd.DataFrame) -> float:
+    def _compute_mutation_only_logistic_baseline(plot_frame: pd.DataFrame) -> Dict[str, float]:
         required_cols = {"lineage", "position", "ref_aa", "mut_prob", "obs_present"}
         if plot_frame.empty or not required_cols.issubset(plot_frame.columns):
-            return np.nan
+            return {
+                "site_logistic_mutated_corr": np.nan,
+                "site_logistic_mutated_intercept": np.nan,
+                "site_logistic_mutated_slope": np.nan,
+                "site_logistic_tjur_r2": np.nan,
+                "site_logistic_mcfadden_r2": np.nan,
+                "site_logistic_brier_score": np.nan,
+                "site_logistic_auroc": np.nan,
+            }
 
         site_df = (
             plot_frame.loc[:, ["lineage", "position", "ref_aa", "mut_prob", "obs_present"]]
@@ -1787,21 +2409,49 @@ def export_plots(
                 site_mutated=("obs_present", "max"),
             )
         )
-        logistic_corr, _, _ = fit_logistic_site_correlation(site_df["site_score"], site_df["site_mutated"])
-        return logistic_corr
+        return compute_site_logistic_metrics(
+            site_df["site_score"],
+            site_df["site_mutated"],
+            context_label="selected alpha mutation-only logistic baseline",
+        )
 
     def _build_selected_alpha_metric_frame(
         plot_frame: pd.DataFrame,
         alpha_frame: pd.DataFrame,
     ) -> pd.DataFrame:
         selected_cols = [
-            col for col in ["alpha", "model", "epoch_label", "epoch_value", "mut_flat_global_spearman_r", "mut_flat_nonzero_pearson_r"]
+            col for col in ["alpha", "model", "model_display_label", "epoch_label", "epoch_value", "mut_flat_global_spearman_r", "mut_flat_nonzero_pearson_r"]
             if col in alpha_frame.columns
         ]
         selected_alpha_df = alpha_frame.loc[:, selected_cols].copy()
+        if "model_display_label" not in selected_alpha_df.columns:
+            selected_alpha_df["model_display_label"] = np.nan
+        if all(col in plot_frame.columns for col in ["model", "model_display_label"]):
+            model_display_df = plot_frame.loc[:, ["model", "model_display_label"]].drop_duplicates(subset=["model"], keep="first")
+            selected_alpha_df = selected_alpha_df.merge(model_display_df, on="model", how="left", suffixes=("", "_from_plot"))
+            if "model_display_label_from_plot" in selected_alpha_df.columns:
+                selected_alpha_df["model_display_label"] = selected_alpha_df["model_display_label"].where(selected_alpha_df["model_display_label"].notna(), selected_alpha_df["model_display_label_from_plot"])
+                selected_alpha_df = selected_alpha_df.drop(columns=["model_display_label_from_plot"])
+        if "model" in selected_alpha_df.columns:
+            selected_alpha_df["model_display_label"] = [
+                _plm_epoch_label(epoch_label, epoch_value, model_name=model_name, model_display_label=model_display_label)
+                for model_name, epoch_label, epoch_value, model_display_label in zip(
+                    selected_alpha_df["model"],
+                    selected_alpha_df["epoch_label"] if "epoch_label" in selected_alpha_df.columns else pd.Series([""] * len(selected_alpha_df)),
+                    selected_alpha_df["epoch_value"] if "epoch_value" in selected_alpha_df.columns else pd.Series([np.nan] * len(selected_alpha_df)),
+                    selected_alpha_df["model_display_label"],
+                )
+            ]
         logistic_alpha_df = _compute_site_logistic_alpha_metrics(plot_frame, alpha_frame)
         if logistic_alpha_df.empty:
-            selected_alpha_df["site_logistic_mutated_corr"] = np.nan
+            for metric_col in [
+                "site_logistic_mutated_corr",
+                "site_logistic_tjur_r2",
+                "site_logistic_mcfadden_r2",
+                "site_logistic_brier_score",
+                "site_logistic_auroc",
+            ]:
+                selected_alpha_df[metric_col] = np.nan
             return selected_alpha_df
 
         merge_cols = [col for col in ["model", "epoch_label", "epoch_value", "alpha"] if col in selected_alpha_df.columns and col in logistic_alpha_df.columns]
@@ -1826,9 +2476,7 @@ def export_plots(
             else None
         )
         n_epochs = len(epoch_groups) if epoch_groups is not None else 1
-        cmap = plt.get_cmap("coolwarm_r")
-        epoch_colours = [cmap(i / max(1, n_epochs - 1)) for i in range(n_epochs)]
-        include_model_in_label = bool("model" in plot_frame.columns and plot_frame["model"].nunique() > 1)
+        epoch_colours = _epoch_colour_sequence(n_epochs)
 
         fig, axes = plt.subplots(nrows, ncols, figsize=figsize, sharex=True)
         axes = np.array(axes, dtype=object).reshape(-1)
@@ -1839,7 +2487,7 @@ def export_plots(
                     grp_sorted = grp.loc[np.isfinite(grp["alpha"]) & np.isfinite(grp[metric_col])].sort_values("alpha")
                     if grp_sorted.empty:
                         continue
-                    tick_label = _format_epoch_tick_label(ep_label, ep_val)
+                    tick_label = _plm_epoch_label(ep_label, ep_val)
                     ax.plot(
                         grp_sorted["alpha"],
                         grp_sorted[metric_col],
@@ -1853,11 +2501,12 @@ def export_plots(
                 ax_sorted = plot_frame.loc[np.isfinite(plot_frame["alpha"]) & np.isfinite(plot_frame[metric_col])].sort_values("alpha")
                 if ax_sorted.empty:
                     ax.set_title(title_map.get(metric_col, metric_col))
-                    ax.set_xlabel("Alpha")
+                    ax.set_xlabel(alpha_xlabel)
                     ax.set_ylabel("Metric value")
                     ax.grid(alpha=0.3)
+                    _style_axis_text(ax, is_alpha_x=True)
                     continue
-                ax.plot(ax_sorted["alpha"], ax_sorted[metric_col], marker="o", linewidth=1.5)
+                ax.plot(ax_sorted["alpha"], ax_sorted[metric_col], marker="o", linewidth=1.5, color="#1f6f8b", label="PLM alpha sweep")
 
             if (
                 mutation_only_metrics is not None
@@ -1866,30 +2515,31 @@ def export_plots(
                 and np.isfinite(float(mutation_only_metrics[metric_col]))
             ):
                 ax.scatter(
-                    [float(mutation_only_metrics["alpha"])],
+                    [_baseline_alpha_x(plot_frame)],
                     [float(mutation_only_metrics[metric_col])],
                     marker="s",
                     s=110,
-                    color="#d62728",
+                    color="#b58900",
                     edgecolors="black",
                     linewidths=1.0,
                     zorder=6,
-                    label="Mutation only",
+                    label="Mutation accessibility only",
                 )
 
             ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
             ax.set_title(title_map.get(metric_col, metric_col))
-            ax.set_xlabel("Alpha")
+            ax.set_xlabel(alpha_xlabel)
             ax.set_ylabel("Metric value")
             ax.grid(alpha=0.3)
+            _style_axis_text(ax, is_alpha_x=True)
 
         for ax in axes[len(metric_cols):]:
             ax.axis("off")
 
         handles, labels = _collect_axes_legend_entries(axes)
         if handles:
-            fig.legend(handles, labels, title="Epoch", loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
-        plt.tight_layout(rect=(0, 0, 0.84, 1))
+            fig.legend(handles, labels, title="PLM sweep / baseline", loc="upper center", bbox_to_anchor=(0.5, 0.995), ncol=max(1, min(4, len(handles))), frameon=False, fontsize=legend_fontsize, title_fontsize=legend_fontsize)
+        plt.tight_layout(rect=(0, 0, 1, 0.9))
         plt.savefig(output_dir / output_name, dpi=300)
         plt.close()
 
@@ -1912,42 +2562,48 @@ def export_plots(
         mutation_only_logistic = _compute_mutation_only_logistic_baseline(plot_frame)
         if mutation_only_metrics is not None:
             mutation_only_metrics = mutation_only_metrics.copy()
-            mutation_only_metrics["site_logistic_mutated_corr"] = mutation_only_logistic
+            for metric_name, metric_value in mutation_only_logistic.items():
+                mutation_only_metrics[metric_name] = metric_value
 
         plot_metric_cols = [
             metric_col for metric_col in [
                 "mut_flat_global_spearman_r",
                 "mut_flat_nonzero_pearson_r",
-                "site_logistic_mutated_corr",
+                "site_logistic_auroc",
             ]
             if metric_col in focused_alpha_df.columns
         ]
         if not plot_metric_cols:
             return
 
-        fig, axes = plt.subplots(1, len(plot_metric_cols), figsize=(6 * len(plot_metric_cols), 5), sharex=True)
+        fig, axes = plt.subplots(1, len(plot_metric_cols), figsize=(6 * len(plot_metric_cols), 6.4), sharex=True)
         axes = np.array(axes, dtype=object).reshape(-1)
         title_map = {
-            "mut_flat_global_spearman_r": "Spearman(score vs observed freq), all 19xN mutation rows",
-            "mut_flat_nonzero_pearson_r": "Pearson(score vs observed freq), non-zero allele frequencies only",
-            "site_logistic_mutated_corr": "Logistic regression: site mutated (>0 obs freq) vs score",
+            "mut_flat_global_spearman_r": "Spearman(PLM vs observed freq)\nall 19xN mutation rows",
+            "mut_flat_nonzero_pearson_r": "Pearson(PLM vs observed freq)\nnon-zero allele frequencies only",
+            "site_logistic_auroc": "Logistic regression:\nPLM prob vs binary mutation observed",
+        }
+        ylabel_map = {
+            "mut_flat_global_spearman_r": "Spearman r",
+            "mut_flat_nonzero_pearson_r": "Pearson r",
+            "site_logistic_auroc": "AUROC",
         }
 
         epoch_groups = (
-            focused_alpha_df.groupby(["epoch_value", "epoch_label", "model"], sort=True)
-            if all(c in focused_alpha_df.columns for c in ["epoch_value", "epoch_label", "model"])
+            focused_alpha_df.groupby(["epoch_value", "epoch_label", "model", "model_display_label"], sort=True, dropna=False)
+            if all(c in focused_alpha_df.columns for c in ["epoch_value", "epoch_label", "model", "model_display_label"])
             else None
         )
         n_groups = len(epoch_groups) if epoch_groups is not None else 1
-        cmap = plt.get_cmap("coolwarm_r")
-        epoch_colours = [cmap(i / max(1, n_groups - 1)) for i in range(n_groups)]
+        epoch_colours = _epoch_colour_sequence(n_groups)
         for ax, metric_col in zip(axes, plot_metric_cols):
+            metric_y_values: List[float] = []
             if epoch_groups is not None:
-                for colour_idx, ((ep_val, ep_label, model_name), grp) in enumerate(epoch_groups):
+                for colour_idx, ((ep_val, ep_label, model_name, model_display_label), grp) in enumerate(epoch_groups):
                     grp_sorted = grp.loc[np.isfinite(grp["alpha"]) & np.isfinite(grp[metric_col])].sort_values("alpha")
                     if grp_sorted.empty:
                         continue
-                    tick_label = _format_epoch_tick_label(ep_label, ep_val)
+                    tick_label = _plm_epoch_label(ep_label, ep_val, model_name=model_name, model_display_label=model_display_label)
                     ax.plot(
                         grp_sorted["alpha"],
                         grp_sorted[metric_col],
@@ -1957,15 +2613,18 @@ def export_plots(
                         linewidth=1.5,
                         markersize=4,
                     )
+                    metric_y_values.extend(grp_sorted[metric_col].astype(float).tolist())
             else:
                 grp_sorted = focused_alpha_df.loc[np.isfinite(focused_alpha_df["alpha"]) & np.isfinite(focused_alpha_df[metric_col])].sort_values("alpha")
                 if grp_sorted.empty:
                     ax.set_title(title_map[metric_col])
-                    ax.set_xlabel("Alpha")
-                    ax.set_ylabel("Metric value")
+                    ax.set_xlabel(alpha_xlabel)
+                    ax.set_ylabel(ylabel_map.get(metric_col, metric_col))
                     ax.grid(alpha=0.3)
+                    _style_axis_text(ax, is_alpha_x=True)
                     continue
-                ax.plot(grp_sorted["alpha"], grp_sorted[metric_col], marker="o", linewidth=1.5)
+                ax.plot(grp_sorted["alpha"], grp_sorted[metric_col], marker="o", linewidth=1.5, color="#1f6f8b", label="PLM alpha sweep")
+                metric_y_values.extend(grp_sorted[metric_col].astype(float).tolist())
 
             if (
                 mutation_only_metrics is not None
@@ -1974,29 +2633,333 @@ def export_plots(
                 and np.isfinite(float(mutation_only_metrics[metric_col]))
             ):
                 ax.scatter(
-                    [float(mutation_only_metrics["alpha"])],
+                    [_baseline_alpha_x(focused_alpha_df)],
                     [float(mutation_only_metrics[metric_col])],
                     marker="s",
                     s=110,
-                    color="#d62728",
+                    color="#b58900",
                     edgecolors="black",
                     linewidths=1.0,
                     zorder=6,
-                    label="Mutation only",
+                    label="Mutation accessibility only",
                 )
+                metric_y_values.append(float(mutation_only_metrics[metric_col]))
 
             ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
+            ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
             ax.set_title(title_map[metric_col])
-            ax.set_xlabel("Alpha")
-            ax.set_ylabel("Metric value")
+            ax.set_xlabel(alpha_xlabel)
+            ax.set_ylabel(ylabel_map.get(metric_col, metric_col))
+
+            finite_y = np.asarray([value for value in metric_y_values if np.isfinite(value)], dtype=float)
+            if finite_y.size:
+                raw_y_min = float(np.min(finite_y))
+                y_top = float(np.max(finite_y))
+                if np.isclose(raw_y_min, y_top):
+                    pad = 0.05 if np.isclose(y_top, 0.0) else max(0.05, abs(y_top) * 0.1)
+                else:
+                    pad = max(0.02, (y_top - raw_y_min) * 0.08)
+                y_bottom = 0.0 if raw_y_min >= 0.0 else raw_y_min - pad
+                ax.set_ylim(y_bottom, y_top + pad)
             ax.grid(alpha=0.3)
+            _style_axis_text(ax, is_alpha_x=True)
+
+        logistic_metric_cols = [
+            metric_col for metric_col in [
+                "site_logistic_auroc",
+                "site_logistic_tjur_r2",
+                "site_logistic_mcfadden_r2",
+                "site_logistic_brier_score",
+                "site_logistic_mutated_corr",
+            ]
+            if metric_col in focused_alpha_df.columns
+        ]
+        if logistic_metric_cols:
+            logistic_title_map = {
+                "site_logistic_auroc": "AUROC",
+                "site_logistic_tjur_r2": "Tjur R2",
+                "site_logistic_mcfadden_r2": "McFadden R2",
+                "site_logistic_brier_score": "Brier score",
+                "site_logistic_mutated_corr": "Fitted-probability correlation",
+            }
+            logistic_ylabel_map = {
+                "site_logistic_auroc": "AUROC",
+                "site_logistic_tjur_r2": "Tjur R2",
+                "site_logistic_mcfadden_r2": "McFadden R2",
+                "site_logistic_brier_score": "Brier score",
+                "site_logistic_mutated_corr": "Fitted-probability correlation",
+            }
+            logistic_fig, logistic_axes = plt.subplots(2, 3, figsize=(18, 10), sharex=True)
+            logistic_axes = np.array(logistic_axes, dtype=object).reshape(-1)
+            for ax, metric_col in zip(logistic_axes, logistic_metric_cols):
+                metric_y_values: List[float] = []
+                if epoch_groups is not None:
+                    for colour_idx, ((ep_val, ep_label, model_name, model_display_label), grp) in enumerate(epoch_groups):
+                        grp_sorted = grp.loc[np.isfinite(grp["alpha"]) & np.isfinite(grp[metric_col])].sort_values("alpha")
+                        if grp_sorted.empty:
+                            continue
+                        tick_label = _plm_epoch_label(ep_label, ep_val, model_name=model_name, model_display_label=model_display_label)
+                        ax.plot(grp_sorted["alpha"], grp_sorted[metric_col], marker="o", color=epoch_colours[colour_idx], label=tick_label, linewidth=1.5, markersize=4)
+                        metric_y_values.extend(grp_sorted[metric_col].astype(float).tolist())
+                else:
+                    grp_sorted = focused_alpha_df.loc[np.isfinite(focused_alpha_df["alpha"]) & np.isfinite(focused_alpha_df[metric_col])].sort_values("alpha")
+                    if not grp_sorted.empty:
+                        ax.plot(grp_sorted["alpha"], grp_sorted[metric_col], marker="o", linewidth=1.5, color="#1f6f8b", label="PLM alpha sweep")
+                        metric_y_values.extend(grp_sorted[metric_col].astype(float).tolist())
+                if mutation_only_metrics is not None and metric_col in mutation_only_metrics.index and np.isfinite(float(mutation_only_metrics[metric_col])):
+                    ax.scatter([_baseline_alpha_x(focused_alpha_df)], [float(mutation_only_metrics[metric_col])], marker="s", s=110, color="#b58900", edgecolors="black", linewidths=1.0, zorder=6, label="Mutation accessibility only")
+                    metric_y_values.append(float(mutation_only_metrics[metric_col]))
+                ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
+                ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
+                ax.set_title(f"Logistic regression:\n{logistic_title_map[metric_col]}")
+                ax.set_xlabel(alpha_xlabel)
+                ax.set_ylabel(logistic_ylabel_map[metric_col])
+                finite_y = np.asarray([value for value in metric_y_values if np.isfinite(value)], dtype=float)
+                if finite_y.size:
+                    raw_y_min = float(np.min(finite_y))
+                    y_top = float(np.max(finite_y))
+                    if np.isclose(raw_y_min, y_top):
+                        pad = 0.05 if np.isclose(y_top, 0.0) else max(0.05, abs(y_top) * 0.1)
+                    else:
+                        pad = max(0.02, (y_top - raw_y_min) * 0.08)
+                    y_bottom = 0.0 if raw_y_min >= 0.0 else raw_y_min - pad
+                    ax.set_ylim(y_bottom, y_top + pad)
+                ax.grid(alpha=0.3)
+                _style_axis_text(ax, is_alpha_x=True)
+            for ax in logistic_axes[len(logistic_metric_cols):]:
+                ax.axis("off")
+            logistic_handles, logistic_labels = _collect_axes_legend_entries(logistic_axes)
+            if logistic_handles:
+                logistic_fig.legend(logistic_handles, logistic_labels, loc="upper center", bbox_to_anchor=(0.5, 0.96), ncol=max(1, min(4, len(logistic_handles))), frameon=False, fontsize=legend_fontsize)
+            logistic_fig.suptitle(f"{title_prefix}\nLogistic alpha-sweep metrics", y=0.99)
+            logistic_fig._suptitle.set_fontsize(title_fontsize + 4)
+            plt.tight_layout(rect=(0, 0, 1, 0.92))
+            plt.savefig(target_dir / "alpha_sweep_logistic_metrics_selected.png", dpi=300)
+            plt.close(logistic_fig)
 
         handles, labels = _collect_axes_legend_entries(axes)
         if handles:
-            fig.legend(handles, labels, title="Epoch", loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
-        fig.suptitle(title_prefix)
-        plt.tight_layout(rect=(0, 0, 0.84, 0.95))
+            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.94), ncol=max(1, min(4, len(handles))), frameon=False, fontsize=legend_fontsize)
+        fig.suptitle(title_prefix, y=0.985)
+        fig._suptitle.set_fontsize(title_fontsize + 4)
+        plt.tight_layout(rect=(0, 0, 1, 0.90))
         plt.savefig(target_dir / output_name, dpi=300)
+        plt.close(fig)
+
+    def _write_hurdle_alpha_outputs(
+        target_plot_dir: Path,
+        target_metrics_dir: Path,
+        plot_frame: pd.DataFrame,
+        alpha_frame: pd.DataFrame,
+        title_prefix: str,
+    ) -> None:
+        if plot_frame.empty or alpha_frame.empty or "alpha" not in alpha_frame.columns:
+            return
+
+        target_plot_dir = ensure_dir(target_plot_dir)
+        target_metrics_dir = ensure_dir(target_metrics_dir)
+
+        if "model" in plot_frame.columns and plot_frame["model"].nunique() > 1:
+            model_meta = plot_frame.loc[:, ["model", "epoch_label", "epoch_value"]].drop_duplicates().sort_values(["epoch_value", "epoch_label", "model"])
+            model_groups = [
+                (
+                    str(row["model"]),
+                    plot_frame.loc[plot_frame["model"] == row["model"]].copy(),
+                    alpha_frame.loc[alpha_frame["model"] == row["model"]].copy() if "model" in alpha_frame.columns else alpha_frame.copy(),
+                    str(row["epoch_label"]),
+                    float(row["epoch_value"]),
+                )
+                for _, row in model_meta.iterrows()
+            ]
+        else:
+            epoch_label = str(alpha_frame.iloc[0]["epoch_label"]) if "epoch_label" in alpha_frame.columns and not alpha_frame.empty else "single_model"
+            epoch_value = float(alpha_frame.iloc[0]["epoch_value"]) if "epoch_value" in alpha_frame.columns and not alpha_frame.empty else 0.0
+            model_groups = [(title_prefix, plot_frame.copy(), alpha_frame.copy(), epoch_label, epoch_value)]
+
+        all_hurdle_frames: List[pd.DataFrame] = []
+        all_summary_frames: List[pd.DataFrame] = []
+        diagnostic_specs: List[Dict[str, object]] = []
+        fig, axes = plt.subplots(len(model_groups), 3, figsize=(18, 5.5 * len(model_groups)), squeeze=False)
+
+        for row_idx, (model_name, model_plot_frame, model_alpha_frame, epoch_label, epoch_value) in enumerate(model_groups):
+            alpha_values = sorted(model_alpha_frame["alpha"].dropna().astype(float).unique().tolist())
+            if not alpha_values:
+                continue
+            hurdle_alpha_df = evaluate_hurdle_alpha_sweep(model_plot_frame, alpha_values)
+            if hurdle_alpha_df.empty:
+                continue
+            model_display_label = _plm_epoch_label(epoch_label, epoch_value, model_name=model_name)
+            hurdle_alpha_df["model"] = model_name
+            hurdle_alpha_df["epoch_label"] = epoch_label
+            hurdle_alpha_df["epoch_value"] = float(epoch_value)
+            hurdle_alpha_df["model_display_label"] = model_display_label
+            all_hurdle_frames.append(hurdle_alpha_df)
+
+            hurdle_summary_df = summarize_hurdle_models(model_plot_frame, hurdle_alpha_df)
+            hurdle_summary_df["model"] = model_name
+            hurdle_summary_df["epoch_label"] = epoch_label
+            hurdle_summary_df["epoch_value"] = float(epoch_value)
+            hurdle_summary_df["model_display_label"] = model_display_label
+            all_summary_frames.append(hurdle_summary_df)
+
+            base_df = build_hurdle_base_frame(model_plot_frame)
+            for variant_name, variant_label in [("plm_only_alpha0", "PLM only (alpha = 0)"), ("best_alpha_hurdle", "Best hurdle fit")]:
+                variant_rows = hurdle_summary_df.loc[hurdle_summary_df["model_variant"] == variant_name]
+                if variant_rows.empty or base_df.empty:
+                    continue
+                diagnostic_specs.append(
+                    {
+                        "model_display_label": model_display_label,
+                        "variant_label": variant_label,
+                        "base_df": base_df.copy(),
+                        "summary_row": variant_rows.iloc[0].to_dict(),
+                    }
+                )
+
+            logistic_curve_df = hurdle_alpha_df.loc[:, ["alpha_presence", "logistic_tjur_r2"]].drop_duplicates().sort_values("alpha_presence")
+            freq_curve_df = hurdle_alpha_df.loc[:, ["alpha_frequency", "freq_log10_r2", "freq_raw_r2"]].drop_duplicates().sort_values("alpha_frequency")
+            baseline_row = hurdle_summary_df.loc[hurdle_summary_df["model_variant"] == "mutation_only"].iloc[0]
+            two_input_row = hurdle_summary_df.loc[hurdle_summary_df["model_variant"] == "two_input_hurdle"].iloc[0]
+            best_row = hurdle_alpha_df.loc[hurdle_alpha_df["hurdle_mean_r2"].astype(float).idxmax()] if hurdle_alpha_df["hurdle_mean_r2"].notna().any() else hurdle_alpha_df.iloc[0]
+
+            row_axes = axes[row_idx, :]
+            row_axes[0].plot(logistic_curve_df["alpha_presence"], logistic_curve_df["logistic_tjur_r2"], marker="o", linewidth=1.5, color="#1f6f8b", label="PLM-weighted hurdle sweep")
+            if np.isfinite(float(baseline_row.get("logistic_tjur_r2", np.nan))):
+                row_axes[0].scatter([float(baseline_row["alpha_presence"])], [float(baseline_row["logistic_tjur_r2"])], marker="s", s=110, color="#b58900", edgecolors="black", linewidths=1.0, zorder=5, label="Mutation accessibility only")
+            row_axes[0].axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.6)
+            row_axes[0].set_title(f"{model_display_label}\nBinary hurdle term")
+            row_axes[0].set_xlabel("PLM alpha for zero/non-zero term")
+            row_axes[0].set_ylabel("Tjur R2")
+            row_axes[0].grid(alpha=0.3)
+            _style_axis_text(row_axes[0])
+
+            row_axes[1].plot(
+                freq_curve_df["alpha_frequency"],
+                freq_curve_df["freq_log10_r2"],
+                marker="o",
+                linewidth=1.5,
+                color="#1f6f8b",
+                label="PLM sweep, OLS on log10(non-zero freq)",
+            )
+            row_axes[1].plot(
+                freq_curve_df["alpha_frequency"],
+                freq_curve_df["freq_raw_r2"],
+                marker="o",
+                linewidth=1.2,
+                linestyle="--",
+                color="#2a9d8f",
+                label="PLM sweep, OLS on raw non-zero freq",
+            )
+            if np.isfinite(float(baseline_row.get("freq_log10_r2", np.nan))):
+                row_axes[1].scatter([float(baseline_row["alpha_frequency"])], [float(baseline_row["freq_log10_r2"])], marker="s", s=110, color="#b58900", edgecolors="black", linewidths=1.0, zorder=5, label="Mutation-only, OLS on log10(non-zero freq)")
+            if np.isfinite(float(baseline_row.get("freq_raw_r2", np.nan))):
+                row_axes[1].scatter([float(baseline_row["alpha_frequency"])], [float(baseline_row["freq_raw_r2"])], marker="D", s=90, color="#e9c46a", edgecolors="black", linewidths=1.0, zorder=5, label="Mutation-only, OLS on raw non-zero freq")
+            row_axes[1].axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.6)
+            row_axes[1].set_title(f"{model_display_label}\nPositive-frequency term")
+            row_axes[1].set_xlabel("PLM alpha for non-zero frequency term")
+            row_axes[1].set_ylabel("R2 on non-zero observed frequency\nsolid = log10 scale, dashed = raw scale")
+            row_axes[1].grid(alpha=0.3)
+            _style_axis_text(row_axes[1])
+
+            heatmap_df = hurdle_alpha_df.pivot(index="alpha_frequency", columns="alpha_presence", values="hurdle_mean_r2").sort_index().sort_index(axis=1)
+            sns.heatmap(heatmap_df, ax=row_axes[2], cmap="viridis", cbar=(row_idx == 0), cbar_kws={"label": "Mean hurdle R2"})
+            best_alpha_presence = float(best_row["alpha_presence"])
+            best_alpha_frequency = float(best_row["alpha_frequency"])
+            if best_alpha_presence in heatmap_df.columns and best_alpha_frequency in heatmap_df.index:
+                row_axes[2].scatter([heatmap_df.columns.get_loc(best_alpha_presence) + 0.5], [heatmap_df.index.get_loc(best_alpha_frequency) + 0.5], marker="*", s=180, color="black", edgecolors="white", linewidths=0.8, zorder=7)
+            row_axes[2].set_title(
+                f"{model_display_label}\n"
+                f"Combined hurdle alpha sweep\n"
+                f"Two-input hurdle mean R2(log10)={float(two_input_row['hurdle_mean_r2']):.3f}; raw={float(two_input_row['hurdle_mean_r2_raw_frequency']):.3f}"
+            )
+            row_axes[2].set_xlabel("PLM alpha for zero/non-zero term")
+            row_axes[2].set_ylabel("PLM alpha for non-zero frequency term")
+            row_axes[2].set_xticklabels([f"{float(value):.2f}" for value in heatmap_df.columns], rotation=0, fontsize=tick_fontsize)
+            row_axes[2].set_yticklabels([f"{float(value):.2f}" for value in heatmap_df.index], rotation=0, fontsize=tick_fontsize)
+            row_axes[2].xaxis.label.set_size(label_fontsize)
+            row_axes[2].yaxis.label.set_size(label_fontsize)
+            row_axes[2].title.set_fontsize(title_fontsize)
+            row_axes[2].text(0.02, -0.24, "Star = best alpha pair; mutation-only baseline is shown only in the line panels", transform=row_axes[2].transAxes, fontsize=9, va="top")
+
+        if all_hurdle_frames:
+            pd.concat(all_hurdle_frames, ignore_index=True).to_csv(target_metrics_dir / "hurdle_alpha_sweep_metrics.csv", index=False)
+        if all_summary_frames:
+            pd.concat(all_summary_frames, ignore_index=True).to_csv(target_metrics_dir / "hurdle_model_summary.csv", index=False)
+
+        if diagnostic_specs:
+            diag_fig, diag_axes = plt.subplots(len(diagnostic_specs), 2, figsize=(14, 4.8 * len(diagnostic_specs)), squeeze=False)
+            for row_idx, spec in enumerate(diagnostic_specs):
+                row_axes = diag_axes[row_idx, :]
+                base_df = spec["base_df"]
+                summary_row = spec["summary_row"]
+                presence_alpha = float(summary_row.get("alpha_presence", 0.0)) if np.isfinite(float(summary_row.get("alpha_presence", 0.0))) else 0.0
+                frequency_alpha = float(summary_row.get("alpha_frequency", 0.0)) if np.isfinite(float(summary_row.get("alpha_frequency", 0.0))) else 0.0
+                presence_score = base_df["log_plm_prob"] + (presence_alpha * base_df["log_mut_prob"])
+                frequency_score = base_df["log_plm_prob"] + (frequency_alpha * base_df["log_mut_prob"])
+
+                logistic_intercept = float(summary_row.get("logistic_intercept", np.nan))
+                logistic_coef = float(summary_row.get("logistic_coef_combined_score", np.nan))
+                row_axes[0].scatter(presence_score, base_df["obs_present"], s=10, alpha=0.10, color="#1f6f8b", label="Observed 0/1 mutation rows")
+                if np.isfinite(logistic_intercept) and np.isfinite(logistic_coef):
+                    sorted_idx = np.argsort(np.asarray(presence_score, dtype=float))
+                    fitted_probs = expit(logistic_intercept + (logistic_coef * np.asarray(presence_score, dtype=float)))
+                    row_axes[0].plot(np.asarray(presence_score, dtype=float)[sorted_idx], fitted_probs[sorted_idx], color="#d1495b", linewidth=2.0, label="Fitted logistic curve")
+                try:
+                    bin_df = pd.DataFrame({"score": presence_score, "obs_present": base_df["obs_present"]})
+                    quantiles = min(12, max(4, int(bin_df["score"].nunique())))
+                    bin_df["score_bin"] = pd.qcut(bin_df["score"], q=quantiles, duplicates="drop")
+                    observed_bins = bin_df.groupby("score_bin", observed=False).agg(score=("score", "mean"), obs_present=("obs_present", "mean")).dropna()
+                    if not observed_bins.empty:
+                        row_axes[0].scatter(observed_bins["score"], observed_bins["obs_present"], s=32, color="#b58900", edgecolors="black", linewidths=0.5, zorder=5, label="Observed bin mean")
+                except ValueError:
+                    pass
+                row_axes[0].set_title(f"{spec['model_display_label']}\n{spec['variant_label']}: binary hurdle regression")
+                row_axes[0].set_xlabel("Combined hurdle score")
+                row_axes[0].set_ylabel("Observed mutation present")
+                row_axes[0].grid(alpha=0.3)
+                _style_axis_text(row_axes[0])
+
+                positive_mask = base_df["obs_freq"] > 0
+                log10_obs_freq = np.log10(np.clip(base_df.loc[positive_mask, "obs_freq"], 1e-32, None))
+                row_axes[1].scatter(frequency_score.loc[positive_mask], log10_obs_freq, s=12, alpha=0.14, color="#2a9d8f", label="Observed non-zero frequencies")
+                freq_intercept = float(summary_row.get("freq_intercept", np.nan))
+                freq_coef = float(summary_row.get("freq_coef_combined_score", np.nan))
+                if positive_mask.any() and np.isfinite(freq_intercept) and np.isfinite(freq_coef):
+                    x_vals = np.asarray(frequency_score.loc[positive_mask], dtype=float)
+                    sorted_idx = np.argsort(x_vals)
+                    fitted_log_freq = freq_intercept + (freq_coef * x_vals)
+                    row_axes[1].plot(x_vals[sorted_idx], fitted_log_freq[sorted_idx], color="#d1495b", linewidth=2.0, label="Fitted OLS line")
+                try:
+                    freq_bin_df = pd.DataFrame({"score": frequency_score.loc[positive_mask], "log10_obs_freq": log10_obs_freq})
+                    quantiles = min(12, max(4, int(freq_bin_df["score"].nunique())))
+                    freq_bin_df["score_bin"] = pd.qcut(freq_bin_df["score"], q=quantiles, duplicates="drop")
+                    observed_bins = freq_bin_df.groupby("score_bin", observed=False).agg(score=("score", "mean"), log10_obs_freq=("log10_obs_freq", "mean")).dropna()
+                    if not observed_bins.empty:
+                        row_axes[1].scatter(observed_bins["score"], observed_bins["log10_obs_freq"], s=32, color="#b58900", edgecolors="black", linewidths=0.5, zorder=5, label="Observed bin mean")
+                except ValueError:
+                    pass
+                row_axes[1].set_title(f"{spec['model_display_label']}\n{spec['variant_label']}: positive-frequency regression")
+                row_axes[1].set_xlabel("Combined hurdle score")
+                row_axes[1].set_ylabel("log10(non-zero observed frequency)")
+                row_axes[1].grid(alpha=0.3)
+                _style_axis_text(row_axes[1])
+
+            diag_handles, diag_labels = _collect_axes_legend_entries(diag_axes.reshape(-1))
+            if diag_handles:
+                diag_fig.legend(diag_handles, diag_labels, loc="upper center", bbox_to_anchor=(0.5, 0.995), ncol=max(1, min(3, len(diag_handles))), frameon=False, fontsize=legend_fontsize)
+            diag_fig.suptitle(f"{title_prefix}\nRegression diagnostics")
+            diag_fig._suptitle.set_fontsize(title_fontsize + 1)
+            plt.tight_layout(rect=(0, 0, 1, 0.96))
+            plt.savefig(target_plot_dir / "hurdle_regression_diagnostics.png", dpi=300)
+            plt.close(diag_fig)
+
+        handles, labels = _collect_axes_legend_entries(axes[:, :2].reshape(-1))
+        if handles:
+            fig.legend(handles, labels, title="Hurdle legend", loc="upper center", bbox_to_anchor=(0.5, 0.995), ncol=max(1, min(3, len(handles))), frameon=False, fontsize=legend_fontsize, title_fontsize=legend_fontsize)
+        fig.suptitle(title_prefix)
+        fig._suptitle.set_fontsize(title_fontsize + 1)
+        plt.tight_layout(rect=(0, 0, 1, 0.965))
+        plt.savefig(target_plot_dir / "hurdle_alpha_sweep.png", dpi=300)
         plt.close(fig)
 
     def _write_epoch_metric_plot(
@@ -2273,14 +3236,23 @@ def export_plots(
         )
 
         per_model_dir = ensure_dir(output_dir / "per_model")
+        per_model_metrics_dir = ensure_dir(metrics_output_dir / "per_model")
         for model_label, model_combined_df in combined_df.groupby("model", sort=True):
             model_plot_dir = ensure_dir(per_model_dir / _safe_output_label(model_label))
+            model_metrics_dir = ensure_dir(per_model_metrics_dir / _safe_output_label(model_label))
             model_alpha_df = alpha_df.loc[alpha_df["model"] == model_label].copy() if "model" in alpha_df.columns else alpha_df.copy()
             _write_selected_alpha_sweep_plot(
                 model_plot_dir,
                 model_combined_df,
                 model_alpha_df,
                 title_prefix=f"Focused alpha-sweep metrics ({model_label})",
+            )
+            _write_hurdle_alpha_outputs(
+                model_plot_dir,
+                model_metrics_dir,
+                model_combined_df,
+                model_alpha_df,
+                title_prefix=f"Hurdle-model alpha sweep ({model_label})",
             )
 
         if all(col in alpha_df.columns for col in ["model", "epoch_label", "epoch_value"]):
@@ -2318,6 +3290,13 @@ def export_plots(
             combined_df,
             alpha_df,
             title_prefix="Focused alpha-sweep metrics (all models)",
+        )
+        _write_hurdle_alpha_outputs(
+            output_dir,
+            metrics_output_dir,
+            combined_df,
+            alpha_df,
+            title_prefix="Hurdle-model alpha sweep (all models)",
         )
 
     if not combined_df.empty and scatter_alphas:
@@ -2628,9 +3607,20 @@ def run_analysis(args: argparse.Namespace) -> int:
                 alpha_sweep_min_grid=args.alpha_sweep_min_grid,
                 pseudocount=1e-16,
             )
+            alpha_df["alpha_label"] = alpha_df["alpha"].map(lambda value: f"{float(value):.6g}")
+            alpha_df["model_variant"] = "plm_alpha_sweep"
+            alpha_df["is_mutation_only_baseline"] = False
+            alpha_df["input_score_formula"] = "plm_prob * mut_prob^alpha"
             alpha_df["model"] = model_label
             alpha_df["epoch_label"] = model_spec["epoch_label"]
             alpha_df["epoch_value"] = float(model_spec["epoch_value"])
+            mutation_only_row = compute_mutation_only_alpha_baseline_row(model_combined_df, pseudocount=1e-16)
+            if mutation_only_row is not None:
+                mutation_only_df = pd.DataFrame([mutation_only_row])
+                mutation_only_df["model"] = model_label
+                mutation_only_df["epoch_label"] = model_spec["epoch_label"]
+                mutation_only_df["epoch_value"] = float(model_spec["epoch_value"])
+                alpha_df = pd.concat([alpha_df, mutation_only_df], ignore_index=True, sort=False)
             alpha_df.to_csv(model_tables_dir / f"{model_label}_alpha_sweep_fit_metrics.tsv", sep="\t", index=False)
             all_alpha_frames.append(alpha_df)
 
@@ -2758,6 +3748,7 @@ def run_analysis(args: argparse.Namespace) -> int:
         lineage_cache=lineage_cache,
         dynamic_pseudocount=dynamic_pseudocount,
         mutation_baseline_x=args.mutation_baseline_x,
+        metrics_output_dir=tables_dir,
     )
     return 0
 
