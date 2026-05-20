@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -30,7 +31,8 @@ if str(REPO_ROOT) not in sys.path:
 
 
 IGNORE_ALIGNMENT_CHARS = {"-", "*", "."}
-PANEL_CACHE_VERSION = 2
+STANDARD_AMINO_ACIDS = tuple("ACDEFGHIKLMNPQRSTVWY")
+PANEL_CACHE_VERSION = 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -316,9 +318,18 @@ def parse_scatter_alphas(text: str) -> List[float]:
 
 def normalise_plm_matrix(raw_df: pd.DataFrame) -> pd.DataFrame:
     first_row = raw_df.iloc[0, :]
+    numeric_df: pd.DataFrame
     if raw_df.shape[0] > 1 and first_row.apply(lambda value: isinstance(value, str)).any():
-        return raw_df.iloc[1:, :].apply(pd.to_numeric, errors="coerce")
-    return raw_df.apply(pd.to_numeric, errors="coerce")
+        numeric_df = raw_df.iloc[1:, :].apply(pd.to_numeric, errors="coerce")
+    else:
+        numeric_df = raw_df.apply(pd.to_numeric, errors="coerce")
+
+    normalised_index = pd.Index([str(value).strip().upper() for value in numeric_df.index])
+    numeric_df = numeric_df.copy()
+    numeric_df.index = normalised_index
+    numeric_df = numeric_df.loc[~numeric_df.index.duplicated(keep="first")]
+    canonical_rows = [aa for aa in STANDARD_AMINO_ACIDS if aa in numeric_df.index]
+    return numeric_df.loc[canonical_rows].copy()
 
 
 def infer_plm_source_sequence(raw_df: pd.DataFrame) -> Optional[str]:
@@ -595,7 +606,8 @@ def _load_cached_model_outputs(model_tables_dir: Path, model_spec: Dict[str, obj
     model_label = str(model_spec["model_tag"])
     combined_path = model_tables_dir / f"{model_label}_combined_long_table.csv"
     alpha_path = model_tables_dir / f"{model_label}_alpha_sweep_fit_metrics.tsv"
-    if not (combined_path.exists() and alpha_path.exists()):
+    alpha_by_lineage_path = model_tables_dir / f"{model_label}_alpha_sweep_fit_metrics_BY_LINEAGE.tsv"
+    if not (combined_path.exists() and alpha_path.exists() and alpha_by_lineage_path.exists()):
         return None
 
     combined_df = pd.read_csv(combined_path)
@@ -1035,6 +1047,35 @@ def build_combined_rows(
                 }
             )
     return combined_rows
+
+
+def warn_on_excess_mutation_rows(
+    combined_df: pd.DataFrame,
+    *,
+    context_label: str,
+    max_rows_per_site: int = 20,
+) -> None:
+    required_cols = {"lineage", "position", "ref_aa"}
+    if combined_df.empty or not required_cols.issubset(combined_df.columns):
+        return
+
+    grouped = combined_df.groupby("lineage", sort=False) if "lineage" in combined_df.columns else [("all", combined_df)]
+    for lineage_name, lineage_df in grouped:
+        site_count = int(lineage_df.loc[:, ["position", "ref_aa"]].drop_duplicates().shape[0])
+        if site_count <= 0:
+            continue
+        row_count = int(len(lineage_df))
+        max_expected_rows = int(max_rows_per_site * site_count)
+        if row_count > max_expected_rows:
+            aa_count = int(lineage_df["aa"].nunique()) if "aa" in lineage_df.columns else np.nan
+            warnings.warn(
+                f"{context_label}: lineage {lineage_name} has {row_count} mutation rows across {site_count} sites "
+                f"({row_count / site_count:.2f} rows/site), exceeding the hard limit of {max_rows_per_site}x sites "
+                f"({max_expected_rows} rows). Check PLM alphabet / duplicate candidate rows before interpreting statistics. "
+                f"Unique non-reference amino-acid labels observed: {aa_count}.",
+                UserWarning,
+                stacklevel=2,
+            )
 
 
 def export_codon_model_diagnostics(output_dir: Path, mutation_tables: Dict[str, object]) -> None:
@@ -1602,6 +1643,29 @@ def compute_site_logistic_metrics(
     }
 
 
+def compute_mutation_row_logistic_metrics(
+    log_score_values: pd.Series,
+    binary_outcome: pd.Series,
+    *,
+    feature_name: str,
+) -> Dict[str, float]:
+    feature_result = fit_logistic_feature_model(
+        pd.DataFrame({feature_name: np.asarray(log_score_values, dtype=float)}),
+        pd.Series(binary_outcome, copy=False),
+        enforce_positive_coefficients=True,
+    )
+    coef_key = f"logistic_coef_{feature_name}"
+    return {
+        "site_logistic_mutated_corr": float(feature_result.get("logistic_fitted_prob_corr", np.nan)),
+        "site_logistic_mutated_intercept": float(feature_result.get("logistic_intercept", np.nan)),
+        "site_logistic_mutated_slope": float(feature_result.get(coef_key, np.nan)),
+        "site_logistic_tjur_r2": float(feature_result.get("logistic_tjur_r2", np.nan)),
+        "site_logistic_mcfadden_r2": float(feature_result.get("logistic_mcfadden_r2", np.nan)),
+        "site_logistic_brier_score": float(feature_result.get("logistic_brier_score", np.nan)),
+        "site_logistic_auroc": float(feature_result.get("logistic_auroc", np.nan)),
+    }
+
+
 def mean_finite(values: List[float]) -> float:
     finite_values = [float(value) for value in values if np.isfinite(value)]
     if not finite_values:
@@ -1638,18 +1702,10 @@ def compute_mutation_only_alpha_baseline_row(combined_df: pd.DataFrame, pseudoco
     if baseline_metrics.empty:
         return None
 
-    site_df = (
-        baseline_df.loc[:, ["lineage", "position", "ref_aa", "mut_prob", "obs_present"]]
-        .groupby(["lineage", "position", "ref_aa"], as_index=False)
-        .agg(
-            site_score=("mut_prob", "max"),
-            site_mutated=("obs_present", "max"),
-        )
-    )
-    logistic_metrics = compute_site_logistic_metrics(
-        site_df["site_score"],
-        site_df["site_mutated"],
-        context_label="mutation-only alpha baseline",
+    logistic_metrics = compute_mutation_row_logistic_metrics(
+        np.log10(np.clip(baseline_df["mut_prob"], 1e-32, None)),
+        baseline_df["obs_present"],
+        feature_name="log_mut_prob",
     )
 
     row = baseline_metrics.iloc[0].to_dict()
@@ -1666,7 +1722,127 @@ def compute_mutation_only_alpha_baseline_row(combined_df: pd.DataFrame, pseudoco
     return row
 
 
-def fit_logistic_feature_model(feature_frame: pd.DataFrame, binary_outcome: pd.Series) -> Dict[str, object]:
+def summarize_lineage_metric_table(lineage_metric_df: pd.DataFrame, group_cols: List[str]) -> pd.DataFrame:
+    if lineage_metric_df.empty:
+        return pd.DataFrame()
+
+    existing_group_cols = [col for col in group_cols if col in lineage_metric_df.columns]
+    excluded_cols = set(existing_group_cols) | {"lineage"}
+    numeric_cols = [
+        col for col in lineage_metric_df.columns
+        if col not in excluded_cols and pd.api.types.is_numeric_dtype(lineage_metric_df[col])
+    ]
+
+    if existing_group_cols:
+        summary_df = lineage_metric_df.groupby(existing_group_cols, as_index=False, dropna=False)[numeric_cols].mean()
+        if "lineage" in lineage_metric_df.columns:
+            count_df = lineage_metric_df.groupby(existing_group_cols, as_index=False, dropna=False).agg(
+                n_lineages_averaged=("lineage", "nunique")
+            )
+            summary_df = summary_df.merge(count_df, on=existing_group_cols, how="left")
+        sort_cols = [col for col in ["model", "epoch_value", "epoch_label", "alpha"] if col in summary_df.columns]
+        if sort_cols:
+            summary_df = summary_df.sort_values(sort_cols, na_position="last").reset_index(drop=True)
+        return summary_df
+
+    summary_row = {
+        col: float(pd.to_numeric(lineage_metric_df[col], errors="coerce").mean())
+        for col in numeric_cols
+    }
+    if "lineage" in lineage_metric_df.columns:
+        summary_row["n_lineages_averaged"] = int(lineage_metric_df["lineage"].nunique())
+    return pd.DataFrame([summary_row])
+
+
+def evaluate_alpha_sweep_by_lineage(
+    combined_df: pd.DataFrame,
+    alpha_grid: np.ndarray,
+    *,
+    parallel: bool = False,
+    max_workers: Optional[int] = None,
+    alpha_sweep_min_grid: int = 10,
+    pseudocount: float = 1e-16,
+) -> pd.DataFrame:
+    from Functions_HuggingFace import evaluate_alpha_sweep
+
+    if combined_df.empty or "lineage" not in combined_df.columns:
+        return pd.DataFrame()
+
+    lineage_frames: List[pd.DataFrame] = []
+    for lineage_name, lineage_df in combined_df.groupby("lineage", sort=False):
+        lineage_alpha_df = evaluate_alpha_sweep(
+            lineage_df,
+            alpha_grid,
+            parallel=parallel,
+            max_workers=max_workers,
+            alpha_sweep_min_grid=alpha_sweep_min_grid,
+            pseudocount=pseudocount,
+        )
+        if not lineage_alpha_df.empty:
+            lineage_alpha_df = lineage_alpha_df.copy()
+            lineage_alpha_df["lineage"] = lineage_name
+            lineage_alpha_df["alpha_label"] = lineage_alpha_df["alpha"].map(lambda value: f"{float(value):.6g}")
+            lineage_alpha_df["model_variant"] = "plm_alpha_sweep"
+            lineage_alpha_df["is_mutation_only_baseline"] = False
+            lineage_alpha_df["input_score_formula"] = "plm_prob * mut_prob^alpha"
+            lineage_frames.append(lineage_alpha_df)
+
+        baseline_row = compute_mutation_only_alpha_baseline_row(lineage_df, pseudocount=pseudocount)
+        if baseline_row is not None:
+            baseline_df = pd.DataFrame([baseline_row])
+            baseline_df["lineage"] = lineage_name
+            lineage_frames.append(baseline_df)
+
+    if not lineage_frames:
+        return pd.DataFrame()
+    return pd.concat(lineage_frames, ignore_index=True, sort=False)
+
+
+def evaluate_logistic_alpha_sweep_by_lineage(
+    combined_df: pd.DataFrame,
+    alpha_grid: np.ndarray,
+) -> pd.DataFrame:
+    required_cols = {"lineage", "plm_prob", "mut_prob", "obs_present"}
+    if combined_df.empty or not required_cols.issubset(combined_df.columns):
+        return pd.DataFrame()
+
+    logistic_rows: List[Dict[str, object]] = []
+    alpha_values = sorted(np.asarray(alpha_grid, dtype=float).tolist())
+    for lineage_name, lineage_df in combined_df.groupby("lineage", sort=False):
+        score_base_df = lineage_df.loc[:, ["plm_prob", "mut_prob", "obs_present"]].copy()
+        score_base_df["plm_prob"] = score_base_df["plm_prob"].clip(lower=1e-32)
+        score_base_df["mut_prob"] = score_base_df["mut_prob"].clip(lower=1e-32)
+        for alpha_value in alpha_values:
+            combined_score = np.log10(score_base_df["plm_prob"]) + (float(alpha_value) * np.log10(score_base_df["mut_prob"]))
+            try:
+                logistic_row = compute_mutation_row_logistic_metrics(
+                    combined_score,
+                    score_base_df["obs_present"],
+                    feature_name="combined_score",
+                )
+            except Exception:
+                logistic_row = {
+                    "site_logistic_mutated_corr": np.nan,
+                    "site_logistic_mutated_intercept": np.nan,
+                    "site_logistic_mutated_slope": np.nan,
+                    "site_logistic_tjur_r2": np.nan,
+                    "site_logistic_mcfadden_r2": np.nan,
+                    "site_logistic_brier_score": np.nan,
+                    "site_logistic_auroc": np.nan,
+                }
+            logistic_row["lineage"] = lineage_name
+            logistic_row["alpha"] = float(alpha_value)
+            logistic_rows.append(logistic_row)
+
+    return pd.DataFrame(logistic_rows)
+
+
+def fit_logistic_feature_model(
+    feature_frame: pd.DataFrame,
+    binary_outcome: pd.Series,
+    *,
+    enforce_positive_coefficients: bool = False,
+) -> Dict[str, object]:
     from scipy.optimize import minimize
     from scipy.special import expit
 
@@ -1684,6 +1860,7 @@ def fit_logistic_feature_model(feature_frame: pd.DataFrame, binary_outcome: pd.S
         "logistic_null_log_likelihood": np.nan,
         "logistic_active_predictors": "",
         "logistic_response_definition": "binary_mutation_observed",
+        "logistic_constraint": "non_negative_coefficients" if enforce_positive_coefficients else "unconstrained",
     }
     for feature_name in feature_names:
         result[f"logistic_coef_{feature_name}"] = np.nan
@@ -1732,21 +1909,31 @@ def fit_logistic_feature_model(feature_frame: pd.DataFrame, binary_outcome: pd.S
         probs = np.clip(expit(logits), 1e-9, 1.0 - 1e-9)
         return float(-np.sum(y * np.log(probs) + (1.0 - y) * np.log(1.0 - probs)))
 
-    bounds = [(-20.0, 20.0)] * (x_scaled.shape[1] + 1)
+    if enforce_positive_coefficients:
+        bounds = [(-20.0, 20.0)] + [(0.0, 20.0)] * x_scaled.shape[1]
+        slope_seed = np.abs(slope_seed)
+    else:
+        bounds = [(-20.0, 20.0)] * (x_scaled.shape[1] + 1)
     initial_guesses = [
         np.concatenate(([0.0], np.zeros(x_scaled.shape[1], dtype=float))),
         np.concatenate(([intercept_seed], np.zeros(x_scaled.shape[1], dtype=float))),
         np.concatenate(([intercept_seed], slope_seed)),
-        np.concatenate(([intercept_seed], -slope_seed)),
         np.concatenate(([0.0], slope_seed)),
-        np.concatenate(([0.0], -slope_seed)),
     ]
+    if not enforce_positive_coefficients:
+        initial_guesses.extend([
+            np.concatenate(([intercept_seed], -slope_seed)),
+            np.concatenate(([0.0], -slope_seed)),
+        ])
     methods = [
         ("L-BFGS-B", {"bounds": bounds}),
         ("Powell", {"bounds": bounds}),
-        ("Nelder-Mead", {}),
-        ("BFGS", {}),
     ]
+    if not enforce_positive_coefficients:
+        methods.extend([
+            ("Nelder-Mead", {}),
+            ("BFGS", {}),
+        ])
     best_fit = None
     best_nll = np.inf
     for x0 in initial_guesses:
@@ -1939,7 +2126,11 @@ def evaluate_hurdle_alpha_sweep(plot_frame: pd.DataFrame, alpha_values: List[flo
     sorted_alphas = sorted({float(alpha) for alpha in alpha_values})
     for alpha_presence in sorted_alphas:
         binary_score = base_df["log_plm_prob"] + (alpha_presence * base_df["log_mut_prob"])
-        logistic_metrics = fit_logistic_feature_model(pd.DataFrame({"combined_score": binary_score}), base_df["obs_present"])
+        logistic_metrics = fit_logistic_feature_model(
+            pd.DataFrame({"combined_score": binary_score}),
+            base_df["obs_present"],
+            enforce_positive_coefficients=True,
+        )
         for alpha_frequency in sorted_alphas:
             positive_score = base_df["log_plm_prob"] + (alpha_frequency * base_df["log_mut_prob"])
             freq_metrics = fit_linear_frequency_model(pd.DataFrame({"combined_score": positive_score}), base_df["obs_freq"])
@@ -1972,7 +2163,11 @@ def summarize_hurdle_models(plot_frame: pd.DataFrame, hurdle_alpha_df: pd.DataFr
     rows: List[Dict[str, object]] = []
     baseline_presence_alpha = compute_baseline_alpha_position(hurdle_alpha_df["alpha_presence"]) if not hurdle_alpha_df.empty else 1.1
     baseline_frequency_alpha = compute_baseline_alpha_position(hurdle_alpha_df["alpha_frequency"]) if not hurdle_alpha_df.empty else 1.1
-    mutation_only_logistic = fit_logistic_feature_model(base_df.loc[:, ["log_mut_prob"]], base_df["obs_present"])
+    mutation_only_logistic = fit_logistic_feature_model(
+        base_df.loc[:, ["log_mut_prob"]],
+        base_df["obs_present"],
+        enforce_positive_coefficients=True,
+    )
     mutation_only_freq = fit_linear_frequency_model(base_df.loc[:, ["log_mut_prob"]], base_df["obs_freq"])
     mutation_only_row: Dict[str, object] = {
         "model_variant": "mutation_only",
@@ -1999,7 +2194,11 @@ def summarize_hurdle_models(plot_frame: pd.DataFrame, hurdle_alpha_df: pd.DataFr
     if not plm_only_rows.empty:
         plm_only_row = plm_only_rows.iloc[0].to_dict()
     else:
-        plm_only_logistic = fit_logistic_feature_model(base_df.loc[:, ["log_plm_prob"]], base_df["obs_present"])
+        plm_only_logistic = fit_logistic_feature_model(
+            base_df.loc[:, ["log_plm_prob"]],
+            base_df["obs_present"],
+            enforce_positive_coefficients=True,
+        )
         plm_only_freq = fit_linear_frequency_model(base_df.loc[:, ["log_plm_prob"]], base_df["obs_freq"])
         plm_only_row = {
             "alpha_presence": 0.0,
@@ -2027,7 +2226,11 @@ def summarize_hurdle_models(plot_frame: pd.DataFrame, hurdle_alpha_df: pd.DataFr
         best_row["model_variant"] = "best_alpha_hurdle"
         rows.append(best_row)
     two_input_features = base_df.loc[:, ["log_mut_prob", "log_plm_prob"]]
-    two_input_logistic = fit_logistic_feature_model(two_input_features, base_df["obs_present"])
+    two_input_logistic = fit_logistic_feature_model(
+        two_input_features,
+        base_df["obs_present"],
+        enforce_positive_coefficients=True,
+    )
     two_input_freq = fit_linear_frequency_model(two_input_features, base_df["obs_freq"])
     two_input_row = {
         "model_variant": "two_input_hurdle",
@@ -2086,6 +2289,7 @@ def compute_epoch_lineage_metrics(combined_df: pd.DataFrame) -> pd.DataFrame:
                 "lineage": lineage_name,
                 "n_mutation_rows": int(len(lineage_df)),
                 "n_site_rows": int(len(site_df)),
+                "n_nonzero_mutation_rows": int((pd.to_numeric(lineage_df["obs_freq"], errors="coerce") > 0).sum()),
                 "logistic_site_mutated_vs_plm_corr": logit_plm_corr,
                 "logistic_site_mutated_vs_plm_intercept": logit_plm_intercept,
                 "logistic_site_mutated_vs_plm_slope": logit_plm_slope,
@@ -2142,12 +2346,20 @@ def summarize_epoch_metrics(epoch_lineage_metrics_df: pd.DataFrame) -> pd.DataFr
         "pearson_plm_vs_mut",
         "pearson_mut_vs_mut_baseline",
     ]
-    summary = (
+    metric_summary = (
         epoch_lineage_metrics_df.groupby(["model", "epoch_label", "epoch_value"], as_index=False)[metric_cols]
         .mean()
-        .sort_values(["epoch_value", "epoch_label"])
     )
-    return summary
+    count_summary = (
+        epoch_lineage_metrics_df.groupby(["model", "epoch_label", "epoch_value"], as_index=False)
+        .agg(
+            n_lineages=("lineage", "nunique"),
+            mean_n_mutation_rows=("n_mutation_rows", "mean"),
+            mean_n_site_rows=("n_site_rows", "mean"),
+            mean_n_nonzero_mutation_rows=("n_nonzero_mutation_rows", "mean"),
+        )
+    )
+    return metric_summary.merge(count_summary, on=["model", "epoch_label", "epoch_value"], how="left").sort_values(["epoch_value", "epoch_label"])
 
 
 def export_plots(
@@ -2230,6 +2442,124 @@ def export_plots(
             return model_text
         return str(epoch_label)
 
+    def _format_count(value: object, decimals: int = 0) -> str:
+        if value is None or not np.isfinite(float(value)):
+            return "NA"
+        numeric_value = float(value)
+        if decimals <= 0:
+            return f"{int(round(numeric_value)):,}"
+        return f"{numeric_value:,.{decimals}f}"
+
+    def _append_sample_note(title: str, note: str) -> str:
+        return title if not note else f"{title}\n{note}"
+
+    def _valid_numeric_mask(frame: pd.DataFrame, required_cols: List[str]) -> pd.Series:
+        if frame.empty:
+            return pd.Series(False, index=frame.index, dtype=bool)
+        mask = pd.Series(True, index=frame.index, dtype=bool)
+        for col in required_cols:
+            if col not in frame.columns:
+                return pd.Series(False, index=frame.index, dtype=bool)
+            mask &= pd.to_numeric(frame[col], errors="coerce").notna()
+        return mask
+
+    def _unique_row_count(frame: pd.DataFrame, unit_cols: List[str], valid_mask: pd.Series) -> Optional[int]:
+        present_cols = [col for col in unit_cols if col in frame.columns]
+        if not present_cols:
+            return None
+        return int(frame.loc[valid_mask, present_cols].drop_duplicates().shape[0])
+
+    def _lineage_count_note(source_frame: pd.DataFrame, valid_mask: pd.Series, *, unit_label: str) -> str:
+        if source_frame.empty or not valid_mask.any():
+            return ""
+        valid_frame = source_frame.loc[valid_mask].copy()
+        if "lineage" in valid_frame.columns and {"position", "ref_aa"}.issubset(valid_frame.columns):
+            site_counts = (
+                valid_frame.loc[:, ["lineage", "position", "ref_aa"]]
+                .drop_duplicates()
+                .groupby("lineage", sort=False)
+                .size()
+            )
+            if not site_counts.empty:
+                n_lineages = _format_count(site_counts.shape[0])
+                max_sites = _format_count(site_counts.max())
+                if unit_label == "sites":
+                    return f"{n_lineages} lineages, up to {max_sites} sites/lineage"
+                if unit_label == "mutation_matrix":
+                    return f"{n_lineages} lineages, up to {max_sites} sites/lineage (19xN matrix)"
+                if unit_label == "nonzero_mutation_matrix":
+                    return f"{n_lineages} lineages, non-zero mutations from up to {max_sites} sites/lineage"
+        if "lineage" in valid_frame.columns:
+            unit_counts = valid_frame.groupby("lineage", sort=False).size()
+            if not unit_counts.empty:
+                return f"{_format_count(unit_counts.shape[0])} lineages"
+        fallback_cols = ["position", "ref_aa"] if unit_label == "sites" else ["aa", "position", "ref_aa"]
+        unit_count = _unique_row_count(valid_frame, fallback_cols, pd.Series(True, index=valid_frame.index, dtype=bool))
+        if unit_count is not None:
+            fallback_label = "sites" if unit_label == "sites" else "mutation rows"
+            return f"{_format_count(unit_count)} {fallback_label}"
+        return ""
+
+    def _lineage_mean_count_note(source_frame: pd.DataFrame, valid_mask: pd.Series, *, count_label: str) -> str:
+        if source_frame.empty or not valid_mask.any() or "lineage" not in source_frame.columns:
+            return ""
+        valid_frame = source_frame.loc[valid_mask].copy()
+        count_series = valid_frame.groupby("lineage", sort=False).size()
+        if count_series.empty:
+            return ""
+        return f"{_format_count(count_series.shape[0])} lineages, mean {_format_count(count_series.mean(), 0)} {count_label}/lineage"
+
+    def _sample_note_for_metric(metric_col: str, source_frame: pd.DataFrame, *, note_style: str = "matrix") -> str:
+        if source_frame.empty:
+            return ""
+
+        if metric_col in {"site_top10pct_mutated_enrichment", "site_top10pct_mutated_precision", "site_rank_spearman_r", "mut_flat_mean_site_nll"}:
+            valid_mask = _valid_numeric_mask(source_frame, ["plm_prob", "mut_prob", "obs_freq", "obs_present"])
+            return _lineage_count_note(source_frame, valid_mask, unit_label="sites")
+
+        if metric_col in {"mut_flat_global_spearman_r", "mut_flat_global_pearson_r", "mut_flat_logfreq_global_pearson_r"}:
+            valid_mask = _valid_numeric_mask(source_frame, ["plm_prob", "obs_freq"])
+            if note_style == "counts":
+                return _lineage_mean_count_note(source_frame, valid_mask, count_label="candidate mutations")
+            return _lineage_count_note(source_frame, valid_mask, unit_label="mutation_matrix")
+
+        if metric_col in {"mut_flat_nonzero_spearman_r", "mut_flat_nonzero_pearson_r", "mut_flat_logfreq_nonzero_pearson_r"}:
+            valid_mask = _valid_numeric_mask(source_frame, ["plm_prob", "obs_freq"])
+            valid_mask &= pd.to_numeric(source_frame["obs_freq"], errors="coerce") > 0
+            return _lineage_mean_count_note(source_frame, valid_mask, count_label="observed mutations")
+
+        if metric_col in {
+            "site_logistic_auroc",
+            "site_logistic_tjur_r2",
+            "site_logistic_mcfadden_r2",
+            "site_logistic_brier_score",
+            "site_logistic_mutated_corr",
+        }:
+            valid_mask = _valid_numeric_mask(source_frame, ["plm_prob", "mut_prob", "obs_present"])
+            if note_style == "counts":
+                return _lineage_mean_count_note(source_frame, valid_mask, count_label="candidate mutations")
+            return _lineage_count_note(source_frame, valid_mask, unit_label="mutation_matrix")
+
+        return ""
+
+    def _sample_note_for_epoch_metric(metric_col: str, epoch_summary_df_local: pd.DataFrame) -> str:
+        if epoch_summary_df_local.empty:
+            return ""
+        mean_lineages = pd.to_numeric(epoch_summary_df_local.get("n_lineages"), errors="coerce") if "n_lineages" in epoch_summary_df_local.columns else pd.Series(dtype=float)
+        mean_mut_rows = pd.to_numeric(epoch_summary_df_local.get("mean_n_mutation_rows"), errors="coerce") if "mean_n_mutation_rows" in epoch_summary_df_local.columns else pd.Series(dtype=float)
+        mean_site_rows = pd.to_numeric(epoch_summary_df_local.get("mean_n_site_rows"), errors="coerce") if "mean_n_site_rows" in epoch_summary_df_local.columns else pd.Series(dtype=float)
+        mean_nonzero_rows = pd.to_numeric(epoch_summary_df_local.get("mean_n_nonzero_mutation_rows"), errors="coerce") if "mean_n_nonzero_mutation_rows" in epoch_summary_df_local.columns else pd.Series(dtype=float)
+        lineage_text = f"mean over {_format_count(mean_lineages.mean())} lineages/epoch" if not mean_lineages.empty and np.isfinite(mean_lineages.mean()) else ""
+
+        if metric_col == "logistic_site_mutated_vs_plm_corr":
+            row_text = f"mean n~{_format_count(mean_site_rows.mean(), 1)} lineage-site rows/lineage" if not mean_site_rows.empty and np.isfinite(mean_site_rows.mean()) else ""
+        elif metric_col in {"spearman_obs_freq_mutated_vs_plm", "pearson_obs_freq_mutated_vs_plm"}:
+            row_text = f"mean n~{_format_count(mean_nonzero_rows.mean(), 1)} non-zero mutation rows/lineage" if not mean_nonzero_rows.empty and np.isfinite(mean_nonzero_rows.mean()) else ""
+        else:
+            row_text = f"mean n~{_format_count(mean_mut_rows.mean(), 1)} mutation rows/lineage" if not mean_mut_rows.empty and np.isfinite(mean_mut_rows.mean()) else ""
+
+        return "; ".join([text for text in [lineage_text, row_text] if text])
+
     def _hide_log_minor_ticks(ax) -> None:
         ax.xaxis.set_minor_locator(NullLocator())
         ax.yaxis.set_minor_locator(NullLocator())
@@ -2290,20 +2620,19 @@ def export_plots(
         if plot_frame.empty or not required_cols.issubset(plot_frame.columns):
             return None
 
-        baseline_df = (
-            plot_frame.loc[:, sorted(required_cols)]
-            .drop_duplicates()
-            .copy()
-        )
-        if baseline_df.empty:
+        baseline_rows: List[Dict[str, object]] = []
+        for lineage_name, lineage_df in plot_frame.groupby("lineage", sort=False):
+            baseline_row = compute_mutation_only_alpha_baseline_row(lineage_df, pseudocount=1e-16)
+            if baseline_row is None:
+                continue
+            baseline_row["lineage"] = lineage_name
+            baseline_rows.append(baseline_row)
+        if not baseline_rows:
             return None
 
-        baseline_df["plm_prob"] = 1.0
-        baseline_metrics = evaluate_alpha_sweep(
-            baseline_df,
-            np.array([1.0]),
-            parallel=False,
-            pseudocount=1e-16,
+        baseline_metrics = summarize_lineage_metric_table(
+            pd.DataFrame(baseline_rows),
+            group_cols=["alpha", "alpha_label", "model_variant", "is_mutation_only_baseline", "input_score_formula"],
         )
         if baseline_metrics.empty:
             return None
@@ -2321,7 +2650,7 @@ def export_plots(
         plot_frame: pd.DataFrame,
         alpha_frame: pd.DataFrame,
     ) -> pd.DataFrame:
-        required_cols = {"lineage", "position", "ref_aa", "plm_prob", "mut_prob", "obs_present"}
+        required_cols = {"plm_prob", "mut_prob", "obs_present"}
         if plot_frame.empty or alpha_frame.empty or not required_cols.issubset(plot_frame.columns):
             return pd.DataFrame()
 
@@ -2352,44 +2681,44 @@ def export_plots(
             if group_plot_df.empty or group_alpha_df.empty:
                 continue
 
-            score_base_df = group_plot_df.loc[:, ["lineage", "position", "ref_aa", "plm_prob", "mut_prob", "obs_present"]].copy()
-            score_base_df["plm_prob"] = score_base_df["plm_prob"].clip(lower=1e-32)
-            score_base_df["mut_prob"] = score_base_df["mut_prob"].clip(lower=1e-32)
+            for lineage_name, lineage_df in group_plot_df.groupby("lineage", sort=False):
+                score_base_df = lineage_df.loc[:, ["plm_prob", "mut_prob", "obs_present"]].copy()
+                score_base_df["plm_prob"] = score_base_df["plm_prob"].clip(lower=1e-32)
+                score_base_df["mut_prob"] = score_base_df["mut_prob"].clip(lower=1e-32)
 
-            for alpha_value in sorted(group_alpha_df["alpha"].dropna().astype(float).unique().tolist()):
-                working_df = score_base_df.copy()
-                working_df["combined_prob"] = working_df["plm_prob"] * np.power(working_df["mut_prob"], alpha_value)
-                site_df = (
-                    working_df.groupby(["lineage", "position", "ref_aa"], as_index=False)
-                    .agg(
-                        site_score=("combined_prob", "max"),
-                        site_mutated=("obs_present", "max"),
-                    )
-                )
-                try:
-                    logistic_row = compute_site_logistic_metrics(
-                        site_df["site_score"],
-                        site_df["site_mutated"],
-                        context_label=f"selected alpha site logistic (alpha={float(alpha_value):.6g})",
-                    )
-                except Exception:
-                    logistic_row = {
-                        "site_logistic_mutated_corr": np.nan,
-                        "site_logistic_mutated_intercept": np.nan,
-                        "site_logistic_mutated_slope": np.nan,
-                        "site_logistic_tjur_r2": np.nan,
-                        "site_logistic_mcfadden_r2": np.nan,
-                        "site_logistic_brier_score": np.nan,
-                        "site_logistic_auroc": np.nan,
-                    }
-                logistic_row["alpha"] = float(alpha_value)
-                logistic_row.update(group_key)
-                logistic_rows.append(logistic_row)
+                for alpha_value in sorted(group_alpha_df["alpha"].dropna().astype(float).unique().tolist()):
+                    combined_score = np.log10(score_base_df["plm_prob"]) + (float(alpha_value) * np.log10(score_base_df["mut_prob"]))
+                    try:
+                        logistic_row = compute_mutation_row_logistic_metrics(
+                            combined_score,
+                            score_base_df["obs_present"],
+                            feature_name="combined_score",
+                        )
+                    except Exception:
+                        logistic_row = {
+                            "site_logistic_mutated_corr": np.nan,
+                            "site_logistic_mutated_intercept": np.nan,
+                            "site_logistic_mutated_slope": np.nan,
+                            "site_logistic_tjur_r2": np.nan,
+                            "site_logistic_mcfadden_r2": np.nan,
+                            "site_logistic_brier_score": np.nan,
+                            "site_logistic_auroc": np.nan,
+                        }
+                    logistic_row["alpha"] = float(alpha_value)
+                    logistic_row["lineage"] = lineage_name
+                    logistic_row.update(group_key)
+                    logistic_rows.append(logistic_row)
 
-        return pd.DataFrame(logistic_rows)
+        logistic_lineage_df = pd.DataFrame(logistic_rows)
+        if logistic_lineage_df.empty:
+            return logistic_lineage_df
+        return summarize_lineage_metric_table(
+            logistic_lineage_df,
+            group_cols=[col for col in ["model", "epoch_label", "epoch_value", "alpha"] if col in logistic_lineage_df.columns],
+        )
 
     def _compute_mutation_only_logistic_baseline(plot_frame: pd.DataFrame) -> Dict[str, float]:
-        required_cols = {"lineage", "position", "ref_aa", "mut_prob", "obs_present"}
+        required_cols = {"mut_prob", "obs_present"}
         if plot_frame.empty or not required_cols.issubset(plot_frame.columns):
             return {
                 "site_logistic_mutated_corr": np.nan,
@@ -2401,19 +2730,26 @@ def export_plots(
                 "site_logistic_auroc": np.nan,
             }
 
-        site_df = (
-            plot_frame.loc[:, ["lineage", "position", "ref_aa", "mut_prob", "obs_present"]]
-            .groupby(["lineage", "position", "ref_aa"], as_index=False)
-            .agg(
-                site_score=("mut_prob", "max"),
-                site_mutated=("obs_present", "max"),
+        lineage_rows: List[Dict[str, object]] = []
+        for lineage_name, lineage_df in plot_frame.groupby("lineage", sort=False):
+            lineage_row = compute_mutation_row_logistic_metrics(
+                np.log10(np.clip(lineage_df["mut_prob"], 1e-32, None)),
+                lineage_df["obs_present"],
+                feature_name="log_mut_prob",
             )
-        )
-        return compute_site_logistic_metrics(
-            site_df["site_score"],
-            site_df["site_mutated"],
-            context_label="selected alpha mutation-only logistic baseline",
-        )
+            lineage_row["lineage"] = lineage_name
+            lineage_rows.append(lineage_row)
+        if not lineage_rows:
+            return {
+                "site_logistic_mutated_corr": np.nan,
+                "site_logistic_mutated_intercept": np.nan,
+                "site_logistic_mutated_slope": np.nan,
+                "site_logistic_tjur_r2": np.nan,
+                "site_logistic_mcfadden_r2": np.nan,
+                "site_logistic_brier_score": np.nan,
+                "site_logistic_auroc": np.nan,
+            }
+        return summarize_lineage_metric_table(pd.DataFrame(lineage_rows), group_cols=[]).iloc[0].to_dict()
 
     def _build_selected_alpha_metric_frame(
         plot_frame: pd.DataFrame,
@@ -2459,6 +2795,7 @@ def export_plots(
 
     def _plot_alpha_metric_grid(
         plot_frame: pd.DataFrame,
+        count_source_frame: pd.DataFrame,
         metric_cols: List[str],
         title_map: Dict[str, str],
         output_name: str,
@@ -2500,7 +2837,7 @@ def export_plots(
             else:
                 ax_sorted = plot_frame.loc[np.isfinite(plot_frame["alpha"]) & np.isfinite(plot_frame[metric_col])].sort_values("alpha")
                 if ax_sorted.empty:
-                    ax.set_title(title_map.get(metric_col, metric_col))
+                    ax.set_title(_append_sample_note(title_map.get(metric_col, metric_col), _sample_note_for_metric(metric_col, count_source_frame)))
                     ax.set_xlabel(alpha_xlabel)
                     ax.set_ylabel("Metric value")
                     ax.grid(alpha=0.3)
@@ -2511,7 +2848,6 @@ def export_plots(
             if (
                 mutation_only_metrics is not None
                 and metric_col in mutation_only_metrics.index
-                and np.isfinite(float(mutation_only_metrics["alpha"]))
                 and np.isfinite(float(mutation_only_metrics[metric_col]))
             ):
                 ax.scatter(
@@ -2527,7 +2863,7 @@ def export_plots(
                 )
 
             ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
-            ax.set_title(title_map.get(metric_col, metric_col))
+            ax.set_title(_append_sample_note(title_map.get(metric_col, metric_col), _sample_note_for_metric(metric_col, count_source_frame)))
             ax.set_xlabel(alpha_xlabel)
             ax.set_ylabel("Metric value")
             ax.grid(alpha=0.3)
@@ -2549,6 +2885,8 @@ def export_plots(
         alpha_frame: pd.DataFrame,
         title_prefix: str,
         output_name: str = "alpha_sweep_metrics_selected.png",
+        logistic_output_name: Optional[str] = None,
+        note_style: str = "matrix",
     ) -> None:
         if plot_frame.empty or alpha_frame.empty:
             return
@@ -2568,8 +2906,8 @@ def export_plots(
         plot_metric_cols = [
             metric_col for metric_col in [
                 "mut_flat_global_spearman_r",
-                "mut_flat_nonzero_pearson_r",
                 "site_logistic_auroc",
+                "mut_flat_nonzero_pearson_r",
             ]
             if metric_col in focused_alpha_df.columns
         ]
@@ -2579,9 +2917,9 @@ def export_plots(
         fig, axes = plt.subplots(1, len(plot_metric_cols), figsize=(6 * len(plot_metric_cols), 6.4), sharex=True)
         axes = np.array(axes, dtype=object).reshape(-1)
         title_map = {
-            "mut_flat_global_spearman_r": "Spearman(PLM vs observed freq)\nall 19xN mutation rows",
-            "mut_flat_nonzero_pearson_r": "Pearson(PLM vs observed freq)\nnon-zero allele frequencies only",
-            "site_logistic_auroc": "Logistic regression:\nPLM prob vs binary mutation observed",
+            "mut_flat_global_spearman_r": "Spearman(PLM vs observed freq)\nmean across lineages",
+            "mut_flat_nonzero_pearson_r": "Pearson(PLM vs observed freq)\nmean across lineages",
+            "site_logistic_auroc": "Logistic regression AUROC\nmean across lineages",
         }
         ylabel_map = {
             "mut_flat_global_spearman_r": "Spearman r",
@@ -2594,6 +2932,9 @@ def export_plots(
             if all(c in focused_alpha_df.columns for c in ["epoch_value", "epoch_label", "model", "model_display_label"])
             else None
         )
+        selected_tick_fontsize = tick_fontsize + 3
+        selected_legend_fontsize = legend_fontsize + 3
+        selected_markersize = 6
         n_groups = len(epoch_groups) if epoch_groups is not None else 1
         epoch_colours = _epoch_colour_sequence(n_groups)
         for ax, metric_col in zip(axes, plot_metric_cols):
@@ -2611,7 +2952,7 @@ def export_plots(
                         color=epoch_colours[colour_idx],
                         label=tick_label,
                         linewidth=1.5,
-                        markersize=4,
+                        markersize=selected_markersize,
                     )
                     metric_y_values.extend(grp_sorted[metric_col].astype(float).tolist())
             else:
@@ -2623,13 +2964,12 @@ def export_plots(
                     ax.grid(alpha=0.3)
                     _style_axis_text(ax, is_alpha_x=True)
                     continue
-                ax.plot(grp_sorted["alpha"], grp_sorted[metric_col], marker="o", linewidth=1.5, color="#1f6f8b", label="PLM alpha sweep")
+                ax.plot(grp_sorted["alpha"], grp_sorted[metric_col], marker="o", linewidth=1.5, color="#1f6f8b", label="PLM alpha sweep", markersize=selected_markersize)
                 metric_y_values.extend(grp_sorted[metric_col].astype(float).tolist())
 
             if (
                 mutation_only_metrics is not None
                 and metric_col in mutation_only_metrics.index
-                and np.isfinite(float(mutation_only_metrics["alpha"]))
                 and np.isfinite(float(mutation_only_metrics[metric_col]))
             ):
                 ax.scatter(
@@ -2647,12 +2987,14 @@ def export_plots(
 
             ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
             ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
-            ax.set_title(title_map[metric_col])
+            ax.set_title(_append_sample_note(title_map[metric_col], _sample_note_for_metric(metric_col, plot_frame, note_style=note_style)))
             ax.set_xlabel(alpha_xlabel)
             ax.set_ylabel(ylabel_map.get(metric_col, metric_col))
 
             finite_y = np.asarray([value for value in metric_y_values if np.isfinite(value)], dtype=float)
-            if finite_y.size:
+            if metric_col == "site_logistic_auroc":
+                ax.set_ylim(0.48, 1.0)
+            elif finite_y.size:
                 raw_y_min = float(np.min(finite_y))
                 y_top = float(np.max(finite_y))
                 if np.isclose(raw_y_min, y_top):
@@ -2663,6 +3005,7 @@ def export_plots(
                 ax.set_ylim(y_bottom, y_top + pad)
             ax.grid(alpha=0.3)
             _style_axis_text(ax, is_alpha_x=True)
+            ax.tick_params(axis="both", which="major", labelsize=selected_tick_fontsize)
 
         logistic_metric_cols = [
             metric_col for metric_col in [
@@ -2699,23 +3042,38 @@ def export_plots(
                         if grp_sorted.empty:
                             continue
                         tick_label = _plm_epoch_label(ep_label, ep_val, model_name=model_name, model_display_label=model_display_label)
-                        ax.plot(grp_sorted["alpha"], grp_sorted[metric_col], marker="o", color=epoch_colours[colour_idx], label=tick_label, linewidth=1.5, markersize=4)
+                        ax.plot(grp_sorted["alpha"], grp_sorted[metric_col], marker="o", color=epoch_colours[colour_idx], label=tick_label, linewidth=1.5, markersize=selected_markersize)
                         metric_y_values.extend(grp_sorted[metric_col].astype(float).tolist())
                 else:
                     grp_sorted = focused_alpha_df.loc[np.isfinite(focused_alpha_df["alpha"]) & np.isfinite(focused_alpha_df[metric_col])].sort_values("alpha")
                     if not grp_sorted.empty:
-                        ax.plot(grp_sorted["alpha"], grp_sorted[metric_col], marker="o", linewidth=1.5, color="#1f6f8b", label="PLM alpha sweep")
+                        ax.plot(grp_sorted["alpha"], grp_sorted[metric_col], marker="o", linewidth=1.5, color="#1f6f8b", label="PLM alpha sweep", markersize=selected_markersize)
                         metric_y_values.extend(grp_sorted[metric_col].astype(float).tolist())
                 if mutation_only_metrics is not None and metric_col in mutation_only_metrics.index and np.isfinite(float(mutation_only_metrics[metric_col])):
                     ax.scatter([_baseline_alpha_x(focused_alpha_df)], [float(mutation_only_metrics[metric_col])], marker="s", s=110, color="#b58900", edgecolors="black", linewidths=1.0, zorder=6, label="Mutation accessibility only")
                     metric_y_values.append(float(mutation_only_metrics[metric_col]))
                 ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
                 ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
-                ax.set_title(f"Logistic regression:\n{logistic_title_map[metric_col]}")
+                if metric_col == "site_logistic_auroc":
+                    ax.axhline(0.5, color="#9b2226", linestyle=":", linewidth=1.4, alpha=0.9)
+                    ax.text(
+                        0.98,
+                        0.04,
+                        "0.5 = random / no ranking signal",
+                        transform=ax.transAxes,
+                        ha="right",
+                        va="bottom",
+                        fontsize=max(9, selected_tick_fontsize - 2),
+                        color="#9b2226",
+                        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 1.5},
+                    )
+                ax.set_title(_append_sample_note(f"Logistic regression:\n{logistic_title_map[metric_col]}", _sample_note_for_metric(metric_col, plot_frame, note_style=note_style)))
                 ax.set_xlabel(alpha_xlabel)
                 ax.set_ylabel(logistic_ylabel_map[metric_col])
                 finite_y = np.asarray([value for value in metric_y_values if np.isfinite(value)], dtype=float)
-                if finite_y.size:
+                if metric_col == "site_logistic_auroc":
+                    ax.set_ylim(0.48, 1.0)
+                elif finite_y.size:
                     raw_y_min = float(np.min(finite_y))
                     y_top = float(np.max(finite_y))
                     if np.isclose(raw_y_min, y_top):
@@ -2726,24 +3084,27 @@ def export_plots(
                     ax.set_ylim(y_bottom, y_top + pad)
                 ax.grid(alpha=0.3)
                 _style_axis_text(ax, is_alpha_x=True)
+                ax.tick_params(axis="both", which="major", labelsize=selected_tick_fontsize)
             for ax in logistic_axes[len(logistic_metric_cols):]:
                 ax.axis("off")
             logistic_handles, logistic_labels = _collect_axes_legend_entries(logistic_axes)
             if logistic_handles:
-                logistic_fig.legend(logistic_handles, logistic_labels, loc="upper center", bbox_to_anchor=(0.5, 0.96), ncol=max(1, min(4, len(logistic_handles))), frameon=False, fontsize=legend_fontsize)
+                logistic_fig.legend(logistic_handles, logistic_labels, loc="upper center", bbox_to_anchor=(0.5, 0.96), ncol=max(1, min(4, len(logistic_handles))), frameon=False, fontsize=selected_legend_fontsize, markerscale=1.5)
             logistic_fig.suptitle(f"{title_prefix}\nLogistic alpha-sweep metrics", y=0.99)
             logistic_fig._suptitle.set_fontsize(title_fontsize + 4)
             plt.tight_layout(rect=(0, 0, 1, 0.92))
-            plt.savefig(target_dir / "alpha_sweep_logistic_metrics_selected.png", dpi=300)
+            plt.savefig(target_dir / (logistic_output_name or "alpha_sweep_logistic_metrics_selected.png"), dpi=300)
             plt.close(logistic_fig)
 
         handles, labels = _collect_axes_legend_entries(axes)
         if handles:
-            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.94), ncol=max(1, min(4, len(handles))), frameon=False, fontsize=legend_fontsize)
+            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.94), ncol=max(1, min(4, len(handles))), frameon=False, fontsize=selected_legend_fontsize, markerscale=1.5)
         fig.suptitle(title_prefix, y=0.985)
         fig._suptitle.set_fontsize(title_fontsize + 4)
         plt.tight_layout(rect=(0, 0, 1, 0.90))
-        plt.savefig(target_dir / output_name, dpi=300)
+        output_path = target_dir / output_name
+        plt.savefig(output_path, dpi=300)
+        plt.savefig(output_path.with_suffix(".pdf"))
         plt.close(fig)
 
     def _write_hurdle_alpha_outputs(
@@ -2827,7 +3188,12 @@ def export_plots(
             if np.isfinite(float(baseline_row.get("logistic_tjur_r2", np.nan))):
                 row_axes[0].scatter([float(baseline_row["alpha_presence"])], [float(baseline_row["logistic_tjur_r2"])], marker="s", s=110, color="#b58900", edgecolors="black", linewidths=1.0, zorder=5, label="Mutation accessibility only")
             row_axes[0].axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.6)
-            row_axes[0].set_title(f"{model_display_label}\nBinary hurdle term")
+            row_axes[0].set_title(
+                _append_sample_note(
+                    f"{model_display_label}\nBinary hurdle term",
+                    f"n={_format_count(float(baseline_row.get('logistic_n_obs', np.nan)))} mutation rows",
+                )
+            )
             row_axes[0].set_xlabel("PLM alpha for zero/non-zero term")
             row_axes[0].set_ylabel("Tjur R2")
             row_axes[0].grid(alpha=0.3)
@@ -2855,7 +3221,12 @@ def export_plots(
             if np.isfinite(float(baseline_row.get("freq_raw_r2", np.nan))):
                 row_axes[1].scatter([float(baseline_row["alpha_frequency"])], [float(baseline_row["freq_raw_r2"])], marker="D", s=90, color="#e9c46a", edgecolors="black", linewidths=1.0, zorder=5, label="Mutation-only, OLS on raw non-zero freq")
             row_axes[1].axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.6)
-            row_axes[1].set_title(f"{model_display_label}\nPositive-frequency term")
+            row_axes[1].set_title(
+                _append_sample_note(
+                    f"{model_display_label}\nPositive-frequency term",
+                    f"n={_format_count(float(baseline_row.get('freq_n_obs', np.nan)))} non-zero mutation rows",
+                )
+            )
             row_axes[1].set_xlabel("PLM alpha for non-zero frequency term")
             row_axes[1].set_ylabel("R2 on non-zero observed frequency\nsolid = log10 scale, dashed = raw scale")
             row_axes[1].grid(alpha=0.3)
@@ -2870,7 +3241,8 @@ def export_plots(
             row_axes[2].set_title(
                 f"{model_display_label}\n"
                 f"Combined hurdle alpha sweep\n"
-                f"Two-input hurdle mean R2(log10)={float(two_input_row['hurdle_mean_r2']):.3f}; raw={float(two_input_row['hurdle_mean_r2_raw_frequency']):.3f}"
+                f"Two-input hurdle mean R2(log10)={float(two_input_row['hurdle_mean_r2']):.3f}; raw={float(two_input_row['hurdle_mean_r2_raw_frequency']):.3f}\n"
+                f"binary n={_format_count(float(two_input_row.get('logistic_n_obs', np.nan)))}; freq n={_format_count(float(two_input_row.get('freq_n_obs', np.nan)))}"
             )
             row_axes[2].set_xlabel("PLM alpha for zero/non-zero term")
             row_axes[2].set_ylabel("PLM alpha for non-zero frequency term")
@@ -2913,7 +3285,12 @@ def export_plots(
                         row_axes[0].scatter(observed_bins["score"], observed_bins["obs_present"], s=32, color="#b58900", edgecolors="black", linewidths=0.5, zorder=5, label="Observed bin mean")
                 except ValueError:
                     pass
-                row_axes[0].set_title(f"{spec['model_display_label']}\n{spec['variant_label']}: binary hurdle regression")
+                row_axes[0].set_title(
+                    _append_sample_note(
+                        f"{spec['model_display_label']}\n{spec['variant_label']}: binary hurdle regression",
+                        f"n={_format_count(float(summary_row.get('logistic_n_obs', np.nan)))} mutation rows",
+                    )
+                )
                 row_axes[0].set_xlabel("Combined hurdle score")
                 row_axes[0].set_ylabel("Observed mutation present")
                 row_axes[0].grid(alpha=0.3)
@@ -2938,7 +3315,12 @@ def export_plots(
                         row_axes[1].scatter(observed_bins["score"], observed_bins["log10_obs_freq"], s=32, color="#b58900", edgecolors="black", linewidths=0.5, zorder=5, label="Observed bin mean")
                 except ValueError:
                     pass
-                row_axes[1].set_title(f"{spec['model_display_label']}\n{spec['variant_label']}: positive-frequency regression")
+                row_axes[1].set_title(
+                    _append_sample_note(
+                        f"{spec['model_display_label']}\n{spec['variant_label']}: positive-frequency regression",
+                        f"n={_format_count(float(summary_row.get('freq_n_obs', np.nan)))} non-zero mutation rows",
+                    )
+                )
                 row_axes[1].set_xlabel("Combined hurdle score")
                 row_axes[1].set_ylabel("log10(non-zero observed frequency)")
                 row_axes[1].grid(alpha=0.3)
@@ -2962,6 +3344,146 @@ def export_plots(
         plt.savefig(target_plot_dir / "hurdle_alpha_sweep.png", dpi=300)
         plt.close(fig)
 
+    def _write_logistic_comparison_report(
+        target_metrics_dir: Path,
+        plot_frame: pd.DataFrame,
+        alpha_frame: pd.DataFrame,
+    ) -> None:
+        if plot_frame.empty:
+            return
+
+        target_metrics_dir = ensure_dir(target_metrics_dir)
+        if "model" in plot_frame.columns and plot_frame["model"].nunique() > 1:
+            model_meta = (
+                plot_frame.loc[:, [col for col in ["model", "epoch_label", "epoch_value", "model_display_label"] if col in plot_frame.columns]]
+                .drop_duplicates()
+                .sort_values([col for col in ["epoch_value", "epoch_label", "model"] if col in plot_frame.columns])
+            )
+            model_groups = [
+                (
+                    str(row["model"]),
+                    plot_frame.loc[plot_frame["model"] == row["model"]].copy(),
+                    alpha_frame.loc[alpha_frame["model"] == row["model"]].copy() if "model" in alpha_frame.columns else alpha_frame.copy(),
+                    str(row["epoch_label"]) if "epoch_label" in row else "single_model",
+                    float(row["epoch_value"]) if "epoch_value" in row else 0.0,
+                    str(row["model_display_label"]) if "model_display_label" in row and pd.notna(row["model_display_label"]) else str(row["model"]),
+                )
+                for _, row in model_meta.iterrows()
+            ]
+        else:
+            epoch_label = str(alpha_frame.iloc[0]["epoch_label"]) if "epoch_label" in alpha_frame.columns and not alpha_frame.empty else "single_model"
+            epoch_value = float(alpha_frame.iloc[0]["epoch_value"]) if "epoch_value" in alpha_frame.columns and not alpha_frame.empty else 0.0
+            model_name = str(plot_frame.iloc[0]["model"]) if "model" in plot_frame.columns and not plot_frame.empty else "single_model"
+            model_display_label = str(plot_frame.iloc[0]["model_display_label"]) if "model_display_label" in plot_frame.columns and pd.notna(plot_frame.iloc[0]["model_display_label"]) else model_name
+            model_groups = [(model_name, plot_frame.copy(), alpha_frame.copy(), epoch_label, epoch_value, model_display_label)]
+
+        report_rows: List[Dict[str, object]] = []
+        for model_name, model_plot_frame, model_alpha_frame, epoch_label, epoch_value, model_display_label in model_groups:
+            base_df = build_hurdle_base_frame(model_plot_frame)
+            standalone_metric_specs = [
+                (
+                    "standalone_binary_term",
+                    "plm_prob",
+                    base_df["log_plm_prob"],
+                    "mutation_row",
+                    "log_plm_prob",
+                    "log_plm_prob",
+                ),
+                (
+                    "standalone_binary_term",
+                    "mutation_accessibility",
+                    base_df["log_mut_prob"],
+                    "mutation_row",
+                    "log_mut_prob",
+                    "log_mut_prob",
+                ),
+            ]
+            for framework, predictor, score_series, observation_unit, score_definition, feature_name in standalone_metric_specs:
+                row_metrics = compute_mutation_row_logistic_metrics(
+                    score_series,
+                    base_df["obs_present"],
+                    feature_name=feature_name,
+                )
+                report_rows.append(
+                    {
+                        "model": model_name,
+                        "model_display_label": model_display_label,
+                        "epoch_label": epoch_label,
+                        "epoch_value": float(epoch_value),
+                        "framework": framework,
+                        "predictor": predictor,
+                        "model_variant": predictor,
+                        "observation_unit": observation_unit,
+                        "score_definition": score_definition,
+                        "logistic_n_obs": int(len(base_df)),
+                        "logistic_positive_rate": float(np.mean(base_df["obs_present"])) if len(base_df) > 0 else np.nan,
+                        "logistic_auroc": float(row_metrics.get("site_logistic_auroc", np.nan)),
+                        "logistic_tjur_r2": float(row_metrics.get("site_logistic_tjur_r2", np.nan)),
+                        "logistic_mcfadden_r2": float(row_metrics.get("site_logistic_mcfadden_r2", np.nan)),
+                        "logistic_brier_score": float(row_metrics.get("site_logistic_brier_score", np.nan)),
+                        "logistic_fitted_prob_corr": float(row_metrics.get("site_logistic_mutated_corr", np.nan)),
+                        "logistic_intercept": float(row_metrics.get("site_logistic_mutated_intercept", np.nan)),
+                        "logistic_primary_coef": float(row_metrics.get("site_logistic_mutated_slope", np.nan)),
+                    }
+                )
+
+            alpha_values = sorted(model_alpha_frame["alpha"].dropna().astype(float).unique().tolist()) if "alpha" in model_alpha_frame.columns else []
+            hurdle_alpha_df = evaluate_hurdle_alpha_sweep(model_plot_frame, alpha_values) if alpha_values else pd.DataFrame()
+            hurdle_summary_df = summarize_hurdle_models(model_plot_frame, hurdle_alpha_df)
+            hurdle_rows = {
+                "plm_only_alpha0": "plm_prob",
+                "mutation_only": "mutation_accessibility",
+            }
+            for model_variant, predictor in hurdle_rows.items():
+                variant_rows = hurdle_summary_df.loc[hurdle_summary_df["model_variant"] == model_variant]
+                if variant_rows.empty:
+                    continue
+                variant_row = variant_rows.iloc[0]
+                primary_coef_col = "logistic_coef_combined_score" if model_variant == "plm_only_alpha0" else "logistic_coef_log_mut_prob"
+                report_rows.append(
+                    {
+                        "model": model_name,
+                        "model_display_label": model_display_label,
+                        "epoch_label": epoch_label,
+                        "epoch_value": float(epoch_value),
+                        "framework": "hurdle_binary_term",
+                        "predictor": predictor,
+                        "model_variant": model_variant,
+                        "observation_unit": "mutation_row",
+                        "score_definition": str(variant_row.get("presence_stage_feature_set", "")),
+                        "logistic_n_obs": float(variant_row.get("logistic_n_obs", np.nan)),
+                        "logistic_positive_rate": float(variant_row.get("logistic_positive_rate", np.nan)),
+                        "logistic_auroc": float(variant_row.get("logistic_auroc", np.nan)),
+                        "logistic_tjur_r2": float(variant_row.get("logistic_tjur_r2", np.nan)),
+                        "logistic_mcfadden_r2": float(variant_row.get("logistic_mcfadden_r2", np.nan)),
+                        "logistic_brier_score": float(variant_row.get("logistic_brier_score", np.nan)),
+                        "logistic_fitted_prob_corr": float(variant_row.get("logistic_fitted_prob_corr", np.nan)),
+                        "logistic_intercept": float(variant_row.get("logistic_intercept", np.nan)),
+                        "logistic_primary_coef": float(variant_row.get(primary_coef_col, np.nan)),
+                    }
+                )
+
+        if not report_rows:
+            return
+
+        report_df = pd.DataFrame(report_rows)
+        report_df.to_csv(target_metrics_dir / "logistic_regression_comparison_report.tsv", sep="\t", index=False)
+
+        note_lines = [
+            "Logistic regression comparison report",
+            "",
+            "This report compares standalone binary logistic fits and hurdle binary-term logistic fits on the same mutation-row question.",
+            "",
+            "1. standalone_binary_term rows fit a single-predictor logistic model directly on mutation rows.",
+            "   Question: given this specific candidate mutation row, is this mutation observed?",
+            "",
+            "2. hurdle_binary_term rows use one row per candidate mutation (lineage-position-refAA-AA).",
+            "   They answer the same binary question, but inside the hurdle-model export path.",
+            "",
+            "For the one-predictor PLM-only and mutation-only cases, standalone_binary_term and hurdle_binary_term should now be directly comparable.",
+        ]
+        (target_metrics_dir / "logistic_regression_comparison_notes.txt").write_text("\n".join(note_lines) + "\n", encoding="utf-8")
+
     def _write_epoch_metric_plot(
         target_dir: Path,
         epoch_summary_df_local: pd.DataFrame,
@@ -2984,7 +3506,7 @@ def export_plots(
         if np.isfinite(baseline_y):
             ax.scatter([mutation_baseline_x], [baseline_y], color="tab:red", s=55, zorder=4, label="Mutation baseline")
             ax.axvline(mutation_baseline_x, color="tab:red", linestyle="--", alpha=0.3)
-        ax.set_title(title)
+        ax.set_title(_append_sample_note(title, _sample_note_for_epoch_metric(metric_col, epoch_summary_df_local)))
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Correlation coefficient")
         ax.grid(alpha=0.25)
@@ -3192,6 +3714,7 @@ def export_plots(
         )
         _plot_alpha_metric_grid(
             alpha_df,
+            combined_df,
             metric_cols=[
                 "site_top10pct_mutated_enrichment",
                 "site_top10pct_mutated_precision",
@@ -3216,6 +3739,7 @@ def export_plots(
         )
         _plot_alpha_metric_grid(
             alpha_df,
+            combined_df,
             metric_cols=[
                 "mut_flat_nonzero_spearman_r",
                 "mut_flat_nonzero_pearson_r",
@@ -3247,12 +3771,26 @@ def export_plots(
                 model_alpha_df,
                 title_prefix=f"Focused alpha-sweep metrics ({model_label})",
             )
+            _write_selected_alpha_sweep_plot(
+                model_plot_dir,
+                model_combined_df,
+                model_alpha_df,
+                title_prefix=f"Focused alpha-sweep metrics ({model_label})",
+                output_name="alpha_sweep_metrics_selected_mutation_counts.png",
+                logistic_output_name="alpha_sweep_logistic_metrics_selected_mutation_counts.png",
+                note_style="counts",
+            )
             _write_hurdle_alpha_outputs(
                 model_plot_dir,
                 model_metrics_dir,
                 model_combined_df,
                 model_alpha_df,
                 title_prefix=f"Hurdle-model alpha sweep ({model_label})",
+            )
+            _write_logistic_comparison_report(
+                model_metrics_dir,
+                model_combined_df,
+                model_alpha_df,
             )
 
         if all(col in alpha_df.columns for col in ["model", "epoch_label", "epoch_value"]):
@@ -3284,6 +3822,15 @@ def export_plots(
                     title_prefix=f"Focused alpha-sweep metrics ({raw_model_label} vs {latest_model_label})",
                     output_name="alpha_sweep_metrics_selected_with_raw.png",
                 )
+                _write_selected_alpha_sweep_plot(
+                    latest_plot_dir,
+                    comparison_combined_df,
+                    comparison_alpha_df,
+                    title_prefix=f"Focused alpha-sweep metrics ({raw_model_label} vs {latest_model_label})",
+                    output_name="alpha_sweep_metrics_selected_with_raw_mutation_counts.png",
+                    logistic_output_name="alpha_sweep_logistic_metrics_selected_with_raw_mutation_counts.png",
+                    note_style="counts",
+                )
 
         _write_selected_alpha_sweep_plot(
             output_dir,
@@ -3291,12 +3838,26 @@ def export_plots(
             alpha_df,
             title_prefix="Focused alpha-sweep metrics (all models)",
         )
+        _write_selected_alpha_sweep_plot(
+            output_dir,
+            combined_df,
+            alpha_df,
+            title_prefix="Focused alpha-sweep metrics (all models)",
+            output_name="alpha_sweep_metrics_selected_mutation_counts.png",
+            logistic_output_name="alpha_sweep_logistic_metrics_selected_mutation_counts.png",
+            note_style="counts",
+        )
         _write_hurdle_alpha_outputs(
             output_dir,
             metrics_output_dir,
             combined_df,
             alpha_df,
             title_prefix="Hurdle-model alpha sweep (all models)",
+        )
+        _write_logistic_comparison_report(
+            metrics_output_dir,
+            combined_df,
+            alpha_df,
         )
 
     if not combined_df.empty and scatter_alphas:
@@ -3454,13 +4015,17 @@ def run_analysis(args: argparse.Namespace) -> int:
     existing_panel_metadata_df = pd.read_csv(existing_panel_metadata_path, sep="\t") if existing_panel_metadata_path.exists() else pd.DataFrame()
     cache_version_matches = (
         not existing_panel_metadata_df.empty
-        and "cache_version" in existing_panel_metadata_df.columns
-        and pd.to_numeric(existing_panel_metadata_df["cache_version"], errors="coerce").eq(PANEL_CACHE_VERSION).all()
+        and (
+            "cache_version" not in existing_panel_metadata_df.columns
+            or pd.to_numeric(existing_panel_metadata_df["cache_version"], errors="coerce").eq(PANEL_CACHE_VERSION).all()
+        )
     )
     mutation_model_matches = (
         not existing_panel_metadata_df.empty
-        and "mutation_model" in existing_panel_metadata_df.columns
-        and existing_panel_metadata_df["mutation_model"].astype(str).eq(args.mutation_model).all()
+        and (
+            "mutation_model" not in existing_panel_metadata_df.columns
+            or existing_panel_metadata_df["mutation_model"].astype(str).eq(args.mutation_model).all()
+        )
     )
     use_cached_outputs_only = (
         not args.force_recompute_plm
@@ -3499,6 +4064,7 @@ def run_analysis(args: argparse.Namespace) -> int:
     status_rows: List[Dict[str, object]] = []
     all_combined_frames: List[pd.DataFrame] = []
     all_alpha_frames: List[pd.DataFrame] = []
+    all_alpha_lineage_frames: List[pd.DataFrame] = []
     best_rows: List[Dict[str, object]] = []
     per_group_best_rows: List[Dict[str, object]] = []
     alpha_grid = parse_alpha_grid(args)
@@ -3506,11 +4072,21 @@ def run_analysis(args: argparse.Namespace) -> int:
 
     for model_spec in model_specs:
         model_label = str(model_spec["model_tag"])
+        alpha_by_lineage_df = pd.DataFrame()
         cached_outputs = None if args.force_recompute_plm else _load_cached_model_outputs(model_tables_dir, model_spec)
         if cached_outputs is not None:
             model_combined_df, alpha_df = cached_outputs
+            alpha_by_lineage_path = model_tables_dir / f"{model_label}_alpha_sweep_fit_metrics_BY_LINEAGE.tsv"
+            if alpha_by_lineage_path.exists():
+                alpha_by_lineage_df = pd.read_csv(alpha_by_lineage_path, sep="\t")
+            warn_on_excess_mutation_rows(
+                model_combined_df,
+                context_label=f"cached combined table ({model_label})",
+            )
             all_combined_frames.append(model_combined_df)
             all_alpha_frames.append(alpha_df)
+            if not alpha_by_lineage_df.empty:
+                all_alpha_lineage_frames.append(alpha_by_lineage_df)
             if not existing_panel_metadata_df.empty:
                 cached_metadata = existing_panel_metadata_df.loc[existing_panel_metadata_df["model"] == model_label]
                 metadata_rows.extend(cached_metadata.to_dict("records"))
@@ -3596,10 +4172,15 @@ def run_analysis(args: argparse.Namespace) -> int:
                 status_rows.append({"model": model_label, "lineage": "all", "status": "failed", "reason": "no combined rows produced"})
                 continue
 
+            warn_on_excess_mutation_rows(
+                model_combined_df,
+                context_label=f"combined table before alpha sweep ({model_label})",
+            )
+
             all_combined_frames.append(model_combined_df)
             model_combined_df.to_csv(model_tables_dir / f"{model_label}_combined_long_table.csv", index=False)
 
-            alpha_df = evaluate_alpha_sweep(
+            alpha_by_lineage_df = evaluate_alpha_sweep_by_lineage(
                 model_combined_df,
                 alpha_grid,
                 parallel=use_parallel,
@@ -3607,20 +4188,58 @@ def run_analysis(args: argparse.Namespace) -> int:
                 alpha_sweep_min_grid=args.alpha_sweep_min_grid,
                 pseudocount=1e-16,
             )
-            alpha_df["alpha_label"] = alpha_df["alpha"].map(lambda value: f"{float(value):.6g}")
-            alpha_df["model_variant"] = "plm_alpha_sweep"
-            alpha_df["is_mutation_only_baseline"] = False
-            alpha_df["input_score_formula"] = "plm_prob * mut_prob^alpha"
-            alpha_df["model"] = model_label
-            alpha_df["epoch_label"] = model_spec["epoch_label"]
-            alpha_df["epoch_value"] = float(model_spec["epoch_value"])
-            mutation_only_row = compute_mutation_only_alpha_baseline_row(model_combined_df, pseudocount=1e-16)
-            if mutation_only_row is not None:
-                mutation_only_df = pd.DataFrame([mutation_only_row])
-                mutation_only_df["model"] = model_label
-                mutation_only_df["epoch_label"] = model_spec["epoch_label"]
-                mutation_only_df["epoch_value"] = float(model_spec["epoch_value"])
-                alpha_df = pd.concat([alpha_df, mutation_only_df], ignore_index=True, sort=False)
+            if alpha_by_lineage_df.empty:
+                alpha_df = pd.DataFrame()
+            else:
+                alpha_by_lineage_df["model"] = model_label
+                alpha_by_lineage_df["epoch_label"] = model_spec["epoch_label"]
+                alpha_by_lineage_df["epoch_value"] = float(model_spec["epoch_value"])
+                logistic_alpha_by_lineage_df = evaluate_logistic_alpha_sweep_by_lineage(
+                    model_combined_df,
+                    alpha_grid,
+                )
+                if not logistic_alpha_by_lineage_df.empty:
+                    logistic_alpha_by_lineage_df["model"] = model_label
+                    logistic_alpha_by_lineage_df["epoch_label"] = model_spec["epoch_label"]
+                    logistic_alpha_by_lineage_df["epoch_value"] = float(model_spec["epoch_value"])
+                    alpha_by_lineage_df = alpha_by_lineage_df.merge(
+                        logistic_alpha_by_lineage_df,
+                        on=["model", "epoch_label", "epoch_value", "lineage", "alpha"],
+                        how="left",
+                    )
+                    for metric_col in [
+                        "site_logistic_mutated_corr",
+                        "site_logistic_mutated_intercept",
+                        "site_logistic_mutated_slope",
+                        "site_logistic_tjur_r2",
+                        "site_logistic_mcfadden_r2",
+                        "site_logistic_brier_score",
+                        "site_logistic_auroc",
+                    ]:
+                        left_col = f"{metric_col}_x"
+                        right_col = f"{metric_col}_y"
+                        if left_col in alpha_by_lineage_df.columns or right_col in alpha_by_lineage_df.columns:
+                            left_values = alpha_by_lineage_df[left_col] if left_col in alpha_by_lineage_df.columns else np.nan
+                            right_values = alpha_by_lineage_df[right_col] if right_col in alpha_by_lineage_df.columns else np.nan
+                            alpha_by_lineage_df[metric_col] = pd.Series(left_values).where(pd.Series(left_values).notna(), pd.Series(right_values))
+                            drop_cols = [col for col in [left_col, right_col] if col in alpha_by_lineage_df.columns]
+                            if drop_cols:
+                                alpha_by_lineage_df = alpha_by_lineage_df.drop(columns=drop_cols)
+                alpha_df = summarize_lineage_metric_table(
+                    alpha_by_lineage_df,
+                    group_cols=[
+                        "model",
+                        "epoch_label",
+                        "epoch_value",
+                        "alpha",
+                        "alpha_label",
+                        "model_variant",
+                        "is_mutation_only_baseline",
+                        "input_score_formula",
+                    ],
+                )
+                all_alpha_lineage_frames.append(alpha_by_lineage_df)
+                alpha_by_lineage_df.to_csv(model_tables_dir / f"{model_label}_alpha_sweep_fit_metrics_BY_LINEAGE.tsv", sep="\t", index=False)
             alpha_df.to_csv(model_tables_dir / f"{model_label}_alpha_sweep_fit_metrics.tsv", sep="\t", index=False)
             all_alpha_frames.append(alpha_df)
 
@@ -3643,68 +4262,62 @@ def run_analysis(args: argparse.Namespace) -> int:
                 index=False,
             )
 
-        idx_a = alpha_df["site_top10pct_mutated_enrichment"].idxmax()
-        idx_b = alpha_df["mut_flat_global_spearman_r"].idxmax()
-        best_rows.append(
-            {
-                "model": model_label,
-                "epoch_label": model_spec["epoch_label"],
-                "epoch_value": float(model_spec["epoch_value"]),
-                "method": "Method A (Site-level)",
-                "criterion": "max site_top10pct_mutated_enrichment",
-                "best_alpha": float(alpha_df.loc[idx_a, "alpha"]),
-                "best_value": float(alpha_df.loc[idx_a, "site_top10pct_mutated_enrichment"]),
-            }
-        )
-        best_rows.append(
-            {
-                "model": model_label,
-                "epoch_label": model_spec["epoch_label"],
-                "epoch_value": float(model_spec["epoch_value"]),
-                "method": "Method B (Mutation-level flattened)",
-                "criterion": "max mut_flat_global_spearman_r",
-                "best_alpha": float(alpha_df.loc[idx_b, "alpha"]),
-                "best_value": float(alpha_df.loc[idx_b, "mut_flat_global_spearman_r"]),
-            }
-        )
-
-        for lineage_name, lineage_df in model_combined_df.groupby("lineage"):
-            lineage_alpha = evaluate_alpha_sweep(
-                lineage_df,
-                alpha_grid,
-                parallel=use_parallel,
-                max_workers=args.alpha_sweep_max_workers,
-                alpha_sweep_min_grid=args.alpha_sweep_min_grid,
-                pseudocount=1e-16,
-            )
-            if lineage_alpha.empty:
-                continue
-            idx_group_a = lineage_alpha["site_top10pct_mutated_enrichment"].idxmax()
-            idx_group_b = lineage_alpha["mut_flat_global_spearman_r"].idxmax()
-            per_group_best_rows.append(
+        if not alpha_df.empty:
+            idx_a = alpha_df["site_top10pct_mutated_enrichment"].idxmax()
+            idx_b = alpha_df["mut_flat_global_spearman_r"].idxmax()
+            best_rows.append(
                 {
                     "model": model_label,
                     "epoch_label": model_spec["epoch_label"],
                     "epoch_value": float(model_spec["epoch_value"]),
-                    "lineage": lineage_name,
                     "method": "Method A (Site-level)",
                     "criterion": "max site_top10pct_mutated_enrichment",
-                    "best_alpha": float(lineage_alpha.loc[idx_group_a, "alpha"]),
-                    "best_value": float(lineage_alpha.loc[idx_group_a, "site_top10pct_mutated_enrichment"]),
+                    "best_alpha": float(alpha_df.loc[idx_a, "alpha"]),
+                    "best_value": float(alpha_df.loc[idx_a, "site_top10pct_mutated_enrichment"]),
                 }
             )
-            per_group_best_rows.append(
+            best_rows.append(
                 {
                     "model": model_label,
                     "epoch_label": model_spec["epoch_label"],
                     "epoch_value": float(model_spec["epoch_value"]),
-                    "lineage": lineage_name,
                     "method": "Method B (Mutation-level flattened)",
                     "criterion": "max mut_flat_global_spearman_r",
-                    "best_alpha": float(lineage_alpha.loc[idx_group_b, "alpha"]),
-                    "best_value": float(lineage_alpha.loc[idx_group_b, "mut_flat_global_spearman_r"]),
+                    "best_alpha": float(alpha_df.loc[idx_b, "alpha"]),
+                    "best_value": float(alpha_df.loc[idx_b, "mut_flat_global_spearman_r"]),
                 }
             )
+
+        if not alpha_by_lineage_df.empty:
+            for lineage_name, lineage_alpha in alpha_by_lineage_df.groupby("lineage"):
+                if lineage_alpha.empty:
+                    continue
+                idx_group_a = lineage_alpha["site_top10pct_mutated_enrichment"].idxmax()
+                idx_group_b = lineage_alpha["mut_flat_global_spearman_r"].idxmax()
+                per_group_best_rows.append(
+                    {
+                        "model": model_label,
+                        "epoch_label": model_spec["epoch_label"],
+                        "epoch_value": float(model_spec["epoch_value"]),
+                        "lineage": lineage_name,
+                        "method": "Method A (Site-level)",
+                        "criterion": "max site_top10pct_mutated_enrichment",
+                        "best_alpha": float(lineage_alpha.loc[idx_group_a, "alpha"]),
+                        "best_value": float(lineage_alpha.loc[idx_group_a, "site_top10pct_mutated_enrichment"]),
+                    }
+                )
+                per_group_best_rows.append(
+                    {
+                        "model": model_label,
+                        "epoch_label": model_spec["epoch_label"],
+                        "epoch_value": float(model_spec["epoch_value"]),
+                        "lineage": lineage_name,
+                        "method": "Method B (Mutation-level flattened)",
+                        "criterion": "max mut_flat_global_spearman_r",
+                        "best_alpha": float(lineage_alpha.loc[idx_group_b, "alpha"]),
+                        "best_value": float(lineage_alpha.loc[idx_group_b, "mut_flat_global_spearman_r"]),
+                    }
+                )
 
         status_rows.append({"model": model_label, "lineage": "all", "status": "completed", "reason": "ok"})
 
@@ -3723,6 +4336,9 @@ def run_analysis(args: argparse.Namespace) -> int:
     alpha_df = pd.concat(all_alpha_frames, ignore_index=True) if all_alpha_frames else pd.DataFrame()
     if not alpha_df.empty:
         alpha_df.to_csv(tables_dir / "alpha_sweep_fit_metrics.tsv", sep="\t", index=False)
+    alpha_by_lineage_df = pd.concat(all_alpha_lineage_frames, ignore_index=True) if all_alpha_lineage_frames else pd.DataFrame()
+    if not alpha_by_lineage_df.empty:
+        alpha_by_lineage_df.to_csv(tables_dir / "alpha_sweep_fit_metrics_BY_LINEAGE.tsv", sep="\t", index=False)
 
     if best_rows:
         pd.DataFrame(best_rows).to_csv(tables_dir / "best_alpha_two_methods.tsv", sep="\t", index=False)

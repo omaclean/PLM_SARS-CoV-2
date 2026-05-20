@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -515,6 +516,17 @@ class TestParsingHelpers:
         assert list(normalised.index) == ["A", "C"]
         assert float(normalised.loc["A", 1]) == pytest.approx(0.1)
 
+    def test_normalise_plm_matrix_drops_non_canonical_token_rows(self):
+        raw_df = pd.DataFrame(
+            [["A", "C"], ["0.1", "0.2"], ["0.3", "0.4"], ["0.5", "0.6"], ["0.7", "0.8"]],
+            index=["sequence", "A", "C", "<mask>", "X"],
+            columns=[1, 2],
+        )
+
+        normalised = rma.normalise_plm_matrix(raw_df)
+
+        assert list(normalised.index) == ["A", "C"]
+
     def test_infer_epoch_value_uses_last_numeric_token(self):
         assert rma.infer_epoch_value("checkpoint-525", 0) == 525.0
         assert rma.infer_epoch_value("epoch_3.5_snapshot", 0) == 3.5
@@ -542,6 +554,21 @@ class TestParsingHelpers:
         )
 
         assert feature_result["logistic_fitted_prob_corr"] == pytest.approx(site_corr, abs=1e-6)
+
+    def test_logistic_feature_model_can_enforce_non_negative_coefficients(self):
+        feature_frame = pd.DataFrame({"score": np.array([1, 2, 3, 4, 5, 6], dtype=float)})
+        binary_outcome = pd.Series([1, 1, 1, 0, 0, 0], dtype=float)
+
+        unconstrained = rma.fit_logistic_feature_model(feature_frame, binary_outcome)
+        constrained = rma.fit_logistic_feature_model(
+            feature_frame,
+            binary_outcome,
+            enforce_positive_coefficients=True,
+        )
+
+        assert float(unconstrained["logistic_coef_score"]) < 0.0
+        assert float(constrained["logistic_coef_score"]) >= 0.0
+        assert constrained["logistic_constraint"] == "non_negative_coefficients"
 
     def test_site_logistic_and_hurdle_logistic_diverge_when_row_definitions_differ(self):
         combined_df = pd.DataFrame(
@@ -714,6 +741,31 @@ class TestRowBuilding:
         rows = rma.build_combined_rows(args, model_spec, "lin1", lineage_data, plm_matrix)
         assert rows == []
 
+    def test_warn_on_excess_mutation_rows_does_not_warn_at_or_below_20x_sites(self):
+        combined_df = pd.DataFrame(
+            [
+                {"lineage": "lin1", "position": 1, "ref_aa": "A", "aa": f"X{i}"}
+                for i in range(20)
+            ]
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            rma.warn_on_excess_mutation_rows(combined_df, context_label="test")
+
+        assert caught == []
+
+    def test_warn_on_excess_mutation_rows_warns_above_20x_sites(self):
+        combined_df = pd.DataFrame(
+            [
+                {"lineage": "lin1", "position": 1, "ref_aa": "A", "aa": f"X{i}"}
+                for i in range(21)
+            ]
+        )
+
+        with pytest.warns(UserWarning, match=r"exceeding the hard limit of 20x sites"):
+            rma.warn_on_excess_mutation_rows(combined_df, context_label="test")
+
 
 class TestAlignmentAndCorrelations:
     def test_resolve_plm_coordinate_maps_handles_free_end_gap_alignment(self):
@@ -822,6 +874,60 @@ class TestMetricSummaries:
         assert result.loc[0, "n_sites_used"] == 2
         assert result.loc[0, "n_pooled_lineage_sites_used"] == 3
 
+    def test_evaluate_alpha_sweep_by_lineage_averages_metrics_across_lineages(self, monkeypatch):
+        def fake_evaluate_alpha_sweep(df, alpha_grid, **kwargs):
+            lineage_name = str(df["lineage"].iloc[0])
+            metric_value = 0.2 if lineage_name == "lin1" else 0.8
+            return pd.DataFrame(
+                {
+                    "alpha": [0.0],
+                    "site_top10pct_mutated_enrichment": [metric_value],
+                    "site_top10pct_mutated_precision": [metric_value],
+                    "site_rank_spearman_r": [metric_value],
+                    "mut_flat_global_spearman_r": [metric_value],
+                    "mut_flat_global_pearson_r": [metric_value],
+                    "mut_flat_mean_site_nll": [1.0 - metric_value],
+                }
+            )
+
+        _install_fake_functions_hf(monkeypatch, evaluate_alpha_sweep=fake_evaluate_alpha_sweep)
+
+        combined_df = pd.DataFrame(
+            [
+                {"lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.8, "mut_prob": 0.7, "obs_freq": 0.4, "obs_present": 1, "depth": 10.0},
+                {"lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "G", "plm_prob": 0.2, "mut_prob": 0.3, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"lineage": "lin2", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.7, "mut_prob": 0.6, "obs_freq": 0.2, "obs_present": 1, "depth": 10.0},
+                {"lineage": "lin2", "position": 1, "ref_aa": "A", "aa": "G", "plm_prob": 0.3, "mut_prob": 0.4, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+            ]
+        )
+
+        lineage_alpha_df = rma.evaluate_alpha_sweep_by_lineage(combined_df, np.array([0.0]), parallel=False, pseudocount=1e-16)
+        summary_df = rma.summarize_lineage_metric_table(
+            lineage_alpha_df,
+            group_cols=["alpha", "alpha_label", "model_variant", "is_mutation_only_baseline", "input_score_formula"],
+        )
+        plm_rows = summary_df.loc[summary_df["model_variant"] == "plm_alpha_sweep"]
+
+        assert set(lineage_alpha_df["lineage"]) == {"lin1", "lin2"}
+        assert len(plm_rows) == 1
+        assert float(plm_rows.iloc[0]["mut_flat_global_spearman_r"]) == pytest.approx(0.5)
+        assert int(plm_rows.iloc[0]["n_lineages_averaged"]) == 2
+
+    def test_evaluate_logistic_alpha_sweep_by_lineage_returns_populated_metrics(self):
+        combined_df = pd.DataFrame(
+            [
+                {"lineage": "lin1", "plm_prob": 0.90, "mut_prob": 0.80, "obs_present": 1},
+                {"lineage": "lin1", "plm_prob": 0.70, "mut_prob": 0.60, "obs_present": 1},
+                {"lineage": "lin1", "plm_prob": 0.20, "mut_prob": 0.30, "obs_present": 0},
+                {"lineage": "lin1", "plm_prob": 0.10, "mut_prob": 0.20, "obs_present": 0},
+            ]
+        )
+
+        logistic_df = rma.evaluate_logistic_alpha_sweep_by_lineage(combined_df, np.array([0.0, 1.0]))
+
+        assert list(logistic_df["alpha"]) == [0.0, 1.0]
+        assert logistic_df["site_logistic_auroc"].notna().all()
+
 
 class TestRunAnalysisSmoke:
     def test_run_analysis_writes_expected_outputs(self, tmp_path, monkeypatch):
@@ -897,10 +1003,15 @@ class TestRunAnalysisSmoke:
         assert (output_dir / "tables" / "combined_long_table.csv").exists()
         assert (output_dir / "tables" / "epoch_metric_summary.tsv").exists()
         assert (output_dir / "tables" / "best_alpha_two_methods.tsv").exists()
+        assert (output_dir / "tables" / "alpha_sweep_fit_metrics_BY_LINEAGE.tsv").exists()
         assert (output_dir / "tables" / "per_model" / "ESMC_600M_FLU_raw_mutation_baseline_summary.tsv").exists()
         alpha_table = pd.read_csv(output_dir / "tables" / "per_model" / "ESMC_600M_FLU_raw_alpha_sweep_fit_metrics.tsv", sep="\t")
+        alpha_by_lineage_table = pd.read_csv(output_dir / "tables" / "per_model" / "ESMC_600M_FLU_raw_alpha_sweep_fit_metrics_BY_LINEAGE.tsv", sep="\t")
         assert "model_variant" in alpha_table.columns
         assert "mutation_accessibility_only" in set(alpha_table["model_variant"])
+        assert "n_lineages_averaged" in alpha_table.columns
+        assert "site_logistic_auroc" in alpha_table.columns
+        assert "lineage" in alpha_by_lineage_table.columns
 
     def test_export_plots_writes_latest_checkpoint_focused_plot_with_raw(self, tmp_path, monkeypatch):
         def fake_evaluate_alpha_sweep(df, alpha_grid, **kwargs):
@@ -974,17 +1085,25 @@ class TestRunAnalysisSmoke:
 
         latest_plot_dir = tmp_path / "per_model" / "ESMC_600M_FLU_final_checkpoint"
         assert (latest_plot_dir / "alpha_sweep_metrics_selected.png").exists()
+        assert (latest_plot_dir / "alpha_sweep_metrics_selected_mutation_counts.png").exists()
         assert (latest_plot_dir / "alpha_sweep_logistic_metrics_selected.png").exists()
+        assert (latest_plot_dir / "alpha_sweep_logistic_metrics_selected_mutation_counts.png").exists()
         assert (latest_plot_dir / "alpha_sweep_metrics_selected_with_raw.png").exists()
+        assert (latest_plot_dir / "alpha_sweep_metrics_selected_with_raw_mutation_counts.png").exists()
         assert (tmp_path / "alpha_sweep_logistic_metrics_selected.png").exists()
+        assert (tmp_path / "alpha_sweep_logistic_metrics_selected_mutation_counts.png").exists()
+        assert (tmp_path / "alpha_sweep_metrics_selected_mutation_counts.png").exists()
         assert (tmp_path / "hurdle_alpha_sweep.png").exists()
         assert (tmp_path / "hurdle_regression_diagnostics.png").exists()
         assert (latest_plot_dir / "hurdle_alpha_sweep.png").exists()
         assert (latest_plot_dir / "hurdle_regression_diagnostics.png").exists()
         assert (tmp_path / "metrics" / "hurdle_alpha_sweep_metrics.csv").exists()
         assert (tmp_path / "metrics" / "hurdle_model_summary.csv").exists()
+        assert (tmp_path / "metrics" / "logistic_regression_comparison_report.tsv").exists()
+        assert (tmp_path / "metrics" / "logistic_regression_comparison_notes.txt").exists()
         assert (tmp_path / "metrics" / "per_model" / "ESMC_600M_FLU_final_checkpoint" / "hurdle_alpha_sweep_metrics.csv").exists()
         assert (tmp_path / "metrics" / "per_model" / "ESMC_600M_FLU_final_checkpoint" / "hurdle_model_summary.csv").exists()
+        assert (tmp_path / "metrics" / "per_model" / "ESMC_600M_FLU_final_checkpoint" / "logistic_regression_comparison_report.tsv").exists()
 
         hurdle_summary = pd.read_csv(tmp_path / "metrics" / "hurdle_model_summary.csv")
         assert {"mutation_only", "plm_only_alpha0", "best_alpha_hurdle", "two_input_hurdle"}.issubset(set(hurdle_summary["model_variant"]))
@@ -998,6 +1117,9 @@ class TestRunAnalysisSmoke:
         assert {"ESMC_600M_FLU_raw", "ESMC_600M_FLU_final_checkpoint"}.issubset(set(hurdle_points["model"]))
         assert {"presence_score_formula", "frequency_score_formula", "freq_response_definition", "freq_raw_response_definition", "freq_raw_r2"}.issubset(hurdle_points.columns)
         assert hurdle_points["presence_score_formula"].eq("log10(plm_prob) + alpha_presence * log10(mut_prob)").all()
+        logistic_report = pd.read_csv(tmp_path / "metrics" / "logistic_regression_comparison_report.tsv", sep="\t")
+        assert {"standalone_binary_term", "hurdle_binary_term"}.issubset(set(logistic_report["framework"]))
+        assert {"plm_prob", "mutation_accessibility"}.issubset(set(logistic_report["predictor"]))
 
     def test_hurdle_alpha_sweep_summary_includes_expected_models(self):
         combined_df = pd.DataFrame(
@@ -1102,6 +1224,7 @@ class TestRunAnalysisSmoke:
         )
         combined_df.to_csv(model_tables_dir / "ESMC_600M_FLU_raw_combined_long_table.csv", index=False)
         alpha_df.to_csv(model_tables_dir / "ESMC_600M_FLU_raw_alpha_sweep_fit_metrics.tsv", sep="\t", index=False)
+        alpha_df.assign(lineage="lin1").to_csv(model_tables_dir / "ESMC_600M_FLU_raw_alpha_sweep_fit_metrics_BY_LINEAGE.tsv", sep="\t", index=False)
 
         combined_df_ckpt = combined_df.copy()
         combined_df_ckpt["model"] = "ESMC_600M_FLU_checkpoint-10"
@@ -1113,6 +1236,7 @@ class TestRunAnalysisSmoke:
         alpha_df_ckpt["epoch_value"] = 1.0
         combined_df_ckpt.to_csv(model_tables_dir / "ESMC_600M_FLU_checkpoint-10_combined_long_table.csv", index=False)
         alpha_df_ckpt.to_csv(model_tables_dir / "ESMC_600M_FLU_checkpoint-10_alpha_sweep_fit_metrics.tsv", sep="\t", index=False)
+        alpha_df_ckpt.assign(lineage="lin1").to_csv(model_tables_dir / "ESMC_600M_FLU_checkpoint-10_alpha_sweep_fit_metrics_BY_LINEAGE.tsv", sep="\t", index=False)
 
         monkeypatch.setattr(rma, "build_lineage_cache", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not rebuild lineage cache")))
         monkeypatch.setattr(rma, "export_plots", lambda **kwargs: None)
