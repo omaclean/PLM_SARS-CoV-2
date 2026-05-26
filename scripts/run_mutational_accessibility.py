@@ -33,6 +33,16 @@ if str(REPO_ROOT) not in sys.path:
 IGNORE_ALIGNMENT_CHARS = {"-", "*", "."}
 STANDARD_AMINO_ACIDS = tuple("ACDEFGHIKLMNPQRSTVWY")
 PANEL_CACHE_VERSION = 3
+LOGISTIC_ALPHA_METRIC_COLUMNS = (
+    "site_logistic_mutated_corr",
+    "site_logistic_mutated_intercept",
+    "site_logistic_mutated_slope",
+    "site_logistic_tjur_r2",
+    "site_logistic_mcfadden_r2",
+    "site_logistic_brier_score",
+    "site_logistic_auroc",
+    "site_logistic_pr_auc",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,7 +52,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--analysis-mode",
         choices=("SINGLE_FASTA", "MONTHLY_GUIDE"),
-        required=True,
         help="Use a single diversity FASTA or a guide file describing many targets.",
     )
     parser.add_argument(
@@ -84,7 +93,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mutation-model",
         choices=("SC2", "H1N1", "H3N2"),
-        required=True,
         help="Nucleotide mutation model used to build codon accessibility probabilities.",
     )
     parser.add_argument(
@@ -223,9 +231,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Maximum diversity records processed per target in test mode.",
     )
+    parser.add_argument(
+        "--regen-figures-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Regenerate figures from existing tables in --output-dir without rebuilding cached PLM or alpha outputs.",
+    )
 
     plm_group = parser.add_argument_group("PLM source")
-    plm_source = plm_group.add_mutually_exclusive_group(required=True)
+    plm_source = plm_group.add_mutually_exclusive_group(required=False)
     plm_source.add_argument(
         "--precomputed-plm-path",
         type=Path,
@@ -277,6 +291,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if getattr(args, "regen_figures_only", False):
+        if args.output_dir is None:
+            raise ValueError("--output-dir is required when --regen-figures-only is used")
+        return
+
+    if args.analysis_mode is None:
+        raise ValueError("--analysis-mode is required unless --regen-figures-only is used")
+    if args.mutation_model is None:
+        raise ValueError("--mutation-model is required unless --regen-figures-only is used")
+
     if args.analysis_mode == "SINGLE_FASTA":
         if args.diversity_fasta is None:
             raise ValueError("--diversity-fasta is required for SINGLE_FASTA mode")
@@ -1509,6 +1533,32 @@ def safe_auroc(score_values: pd.Series, binary_outcome: pd.Series) -> float:
     return float((pos_rank_sum - (n_pos * (n_pos + 1) / 2.0)) / (n_pos * n_neg))
 
 
+def safe_pr_auc(score_values: pd.Series, binary_outcome: pd.Series) -> float:
+    scores = np.asarray(score_values, dtype=float)
+    outcome = np.asarray(binary_outcome, dtype=float)
+    valid = np.isfinite(scores) & np.isfinite(outcome)
+    if valid.sum() < 2:
+        return np.nan
+    scores = scores[valid]
+    outcome = outcome[valid]
+    pos_mask = outcome > 0.5
+    n_pos = int(np.sum(pos_mask))
+    n_neg = int(np.sum(~pos_mask))
+    if n_pos == 0 or n_neg == 0:
+        return np.nan
+
+    order = np.argsort(-scores, kind="mergesort")
+    y_sorted = outcome[order] > 0.5
+    tp = np.cumsum(y_sorted, dtype=float)
+    fp = np.cumsum(~y_sorted, dtype=float)
+    precision = tp / np.maximum(tp + fp, 1.0)
+    recall = tp / float(n_pos)
+    precision_at_hits = precision[y_sorted]
+    recall_at_hits = recall[y_sorted]
+    recall_prev = np.concatenate(([0.0], recall_at_hits[:-1]))
+    return float(np.sum((recall_at_hits - recall_prev) * precision_at_hits))
+
+
 def fit_logistic_site_correlation(score_values: pd.Series, binary_outcome: pd.Series) -> Tuple[float, float, float]:
     from scipy.optimize import minimize
     from scipy.special import expit
@@ -1640,6 +1690,7 @@ def compute_site_logistic_metrics(
         "site_logistic_mcfadden_r2": float(feature_result.get("logistic_mcfadden_r2", np.nan)),
         "site_logistic_brier_score": float(feature_result.get("logistic_brier_score", np.nan)),
         "site_logistic_auroc": float(feature_result.get("logistic_auroc", np.nan)),
+        "site_logistic_pr_auc": float(feature_result.get("logistic_pr_auc", np.nan)),
     }
 
 
@@ -1663,6 +1714,7 @@ def compute_mutation_row_logistic_metrics(
         "site_logistic_mcfadden_r2": float(feature_result.get("logistic_mcfadden_r2", np.nan)),
         "site_logistic_brier_score": float(feature_result.get("logistic_brier_score", np.nan)),
         "site_logistic_auroc": float(feature_result.get("logistic_auroc", np.nan)),
+        "site_logistic_pr_auc": float(feature_result.get("logistic_pr_auc", np.nan)),
     }
 
 
@@ -1821,20 +1873,113 @@ def evaluate_logistic_alpha_sweep_by_lineage(
                     feature_name="combined_score",
                 )
             except Exception:
-                logistic_row = {
-                    "site_logistic_mutated_corr": np.nan,
-                    "site_logistic_mutated_intercept": np.nan,
-                    "site_logistic_mutated_slope": np.nan,
-                    "site_logistic_tjur_r2": np.nan,
-                    "site_logistic_mcfadden_r2": np.nan,
-                    "site_logistic_brier_score": np.nan,
-                    "site_logistic_auroc": np.nan,
-                }
+                logistic_row = {metric_col: np.nan for metric_col in LOGISTIC_ALPHA_METRIC_COLUMNS}
             logistic_row["lineage"] = lineage_name
             logistic_row["alpha"] = float(alpha_value)
             logistic_rows.append(logistic_row)
 
     return pd.DataFrame(logistic_rows)
+
+
+def _coerce_numeric_series(values: pd.Series) -> pd.Series:
+    cleaned = values.replace(r"^\s*$", np.nan, regex=True)
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def _merge_logistic_alpha_metrics(
+    alpha_by_lineage_df: pd.DataFrame,
+    logistic_alpha_by_lineage_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if alpha_by_lineage_df.empty or logistic_alpha_by_lineage_df.empty:
+        return alpha_by_lineage_df
+
+    merge_keys = [
+        key for key in ["model", "epoch_label", "epoch_value", "lineage", "alpha"]
+        if key in alpha_by_lineage_df.columns and key in logistic_alpha_by_lineage_df.columns
+    ]
+    if "lineage" not in merge_keys or "alpha" not in merge_keys:
+        return alpha_by_lineage_df
+
+    merged = alpha_by_lineage_df.copy()
+    target_mask = merged["model_variant"].astype(str).eq("plm_alpha_sweep") if "model_variant" in merged.columns else merged["alpha"].notna()
+    if not target_mask.any():
+        return merged
+
+    target_rows = merged.loc[target_mask].copy()
+    target_rows["__row_id__"] = target_rows.index
+    logistic_payload = logistic_alpha_by_lineage_df.loc[:, merge_keys + list(LOGISTIC_ALPHA_METRIC_COLUMNS)].copy()
+    target_rows = target_rows.merge(logistic_payload, on=merge_keys, how="left", suffixes=("", "_logistic"))
+
+    for metric_col in LOGISTIC_ALPHA_METRIC_COLUMNS:
+        existing_values = _coerce_numeric_series(target_rows[metric_col]) if metric_col in target_rows.columns else pd.Series(np.nan, index=target_rows.index, dtype=float)
+        logistic_values = _coerce_numeric_series(target_rows[f"{metric_col}_logistic"]) if f"{metric_col}_logistic" in target_rows.columns else pd.Series(np.nan, index=target_rows.index, dtype=float)
+        target_rows[metric_col] = existing_values.where(existing_values.notna(), logistic_values)
+
+    merged.loc[target_rows["__row_id__"], list(LOGISTIC_ALPHA_METRIC_COLUMNS)] = target_rows.loc[:, list(LOGISTIC_ALPHA_METRIC_COLUMNS)].to_numpy()
+    return merged
+
+
+def _alpha_table_has_complete_logistic_metrics(alpha_df: pd.DataFrame) -> bool:
+    if alpha_df.empty:
+        return True
+    if any(metric_col not in alpha_df.columns for metric_col in LOGISTIC_ALPHA_METRIC_COLUMNS):
+        return False
+
+    for metric_col in LOGISTIC_ALPHA_METRIC_COLUMNS:
+        if _coerce_numeric_series(alpha_df[metric_col]).isna().any():
+            return False
+    return True
+
+
+def _build_alpha_tables_from_combined(
+    model_combined_df: pd.DataFrame,
+    alpha_grid: np.ndarray,
+    *,
+    model_label: str,
+    model_spec: Dict[str, object],
+    parallel: bool = False,
+    max_workers: Optional[int] = None,
+    alpha_sweep_min_grid: int = 10,
+    pseudocount: float = 1e-16,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    alpha_by_lineage_df = evaluate_alpha_sweep_by_lineage(
+        model_combined_df,
+        alpha_grid,
+        parallel=parallel,
+        max_workers=max_workers,
+        alpha_sweep_min_grid=alpha_sweep_min_grid,
+        pseudocount=pseudocount,
+    )
+    if alpha_by_lineage_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    alpha_by_lineage_df["model"] = model_label
+    alpha_by_lineage_df["epoch_label"] = model_spec["epoch_label"]
+    alpha_by_lineage_df["epoch_value"] = float(model_spec["epoch_value"])
+    logistic_alpha_by_lineage_df = evaluate_logistic_alpha_sweep_by_lineage(
+        model_combined_df,
+        alpha_grid,
+    )
+    if not logistic_alpha_by_lineage_df.empty:
+        logistic_alpha_by_lineage_df["model"] = model_label
+        logistic_alpha_by_lineage_df["epoch_label"] = model_spec["epoch_label"]
+        logistic_alpha_by_lineage_df["epoch_value"] = float(model_spec["epoch_value"])
+        alpha_by_lineage_df = _merge_logistic_alpha_metrics(alpha_by_lineage_df, logistic_alpha_by_lineage_df)
+
+    alpha_df = summarize_lineage_metric_table(
+        alpha_by_lineage_df,
+        group_cols=[
+            "model",
+            "epoch_label",
+            "epoch_value",
+            "alpha",
+            "alpha_label",
+            "model_variant",
+            "is_mutation_only_baseline",
+            "input_score_formula",
+        ],
+    )
+    return alpha_df, alpha_by_lineage_df
 
 
 def fit_logistic_feature_model(
@@ -1854,6 +1999,7 @@ def fit_logistic_feature_model(
         "logistic_tjur_r2": np.nan,
         "logistic_fitted_prob_corr": np.nan,
         "logistic_auroc": np.nan,
+        "logistic_pr_auc": np.nan,
         "logistic_mcfadden_r2": np.nan,
         "logistic_brier_score": np.nan,
         "logistic_log_likelihood": np.nan,
@@ -1970,6 +2116,7 @@ def fit_logistic_feature_model(
     tjur_r2 = float(np.mean(fitted_probs[pos_mask]) - np.mean(fitted_probs[neg_mask])) if pos_mask.any() and neg_mask.any() else np.nan
     fitted_prob_corr = float(np.corrcoef(fitted_probs, y)[0, 1]) if np.std(fitted_probs) > 0 and np.std(y) > 0 else np.nan
     auroc = safe_auroc(pd.Series(fitted_probs), pd.Series(y))
+    pr_auc = safe_pr_auc(pd.Series(fitted_probs), pd.Series(y))
 
     result.update(
         {
@@ -1977,6 +2124,7 @@ def fit_logistic_feature_model(
             "logistic_tjur_r2": tjur_r2,
             "logistic_fitted_prob_corr": fitted_prob_corr,
             "logistic_auroc": auroc,
+            "logistic_pr_auc": pr_auc,
             "logistic_mcfadden_r2": float(1.0 - (best_nll / null_nll)) if np.isfinite(null_nll) and null_nll > 0 else np.nan,
             "logistic_brier_score": float(np.mean(np.square(y - fitted_probs))),
             "logistic_log_likelihood": float(-best_nll),
@@ -2530,6 +2678,7 @@ def export_plots(
 
         if metric_col in {
             "site_logistic_auroc",
+            "site_logistic_pr_auc",
             "site_logistic_tjur_r2",
             "site_logistic_mcfadden_r2",
             "site_logistic_brier_score",
@@ -2703,6 +2852,7 @@ def export_plots(
                             "site_logistic_mcfadden_r2": np.nan,
                             "site_logistic_brier_score": np.nan,
                             "site_logistic_auroc": np.nan,
+                            "site_logistic_pr_auc": np.nan,
                         }
                     logistic_row["alpha"] = float(alpha_value)
                     logistic_row["lineage"] = lineage_name
@@ -2728,6 +2878,7 @@ def export_plots(
                 "site_logistic_mcfadden_r2": np.nan,
                 "site_logistic_brier_score": np.nan,
                 "site_logistic_auroc": np.nan,
+                "site_logistic_pr_auc": np.nan,
             }
 
         lineage_rows: List[Dict[str, object]] = []
@@ -2748,6 +2899,7 @@ def export_plots(
                 "site_logistic_mcfadden_r2": np.nan,
                 "site_logistic_brier_score": np.nan,
                 "site_logistic_auroc": np.nan,
+                "site_logistic_pr_auc": np.nan,
             }
         return summarize_lineage_metric_table(pd.DataFrame(lineage_rows), group_cols=[]).iloc[0].to_dict()
 
@@ -2786,6 +2938,7 @@ def export_plots(
                 "site_logistic_mcfadden_r2",
                 "site_logistic_brier_score",
                 "site_logistic_auroc",
+                "site_logistic_pr_auc",
             ]:
                 selected_alpha_df[metric_col] = np.nan
             return selected_alpha_df
@@ -2887,6 +3040,7 @@ def export_plots(
         output_name: str = "alpha_sweep_metrics_selected.png",
         logistic_output_name: Optional[str] = None,
         note_style: str = "matrix",
+        logistic_summary_metric_col: str = "site_logistic_auroc",
     ) -> None:
         if plot_frame.empty or alpha_frame.empty:
             return
@@ -2906,7 +3060,7 @@ def export_plots(
         plot_metric_cols = [
             metric_col for metric_col in [
                 "mut_flat_global_spearman_r",
-                "site_logistic_auroc",
+                logistic_summary_metric_col,
                 "mut_flat_nonzero_pearson_r",
             ]
             if metric_col in focused_alpha_df.columns
@@ -2916,15 +3070,18 @@ def export_plots(
 
         fig, axes = plt.subplots(1, len(plot_metric_cols), figsize=(6 * len(plot_metric_cols), 6.4), sharex=True)
         axes = np.array(axes, dtype=object).reshape(-1)
+        selected_axis_label_fontsize = label_fontsize + 2
         title_map = {
-            "mut_flat_global_spearman_r": "Spearman(PLM vs observed freq)\nmean across lineages",
-            "mut_flat_nonzero_pearson_r": "Pearson(PLM vs observed freq)\nmean across lineages",
-            "site_logistic_auroc": "Logistic regression AUROC\nmean across lineages",
+            "mut_flat_global_spearman_r": "Spearman(PLM vs all possible AA freq)",
+            "mut_flat_nonzero_pearson_r": "Pearson(PLM vs observed non-zero freq)",
+            "site_logistic_auroc": "Logistic regression AUROC",
+            "site_logistic_pr_auc": "Logistic regression PR-AUC",
         }
         ylabel_map = {
             "mut_flat_global_spearman_r": "Spearman r",
             "mut_flat_nonzero_pearson_r": "Pearson r",
             "site_logistic_auroc": "AUROC",
+            "site_logistic_pr_auc": "PR-AUC",
         }
 
         epoch_groups = (
@@ -2994,6 +3151,13 @@ def export_plots(
             finite_y = np.asarray([value for value in metric_y_values if np.isfinite(value)], dtype=float)
             if metric_col == "site_logistic_auroc":
                 ax.set_ylim(0.48, 1.0)
+            elif metric_col == "site_logistic_pr_auc":
+                if finite_y.size:
+                    y_top = float(np.max(finite_y))
+                    pad = 0.05 if np.isclose(y_top, 0.0) else max(0.02, y_top * 0.08)
+                    ax.set_ylim(0.0, y_top + pad)
+                else:
+                    ax.set_ylim(0.0, 0.1)
             elif finite_y.size:
                 raw_y_min = float(np.min(finite_y))
                 y_top = float(np.max(finite_y))
@@ -3005,11 +3169,14 @@ def export_plots(
                 ax.set_ylim(y_bottom, y_top + pad)
             ax.grid(alpha=0.3)
             _style_axis_text(ax, is_alpha_x=True)
+            ax.xaxis.label.set_size(selected_axis_label_fontsize)
+            ax.yaxis.label.set_size(selected_axis_label_fontsize)
             ax.tick_params(axis="both", which="major", labelsize=selected_tick_fontsize)
 
         logistic_metric_cols = [
             metric_col for metric_col in [
                 "site_logistic_auroc",
+                "site_logistic_pr_auc",
                 "site_logistic_tjur_r2",
                 "site_logistic_mcfadden_r2",
                 "site_logistic_brier_score",
@@ -3020,6 +3187,7 @@ def export_plots(
         if logistic_metric_cols:
             logistic_title_map = {
                 "site_logistic_auroc": "AUROC",
+                "site_logistic_pr_auc": "PR-AUC",
                 "site_logistic_tjur_r2": "Tjur R2",
                 "site_logistic_mcfadden_r2": "McFadden R2",
                 "site_logistic_brier_score": "Brier score",
@@ -3027,6 +3195,7 @@ def export_plots(
             }
             logistic_ylabel_map = {
                 "site_logistic_auroc": "AUROC",
+                "site_logistic_pr_auc": "PR-AUC",
                 "site_logistic_tjur_r2": "Tjur R2",
                 "site_logistic_mcfadden_r2": "McFadden R2",
                 "site_logistic_brier_score": "Brier score",
@@ -3067,12 +3236,34 @@ def export_plots(
                         color="#9b2226",
                         bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 1.5},
                     )
+                elif metric_col == "site_logistic_pr_auc":
+                    positive_rate = float(mutation_only_metrics.get("logistic_positive_rate", np.nan)) if mutation_only_metrics is not None else np.nan
+                    if np.isfinite(positive_rate):
+                        ax.axhline(positive_rate, color="#9b2226", linestyle=":", linewidth=1.4, alpha=0.9)
+                        ax.text(
+                            0.98,
+                            0.04,
+                            f"baseline = prevalence ({positive_rate:.3f})",
+                            transform=ax.transAxes,
+                            ha="right",
+                            va="bottom",
+                            fontsize=max(9, selected_tick_fontsize - 2),
+                            color="#9b2226",
+                            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 1.5},
+                        )
                 ax.set_title(_append_sample_note(f"Logistic regression:\n{logistic_title_map[metric_col]}", _sample_note_for_metric(metric_col, plot_frame, note_style=note_style)))
                 ax.set_xlabel(alpha_xlabel)
                 ax.set_ylabel(logistic_ylabel_map[metric_col])
                 finite_y = np.asarray([value for value in metric_y_values if np.isfinite(value)], dtype=float)
                 if metric_col == "site_logistic_auroc":
                     ax.set_ylim(0.48, 1.0)
+                elif metric_col == "site_logistic_pr_auc":
+                    if finite_y.size:
+                        y_top = float(np.max(finite_y))
+                        pad = 0.05 if np.isclose(y_top, 0.0) else max(0.02, y_top * 0.08)
+                        ax.set_ylim(0.0, y_top + pad)
+                    else:
+                        ax.set_ylim(0.0, 0.1)
                 elif finite_y.size:
                     raw_y_min = float(np.min(finite_y))
                     y_top = float(np.max(finite_y))
@@ -3084,24 +3275,26 @@ def export_plots(
                     ax.set_ylim(y_bottom, y_top + pad)
                 ax.grid(alpha=0.3)
                 _style_axis_text(ax, is_alpha_x=True)
+                ax.xaxis.label.set_size(selected_axis_label_fontsize)
+                ax.yaxis.label.set_size(selected_axis_label_fontsize)
                 ax.tick_params(axis="both", which="major", labelsize=selected_tick_fontsize)
             for ax in logistic_axes[len(logistic_metric_cols):]:
                 ax.axis("off")
             logistic_handles, logistic_labels = _collect_axes_legend_entries(logistic_axes)
             if logistic_handles:
-                logistic_fig.legend(logistic_handles, logistic_labels, loc="upper center", bbox_to_anchor=(0.5, 0.96), ncol=max(1, min(4, len(logistic_handles))), frameon=False, fontsize=selected_legend_fontsize, markerscale=1.5)
-            logistic_fig.suptitle(f"{title_prefix}\nLogistic alpha-sweep metrics", y=0.99)
+                logistic_fig.legend(logistic_handles, logistic_labels, loc="upper center", bbox_to_anchor=(0.5, 0.955), ncol=max(1, min(4, len(logistic_handles))), frameon=False, fontsize=selected_legend_fontsize, markerscale=1.5)
+            logistic_fig.suptitle(f"{title_prefix} | Mean across lineages | Logistic alpha-sweep metrics", y=0.985)
             logistic_fig._suptitle.set_fontsize(title_fontsize + 4)
-            plt.tight_layout(rect=(0, 0, 1, 0.92))
+            plt.tight_layout(rect=(0, 0, 1, 0.935))
             plt.savefig(target_dir / (logistic_output_name or "alpha_sweep_logistic_metrics_selected.png"), dpi=300)
             plt.close(logistic_fig)
 
         handles, labels = _collect_axes_legend_entries(axes)
         if handles:
-            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.94), ncol=max(1, min(4, len(handles))), frameon=False, fontsize=selected_legend_fontsize, markerscale=1.5)
-        fig.suptitle(title_prefix, y=0.985)
+            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.955), ncol=max(1, min(4, len(handles))), frameon=False, fontsize=selected_legend_fontsize, markerscale=1.5)
+        fig.suptitle(f"{title_prefix} | Mean across lineages", y=0.985)
         fig._suptitle.set_fontsize(title_fontsize + 4)
-        plt.tight_layout(rect=(0, 0, 1, 0.90))
+        plt.tight_layout(rect=(0, 0, 1, 0.935))
         output_path = target_dir / output_name
         plt.savefig(output_path, dpi=300)
         plt.savefig(output_path.with_suffix(".pdf"))
@@ -3776,9 +3969,27 @@ def export_plots(
                 model_combined_df,
                 model_alpha_df,
                 title_prefix=f"Focused alpha-sweep metrics ({model_label})",
+                output_name="alpha_sweep_metrics_selected_pr_auc.png",
+                logistic_summary_metric_col="site_logistic_pr_auc",
+            )
+            _write_selected_alpha_sweep_plot(
+                model_plot_dir,
+                model_combined_df,
+                model_alpha_df,
+                title_prefix=f"Focused alpha-sweep metrics ({model_label})",
                 output_name="alpha_sweep_metrics_selected_mutation_counts.png",
                 logistic_output_name="alpha_sweep_logistic_metrics_selected_mutation_counts.png",
                 note_style="counts",
+            )
+            _write_selected_alpha_sweep_plot(
+                model_plot_dir,
+                model_combined_df,
+                model_alpha_df,
+                title_prefix=f"Focused alpha-sweep metrics ({model_label})",
+                output_name="alpha_sweep_metrics_selected_mutation_counts_pr_auc.png",
+                logistic_output_name="alpha_sweep_logistic_metrics_selected_mutation_counts.png",
+                note_style="counts",
+                logistic_summary_metric_col="site_logistic_pr_auc",
             )
             _write_hurdle_alpha_outputs(
                 model_plot_dir,
@@ -3827,9 +4038,27 @@ def export_plots(
                     comparison_combined_df,
                     comparison_alpha_df,
                     title_prefix=f"Focused alpha-sweep metrics ({raw_model_label} vs {latest_model_label})",
+                    output_name="alpha_sweep_metrics_selected_with_raw_pr_auc.png",
+                    logistic_summary_metric_col="site_logistic_pr_auc",
+                )
+                _write_selected_alpha_sweep_plot(
+                    latest_plot_dir,
+                    comparison_combined_df,
+                    comparison_alpha_df,
+                    title_prefix=f"Focused alpha-sweep metrics ({raw_model_label} vs {latest_model_label})",
                     output_name="alpha_sweep_metrics_selected_with_raw_mutation_counts.png",
                     logistic_output_name="alpha_sweep_logistic_metrics_selected_with_raw_mutation_counts.png",
                     note_style="counts",
+                )
+                _write_selected_alpha_sweep_plot(
+                    latest_plot_dir,
+                    comparison_combined_df,
+                    comparison_alpha_df,
+                    title_prefix=f"Focused alpha-sweep metrics ({raw_model_label} vs {latest_model_label})",
+                    output_name="alpha_sweep_metrics_selected_with_raw_mutation_counts_pr_auc.png",
+                    logistic_output_name="alpha_sweep_logistic_metrics_selected_with_raw_mutation_counts.png",
+                    note_style="counts",
+                    logistic_summary_metric_col="site_logistic_pr_auc",
                 )
 
         _write_selected_alpha_sweep_plot(
@@ -3843,9 +4072,27 @@ def export_plots(
             combined_df,
             alpha_df,
             title_prefix="Focused alpha-sweep metrics (all models)",
+            output_name="alpha_sweep_metrics_selected_pr_auc.png",
+            logistic_summary_metric_col="site_logistic_pr_auc",
+        )
+        _write_selected_alpha_sweep_plot(
+            output_dir,
+            combined_df,
+            alpha_df,
+            title_prefix="Focused alpha-sweep metrics (all models)",
             output_name="alpha_sweep_metrics_selected_mutation_counts.png",
             logistic_output_name="alpha_sweep_logistic_metrics_selected_mutation_counts.png",
             note_style="counts",
+        )
+        _write_selected_alpha_sweep_plot(
+            output_dir,
+            combined_df,
+            alpha_df,
+            title_prefix="Focused alpha-sweep metrics (all models)",
+            output_name="alpha_sweep_metrics_selected_mutation_counts_pr_auc.png",
+            logistic_output_name="alpha_sweep_logistic_metrics_selected_mutation_counts.png",
+            note_style="counts",
+            logistic_summary_metric_col="site_logistic_pr_auc",
         )
         _write_hurdle_alpha_outputs(
             output_dir,
@@ -3999,6 +4246,54 @@ def export_plots(
         )
 
 
+def _regenerate_figures_from_existing_tables(
+    args: argparse.Namespace,
+    *,
+    tables_dir: Path,
+    plots_dir: Path,
+    existing_panel_metadata_df: pd.DataFrame,
+) -> int:
+    combined_path = tables_dir / "combined_long_table.csv"
+    if not combined_path.exists():
+        raise RuntimeError(f"Cannot regenerate figures: missing combined table at {combined_path}")
+
+    combined_df = pd.read_csv(combined_path)
+    alpha_path = tables_dir / "alpha_sweep_fit_metrics.tsv"
+    alpha_df = pd.read_csv(alpha_path, sep="\t") if alpha_path.exists() else pd.DataFrame()
+    epoch_summary_path = tables_dir / "epoch_metric_summary.tsv"
+    if epoch_summary_path.exists():
+        epoch_summary_df = pd.read_csv(epoch_summary_path, sep="\t")
+    else:
+        epoch_summary_df = summarize_epoch_metrics(compute_epoch_lineage_metrics(combined_df))
+
+    lineage_cache = _build_lightweight_lineage_cache_from_metadata(existing_panel_metadata_df)
+    if not lineage_cache and "lineage" in combined_df.columns:
+        lineage_cache = {
+            str(lineage_name): {"n_sequences": 0, "diversity_path": "", "reference_path": ""}
+            for lineage_name in combined_df["lineage"].dropna().astype(str).unique().tolist()
+        }
+
+    max_depth = pd.to_numeric(combined_df.get("depth"), errors="coerce").max() if "depth" in combined_df.columns else np.nan
+    if np.isfinite(max_depth) and max_depth > 0:
+        dynamic_pseudocount = float(10 ** -round(np.log10(10 * max(1, max_depth))))
+    else:
+        dynamic_pseudocount = 1e-16
+
+    export_plots(
+        output_dir=plots_dir,
+        combined_df=combined_df,
+        alpha_df=alpha_df,
+        epoch_summary_df=epoch_summary_df,
+        scatter_alphas=parse_scatter_alphas(args.scatter_alphas),
+        scatter_max_points=args.scatter_max_points,
+        lineage_cache=lineage_cache,
+        dynamic_pseudocount=dynamic_pseudocount,
+        mutation_baseline_x=args.mutation_baseline_x,
+        metrics_output_dir=tables_dir,
+    )
+    return 0
+
+
 def run_analysis(args: argparse.Namespace) -> int:
     from Functions_HuggingFace import build_codon_aa_mutation_tables, evaluate_alpha_sweep
 
@@ -4010,9 +4305,17 @@ def run_analysis(args: argparse.Namespace) -> int:
     plots_dir = ensure_dir(output_dir / "plots")
     model_tables_dir = ensure_dir(tables_dir / "per_model")
 
-    model_specs = build_model_specs(args)
     existing_panel_metadata_path = tables_dir / "panel_metadata.tsv"
     existing_panel_metadata_df = pd.read_csv(existing_panel_metadata_path, sep="\t") if existing_panel_metadata_path.exists() else pd.DataFrame()
+    if getattr(args, "regen_figures_only", False):
+        return _regenerate_figures_from_existing_tables(
+            args,
+            tables_dir=tables_dir,
+            plots_dir=plots_dir,
+            existing_panel_metadata_df=existing_panel_metadata_df,
+        )
+
+    model_specs = build_model_specs(args)
     cache_version_matches = (
         not existing_panel_metadata_df.empty
         and (
@@ -4079,6 +4382,24 @@ def run_analysis(args: argparse.Namespace) -> int:
             alpha_by_lineage_path = model_tables_dir / f"{model_label}_alpha_sweep_fit_metrics_BY_LINEAGE.tsv"
             if alpha_by_lineage_path.exists():
                 alpha_by_lineage_df = pd.read_csv(alpha_by_lineage_path, sep="\t")
+            if (
+                alpha_by_lineage_df.empty
+                or not _alpha_table_has_complete_logistic_metrics(alpha_df)
+                or not _alpha_table_has_complete_logistic_metrics(alpha_by_lineage_df)
+            ):
+                alpha_df, alpha_by_lineage_df = _build_alpha_tables_from_combined(
+                    model_combined_df,
+                    alpha_grid,
+                    model_label=model_label,
+                    model_spec=model_spec,
+                    parallel=use_parallel,
+                    max_workers=args.alpha_sweep_max_workers,
+                    alpha_sweep_min_grid=args.alpha_sweep_min_grid,
+                    pseudocount=1e-16,
+                )
+                alpha_df.to_csv(model_tables_dir / f"{model_label}_alpha_sweep_fit_metrics.tsv", sep="\t", index=False)
+                if not alpha_by_lineage_df.empty:
+                    alpha_by_lineage_df.to_csv(alpha_by_lineage_path, sep="\t", index=False)
             warn_on_excess_mutation_rows(
                 model_combined_df,
                 context_label=f"cached combined table ({model_label})",
@@ -4191,52 +4512,15 @@ def run_analysis(args: argparse.Namespace) -> int:
             if alpha_by_lineage_df.empty:
                 alpha_df = pd.DataFrame()
             else:
-                alpha_by_lineage_df["model"] = model_label
-                alpha_by_lineage_df["epoch_label"] = model_spec["epoch_label"]
-                alpha_by_lineage_df["epoch_value"] = float(model_spec["epoch_value"])
-                logistic_alpha_by_lineage_df = evaluate_logistic_alpha_sweep_by_lineage(
+                alpha_df, alpha_by_lineage_df = _build_alpha_tables_from_combined(
                     model_combined_df,
                     alpha_grid,
-                )
-                if not logistic_alpha_by_lineage_df.empty:
-                    logistic_alpha_by_lineage_df["model"] = model_label
-                    logistic_alpha_by_lineage_df["epoch_label"] = model_spec["epoch_label"]
-                    logistic_alpha_by_lineage_df["epoch_value"] = float(model_spec["epoch_value"])
-                    alpha_by_lineage_df = alpha_by_lineage_df.merge(
-                        logistic_alpha_by_lineage_df,
-                        on=["model", "epoch_label", "epoch_value", "lineage", "alpha"],
-                        how="left",
-                    )
-                    for metric_col in [
-                        "site_logistic_mutated_corr",
-                        "site_logistic_mutated_intercept",
-                        "site_logistic_mutated_slope",
-                        "site_logistic_tjur_r2",
-                        "site_logistic_mcfadden_r2",
-                        "site_logistic_brier_score",
-                        "site_logistic_auroc",
-                    ]:
-                        left_col = f"{metric_col}_x"
-                        right_col = f"{metric_col}_y"
-                        if left_col in alpha_by_lineage_df.columns or right_col in alpha_by_lineage_df.columns:
-                            left_values = alpha_by_lineage_df[left_col] if left_col in alpha_by_lineage_df.columns else np.nan
-                            right_values = alpha_by_lineage_df[right_col] if right_col in alpha_by_lineage_df.columns else np.nan
-                            alpha_by_lineage_df[metric_col] = pd.Series(left_values).where(pd.Series(left_values).notna(), pd.Series(right_values))
-                            drop_cols = [col for col in [left_col, right_col] if col in alpha_by_lineage_df.columns]
-                            if drop_cols:
-                                alpha_by_lineage_df = alpha_by_lineage_df.drop(columns=drop_cols)
-                alpha_df = summarize_lineage_metric_table(
-                    alpha_by_lineage_df,
-                    group_cols=[
-                        "model",
-                        "epoch_label",
-                        "epoch_value",
-                        "alpha",
-                        "alpha_label",
-                        "model_variant",
-                        "is_mutation_only_baseline",
-                        "input_score_formula",
-                    ],
+                    model_label=model_label,
+                    model_spec=model_spec,
+                    parallel=use_parallel,
+                    max_workers=args.alpha_sweep_max_workers,
+                    alpha_sweep_min_grid=args.alpha_sweep_min_grid,
+                    pseudocount=1e-16,
                 )
                 all_alpha_lineage_frames.append(alpha_by_lineage_df)
                 alpha_by_lineage_df.to_csv(model_tables_dir / f"{model_label}_alpha_sweep_fit_metrics_BY_LINEAGE.tsv", sep="\t", index=False)

@@ -453,6 +453,7 @@ def _make_args(**overrides):
         force_recompute_plm=False,
         gpu_required=True,
         mutation_baseline_x=-2.0,
+        regen_figures_only=False,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -494,6 +495,19 @@ class TestValidateArgs:
         args = _make_args(alpha_step=0.0)
         with pytest.raises(ValueError, match="--alpha-step must be > 0"):
             rma.validate_args(args)
+
+    def test_regen_figures_only_skips_model_validation(self):
+        args = _make_args(
+            analysis_mode=None,
+            mutation_model=None,
+            model_tag=None,
+            base_model=None,
+            model_layer=None,
+            checkpoint_dir=None,
+            regen_figures_only=True,
+        )
+
+        rma.validate_args(args)
 
 
 class TestParsingHelpers:
@@ -927,9 +941,82 @@ class TestMetricSummaries:
 
         assert list(logistic_df["alpha"]) == [0.0, 1.0]
         assert logistic_df["site_logistic_auroc"].notna().all()
+        assert logistic_df["site_logistic_pr_auc"].notna().all()
 
 
 class TestRunAnalysisSmoke:
+    def test_run_analysis_regen_figures_only_uses_existing_tables(self, tmp_path, monkeypatch):
+        output_dir = tmp_path / "out"
+        tables_dir = output_dir / "tables"
+        plots_dir = output_dir / "plots"
+        tables_dir.mkdir(parents=True)
+        plots_dir.mkdir(parents=True)
+
+        combined_df = pd.DataFrame(
+            [
+                {"model": "toy", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.8, "mut_prob": 0.6, "obs_freq": 0.3, "obs_present": 1, "depth": 10.0},
+                {"model": "toy", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "G", "plm_prob": 0.2, "mut_prob": 0.2, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+            ]
+        )
+        alpha_df = pd.DataFrame(
+            [
+                {
+                    "model": "toy",
+                    "epoch_label": "raw_model",
+                    "epoch_value": 0.0,
+                    "alpha": 0.0,
+                    "alpha_label": "0",
+                    "model_variant": "plm_alpha_sweep",
+                    "is_mutation_only_baseline": False,
+                    "input_score_formula": "plm_prob * mut_prob^alpha",
+                    "site_logistic_auroc": 0.8,
+                    "site_logistic_pr_auc": 0.7,
+                }
+            ]
+        )
+        epoch_summary_df = pd.DataFrame(
+            [
+                {"model": "toy", "epoch_label": "raw_model", "epoch_value": 0.0, "n_lineages": 1}
+            ]
+        )
+        panel_metadata = pd.DataFrame(
+            [
+                {"lineage": "lin1", "n_sequences": 2, "diversity_fasta": "diversity.fasta", "reference_fasta": "reference.fa"}
+            ]
+        )
+        combined_df.to_csv(tables_dir / "combined_long_table.csv", index=False)
+        alpha_df.to_csv(tables_dir / "alpha_sweep_fit_metrics.tsv", sep="\t", index=False)
+        epoch_summary_df.to_csv(tables_dir / "epoch_metric_summary.tsv", sep="\t", index=False)
+        panel_metadata.to_csv(tables_dir / "panel_metadata.tsv", sep="\t", index=False)
+
+        captured = {}
+
+        def fake_export_plots(**kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(rma, "export_plots", fake_export_plots)
+        monkeypatch.setattr(rma, "build_lineage_cache", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not rebuild lineage cache")))
+
+        args = _make_args(
+            output_dir=output_dir,
+            analysis_mode=None,
+            mutation_model=None,
+            model_tag=None,
+            base_model=None,
+            model_layer=None,
+            checkpoint_dir=None,
+            regen_figures_only=True,
+        )
+
+        result = rma.run_analysis(args)
+
+        assert result == 0
+        assert captured["output_dir"] == plots_dir
+        pd.testing.assert_frame_equal(captured["combined_df"], combined_df)
+        assert list(captured["alpha_df"].columns) == list(alpha_df.columns)
+        assert float(captured["alpha_df"].iloc[0]["site_logistic_auroc"]) == pytest.approx(0.8)
+        assert float(captured["alpha_df"].iloc[0]["site_logistic_pr_auc"]) == pytest.approx(0.7)
+
     def test_run_analysis_writes_expected_outputs(self, tmp_path, monkeypatch):
         output_dir = tmp_path / "out"
         args = _make_args(output_dir=output_dir, checkpoint_dir=tmp_path / "checkpoints")
@@ -1202,8 +1289,10 @@ class TestRunAnalysisSmoke:
 
         combined_df = pd.DataFrame(
             [
-                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.2, "mut_prob": 0.4, "obs_freq": 0.4, "obs_present": 1, "depth": 10.0},
-                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 2, "ref_aa": "A", "aa": "C", "plm_prob": 0.1, "mut_prob": 0.2, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.90, "mut_prob": 0.80, "obs_freq": 0.40, "obs_present": 1, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "G", "plm_prob": 0.70, "mut_prob": 0.60, "obs_freq": 0.25, "obs_present": 1, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 2, "ref_aa": "A", "aa": "C", "plm_prob": 0.20, "mut_prob": 0.30, "obs_freq": 0.00, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 2, "ref_aa": "A", "aa": "G", "plm_prob": 0.10, "mut_prob": 0.20, "obs_freq": 0.00, "obs_present": 0, "depth": 10.0},
             ]
         )
         alpha_df = pd.DataFrame(
@@ -1244,6 +1333,9 @@ class TestRunAnalysisSmoke:
         result = rma.run_analysis(args)
 
         assert result == 0
+        alpha_table = pd.read_csv(output_dir / "tables" / "alpha_sweep_fit_metrics.tsv", sep="\t")
+        assert alpha_table["site_logistic_auroc"].notna().all()
+        assert alpha_table["site_logistic_pr_auc"].notna().all()
         status_df = pd.read_csv(output_dir / "tables" / "model_run_status.tsv", sep="\t")
         cached_rows = status_df.loc[
             (status_df["lineage"] == "all")
