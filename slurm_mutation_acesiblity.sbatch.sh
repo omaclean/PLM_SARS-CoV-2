@@ -11,8 +11,21 @@
 
 set -euo pipefail
 
+REGEN_FIGURES_ONLY=false
+for arg in "$@"; do
+  case "$arg" in
+    --regen-figures-only|--regen_figures_only)
+      REGEN_FIGURES_ONLY=true
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      exit 1
+      ;;
+  esac
+done
+
 WORKDIR=/home3/oml4h/PLM_SARS-CoV-2
-ENV_PREFIX=/projects/u6dr/OM/envs/plm_entropy
+ENV_PREFIX=/home3/oml4h/miniconda3/envs/plm_entropy
 JOB_ID=${SLURM_JOB_ID:-manual}
 
 GUIDE_PATH='/home3/oml4h/PLM_SARS-CoV-2/Sequences/IAV_lineage_guide.csv'
@@ -77,6 +90,7 @@ echo "output_dir=${OUTPUT_DIR}"
 echo "model_tag=${MODEL_TAG}"
 echo "base_model_name=${BASE_MODEL_NAME}"
 echo "model_layer=${MODEL_LAYER}"
+echo "regen_figures_only=${REGEN_FIGURES_ONLY}"
 echo "log_dir=${LOG_DIR}"
 echo "hostname=$(hostname)  nodelist=${SLURM_NODELIST:-manual}"
 
@@ -86,16 +100,14 @@ if command -v scontrol >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then
   scontrol show job "${SLURM_JOB_ID}" > "${LOG_DIR}/slurm_job.txt" 2>&1 || true
 fi
 
-# if command -v conda >/dev/null 2>&1; then
-#   source "$(conda info --base)/etc/profile.d/conda.sh"
-# else
-#   echo "conda command not found in PATH" >&2
-#   exit 1
-# fi
-
-#PYTHON_CMD=(conda run -p "${ENV_PREFIX}" --no-capture-output python)
-
-PYTHON_CMD=(python)
+if [[ -x "${ENV_PREFIX}/bin/python" ]]; then
+  PYTHON_CMD=("${ENV_PREFIX}/bin/python")
+elif command -v conda >/dev/null 2>&1; then
+  PYTHON_CMD=(conda run -p "${ENV_PREFIX}" --no-capture-output python)
+else
+  echo "Warning: ${ENV_PREFIX}/bin/python not found and conda is unavailable; falling back to PATH python" >&2
+  PYTHON_CMD=(python)
+fi
 export TOKENIZERS_PARALLELISM=false
 export PYTHONFAULTHANDLER=1
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
@@ -145,7 +157,11 @@ if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
 fi
 
 {
-  printf 'conda run -p %q --no-capture-output python %q' "${ENV_PREFIX}" "/home3/oml4h/PLM_SARS-CoV-2/scripts/run_mutational_accessibility.py"
+  printf '%q' "${PYTHON_CMD[0]}"
+  for arg in "${PYTHON_CMD[@]:1}"; do
+    printf ' %q' "$arg"
+  done
+  printf ' %q' "/home3/oml4h/PLM_SARS-CoV-2/scripts/run_mutational_accessibility.py"
   printf ' --analysis-mode %q' "MONTHLY_GUIDE"
   printf ' --guide-path %q' "${GUIDE_PATH}"
   printf ' --mutation-model %q' "H3N2"
@@ -155,19 +171,29 @@ fi
   printf ' --base-model %q' "${BASE_MODEL_NAME}"
   printf ' --model-layer %q' "${MODEL_LAYER}"
   printf ' --checkpoint-dir %q' "${CHECKPOINT_ROOT}"
+  if [[ "${REGEN_FIGURES_ONLY}" == "true" ]]; then
+    printf ' --regen-figures-only'
+  fi
   printf '\n'
 } > "${LOG_DIR}/command.txt"
 
-"${PYTHON_CMD[@]}" /home3/oml4h/PLM_SARS-CoV-2/scripts/run_mutational_accessibility.py \
-  --analysis-mode MONTHLY_GUIDE \
-  --guide-path "${GUIDE_PATH}" \
-  --mutation-model H3N2 \
-  --output-dir "${OUTPUT_DIR}" \
-  --expect-protein-diversity \
-  --model-tag "${MODEL_TAG}" \
-  --base-model "${BASE_MODEL_NAME}" \
-  --model-layer "${MODEL_LAYER}" \
-  --checkpoint-dir "${CHECKPOINT_ROOT}" \
-  2>&1 | tee -a "${RUN_LOG}"
+RUN_ARGS=(
+  /home3/oml4h/PLM_SARS-CoV-2/scripts/run_mutational_accessibility.py
+  --analysis-mode MONTHLY_GUIDE
+  --guide-path "${GUIDE_PATH}"
+  --mutation-model H3N2
+  --output-dir "${OUTPUT_DIR}"
+  --expect-protein-diversity
+  --model-tag "${MODEL_TAG}"
+  --base-model "${BASE_MODEL_NAME}"
+  --model-layer "${MODEL_LAYER}"
+  --checkpoint-dir "${CHECKPOINT_ROOT}"
+)
+
+if [[ "${REGEN_FIGURES_ONLY}" == "true" ]]; then
+  RUN_ARGS+=(--regen-figures-only)
+fi
+
+"${PYTHON_CMD[@]}" "${RUN_ARGS[@]}" 2>&1 | tee -a "${RUN_LOG}"
 
 echo "[$(date -Is)] Mutational accessibility job finished"

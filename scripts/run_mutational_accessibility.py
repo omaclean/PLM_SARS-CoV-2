@@ -2527,7 +2527,7 @@ def export_plots(
     from matplotlib.ticker import FuncFormatter, NullLocator
     from scipy.special import expit
     from scipy.stats import spearmanr
-    from Functions_HuggingFace import evaluate_alpha_sweep
+    from Functions_HuggingFace import evaluate_alpha_sweep, get_ranked_mutations
 
     metrics_output_dir = ensure_dir(Path(metrics_output_dir) if metrics_output_dir is not None else output_dir)
     alpha_xlabel = "mutational accessibility weighting Alpha\n(mut_acc^alpha) 0= PLM only"
@@ -3815,6 +3815,17 @@ def export_plots(
         plt.close()
 
     def _write_plm_vs_mut_outputs(target_dir: Path, plot_frame: pd.DataFrame, title_prefix: str) -> None:
+        def _plm_vs_mut_title_text(prefix_text: str, frame: pd.DataFrame) -> str:
+            if "all models" in str(prefix_text).lower():
+                return "PLM vs mutation probability"
+
+            model_name = str(frame.iloc[0]["model"]) if not frame.empty and "model" in frame.columns and pd.notna(frame.iloc[0]["model"]) else ""
+            if model_name == "ESM2_650M_HA80_raw":
+                return "PLM vs mutation probability: ESM2_650M"
+
+            clean_name = re.sub(r"(?:_raw| raw)$", "", model_name).strip("_ ") if model_name else ""
+            return f"PLM vs mutation probability: {clean_name}" if clean_name else str(prefix_text)
+
         target_dir = ensure_dir(target_dir)
         id_cols = [
             col for col in [
@@ -3873,16 +3884,200 @@ def export_plots(
         ax.set_xscale("log")
         ax.set_yscale("log")
         _hide_log_minor_ticks(ax)
-        ax.set_xlabel("PLM Probability")
-        ax.set_ylabel("Mutation Probability")
+        ax.set_xlabel("PLM Probability", fontsize=label_fontsize + 2)
+        ax.set_ylabel("Mutation Probability", fontsize=label_fontsize + 2)
         ax.set_title(
-            f"{title_prefix}\n"
+            f"{_plm_vs_mut_title_text(title_prefix, plot_frame)}\n"
             f"Spearman ρ(plm_prob, mut_prob)={rho:.3f}; "
             f"Pearson r(plm_prob, mut_prob)={pearson_r:.3f}"
         )
         ax.grid(True, which="major", ls="--", alpha=0.4)
         fig.tight_layout()
         export_publication_figure(target_dir / "plm_vs_mut_prob_scatter.png", figure=fig)
+        plt.close(fig)
+
+    def _load_reference_protein_from_path(reference_path: object) -> Optional[str]:
+        if reference_path is None or pd.isna(reference_path):
+            return None
+        path = Path(str(reference_path))
+        if not path.exists():
+            return None
+        records = list(SeqIO.parse(str(path), "fasta"))
+        if not records:
+            return None
+        sequence_text = str(records[0].seq).strip().upper()
+        ungapped_text = sequence_text.replace("-", "")
+        if not ungapped_text:
+            return None
+        if set(ungapped_text) <= {"A", "C", "G", "T", "U", "N"}:
+            return str(records[0].seq.translate(to_stop=True)).strip().upper()
+        return sequence_text
+
+    def _lineage_reference_mutations(
+        focal_ref_seq: str,
+        comparison_ref_seq: str,
+    ) -> List[Tuple[int, str]]:
+        if not focal_ref_seq or not comparison_ref_seq:
+            return []
+        aligner = Align.PairwiseAligner()
+        aligner.mode = "global"
+        aligner.match_score = 2.0
+        aligner.mismatch_score = -1.0
+        aligner.open_gap_score = -1.0
+        aligner.extend_gap_score = -0.5
+        alignment = next(iter(aligner.align(focal_ref_seq, comparison_ref_seq)), None)
+        if alignment is None:
+            return []
+        aligned_focal, aligned_comparison = str(alignment[0]), str(alignment[1])
+        mutations: List[Tuple[int, str]] = []
+        focal_pos = -1
+        for focal_char, comparison_char in zip(aligned_focal, aligned_comparison):
+            if focal_char != "-":
+                focal_pos += 1
+            if focal_char == "-" or comparison_char == "-":
+                continue
+            if focal_char != comparison_char:
+                mutations.append((focal_pos, comparison_char))
+        return mutations
+
+    def _write_lineage_comparison_ranked_plot(
+        target_dir: Path,
+        model_df: pd.DataFrame,
+        model_label: object,
+        focal_lineage: str = "J.2_int",
+        comparison_lineage: str = "K",
+        comparison_title_label: str = "K lineage (J.2.4.1)",
+    ) -> None:
+        required_cols = {"lineage", "position", "ref_aa", "aa", "plm_prob", "mut_prob"}
+        if model_df.empty or not required_cols.issubset(model_df.columns):
+            return
+        if focal_lineage not in lineage_cache or comparison_lineage not in lineage_cache:
+            return
+
+        focal_df = model_df.loc[model_df["lineage"].astype(str) == focal_lineage].copy()
+        if focal_df.empty:
+            return
+
+        focal_positions_df = (
+            focal_df.loc[:, ["position", "ref_aa"]]
+            .drop_duplicates()
+            .sort_values("position")
+        )
+        if focal_positions_df.empty:
+            return
+        focal_positions = focal_positions_df["position"].tolist()
+        focal_ref_seq = "".join(focal_positions_df["ref_aa"].astype(str).tolist())
+        comparison_ref_seq = _load_reference_protein_from_path(lineage_cache[comparison_lineage].get("reference_path"))
+        if not comparison_ref_seq:
+            return
+
+        highlighted_mutations = _lineage_reference_mutations(focal_ref_seq, comparison_ref_seq)
+        if not highlighted_mutations:
+            return
+
+        plm_matrix = (
+            focal_df.pivot_table(index="aa", columns="position", values="plm_prob", aggfunc="first")
+            .reindex(columns=focal_positions)
+            .sort_index()
+        )
+        mut_matrix = (
+            focal_df.pivot_table(index="aa", columns="position", values="mut_prob", aggfunc="first")
+            .reindex(columns=focal_positions)
+            .sort_index()
+        )
+        if plm_matrix.empty or mut_matrix.empty:
+            return
+
+        model_display_label = _plm_epoch_label(
+            focal_df.iloc[0]["epoch_label"] if "epoch_label" in focal_df.columns else str(model_label),
+            focal_df.iloc[0]["epoch_value"] if "epoch_value" in focal_df.columns else np.nan,
+            model_name=model_label,
+            model_display_label=focal_df.iloc[0]["model_display_label"] if "model_display_label" in focal_df.columns else None,
+        )
+
+        def _add_mutation_labels(frame: pd.DataFrame) -> pd.DataFrame:
+            if frame.empty or "Mutation" in frame.columns or not {"Position", "AA"}.issubset(frame.columns):
+                return frame
+            labelled = frame.copy()
+            positions = pd.to_numeric(labelled["Position"], errors="coerce")
+            if positions.isna().any():
+                return labelled
+            position_values = positions.astype(int)
+            if ((position_values >= 1) & (position_values <= len(focal_ref_seq))).all():
+                ref_indices = position_values - 1
+                display_positions = position_values
+            else:
+                ref_indices = position_values
+                display_positions = position_values + 1
+            fallback_labels = []
+            for ref_index, display_pos, aa in zip(ref_indices, display_positions, labelled["AA"]):
+                if 0 <= int(ref_index) < len(focal_ref_seq):
+                    fallback_labels.append(f"{focal_ref_seq[int(ref_index)]}{int(display_pos)}{aa}")
+                else:
+                    fallback_labels.append(f"?{int(display_pos)}{aa}")
+            labelled["Mutation"] = fallback_labels
+            return labelled
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5.8), sharey=True)
+        panel_specs = [
+            ("PLM probabilities", plm_matrix),
+            ("Mutation probabilities", mut_matrix),
+        ]
+        for ax, (panel_title, matrix) in zip(axes, panel_specs):
+            ranked_df, obs_df = get_ranked_mutations(matrix, focal_ref_seq, highlighted_mutations)
+            if ranked_df.empty:
+                ax.set_title(panel_title)
+                ax.set_xlabel("Rank (1 = highest probability)")
+                ax.set_ylabel("log10(probability)")
+                ax.grid(True, which="major", ls="-", alpha=0.2)
+                continue
+
+            ranked_df = _add_mutation_labels(ranked_df)
+            ranked_df["log10Probability"] = np.log10(np.clip(ranked_df["Probability"], 1e-32, None))
+            ax.plot(ranked_df["Rank"], ranked_df["log10Probability"], color="lightgray", linewidth=1.1)
+
+            if not obs_df.empty:
+                obs_df = _add_mutation_labels(obs_df)
+                obs_df["log10Probability"] = np.log10(np.clip(obs_df["Probability"], 1e-32, None))
+                ax.scatter(
+                    obs_df["Rank"],
+                    obs_df["log10Probability"],
+                    color="#d62728",
+                    s=24,
+                    zorder=5,
+                    label=f"{focal_lineage} -> {comparison_title_label}",
+                )
+                for _, row in obs_df.iterrows():
+                    ax.annotate(
+                        str(row["Mutation"]),
+                        (float(row["Rank"]), float(row["log10Probability"])),
+                        xytext=(3, 3),
+                        textcoords="offset points",
+                        fontsize=8,
+                        color="#8b0000",
+                    )
+
+            ax.set_title(panel_title)
+            ax.set_xlabel("Rank (1 = highest probability)")
+            ax.set_ylabel("log10(probability)")
+            ax.grid(True, which="major", ls="-", alpha=0.2)
+            _style_axis_text(ax)
+
+        handles, labels = _collect_axes_legend_entries(axes)
+        if handles:
+            fig.legend(
+                handles,
+                labels,
+                loc="upper center",
+                bbox_to_anchor=(0.5, 0.96),
+                ncol=1,
+                frameon=False,
+                fontsize=legend_fontsize,
+            )
+        fig.suptitle(f"{model_display_label} | {focal_lineage} vs {comparison_title_label}")
+        fig._suptitle.set_fontsize(title_fontsize + 2)
+        plt.tight_layout(rect=(0, 0, 1, 0.9))
+        export_publication_figure(target_dir / "ranked_mutations_j2_int_vs_k_lineage.png", figure=fig)
         plt.close(fig)
 
     if not combined_df.empty:
@@ -3899,6 +4094,7 @@ def export_plots(
                 model_df,
                 f"PLM vs mutation probability ({model_label})",
             )
+            _write_lineage_comparison_ranked_plot(model_plot_dir, model_df, model_label)
 
     if not alpha_df.empty:
         mutation_only_metrics = _compute_mutation_only_alpha_baseline(

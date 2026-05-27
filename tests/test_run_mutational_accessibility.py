@@ -662,9 +662,9 @@ class TestCheckpointDiscovery:
         args = _make_args(checkpoint_dir=checkpoint_dir, checkpoint_glob=None, model_tag="ESMC_600M_FLU")
         specs = rma.build_model_specs(args)
 
-        assert len(specs) == 1
-        assert specs[0]["epoch_label"] == "final_checkpoint"
-        assert specs[0]["checkpoint_dir"] == checkpoint_dir
+        assert [spec["epoch_label"] for spec in specs] == ["raw_model", "final_checkpoint"]
+        assert specs[0]["model_tag"] == "ESMC_600M_FLU_raw"
+        assert specs[1]["checkpoint_dir"] == checkpoint_dir
 
 
 class TestLoadDiversityRecords:
@@ -1101,6 +1101,11 @@ class TestRunAnalysisSmoke:
         assert "lineage" in alpha_by_lineage_table.columns
 
     def test_export_plots_writes_latest_checkpoint_focused_plot_with_raw(self, tmp_path, monkeypatch):
+        j2_ref = tmp_path / "J.2_int.nt.fa"
+        k_ref = tmp_path / "K.nt.fa"
+        write_fasta(j2_ref, [("J.2_int", "ATGGCTGAA")])
+        write_fasta(k_ref, [("K", "ATGTCTGAA")])
+
         def fake_evaluate_alpha_sweep(df, alpha_grid, **kwargs):
             return pd.DataFrame(
                 {
@@ -1110,14 +1115,52 @@ class TestRunAnalysisSmoke:
                 }
             )
 
-        _install_fake_functions_hf(monkeypatch, evaluate_alpha_sweep=fake_evaluate_alpha_sweep)
+        def fake_get_ranked_mutations(prob_matrix, ref_seq, obs_muts):
+            rows = []
+            for col_idx in range(prob_matrix.shape[1]):
+                ref_aa = ref_seq[col_idx]
+                for aa in prob_matrix.index:
+                    if aa == ref_aa:
+                        continue
+                    rows.append(
+                        {
+                            "Rank": 0,
+                            "Position": col_idx + 1,
+                            "AA": aa,
+                            "Probability": float(prob_matrix.iloc[prob_matrix.index.get_loc(aa), col_idx]),
+                        }
+                    )
+            ranked_df = pd.DataFrame(rows).sort_values("Probability", ascending=False).reset_index(drop=True)
+            ranked_df["Rank"] = np.arange(1, len(ranked_df) + 1)
+            obs_lookup = {(int(pos), str(aa)) for pos, aa in obs_muts}
+            obs_df = ranked_df.loc[
+                [
+                    (int(row["Position"]) - 1, str(row["AA"])) in obs_lookup
+                    for _, row in ranked_df.iterrows()
+                ]
+            ].copy()
+            return ranked_df, obs_df
+
+        _install_fake_functions_hf(
+            monkeypatch,
+            evaluate_alpha_sweep=fake_evaluate_alpha_sweep,
+            get_ranked_mutations=fake_get_ranked_mutations,
+        )
 
         combined_df = pd.DataFrame(
             [
                 {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.2, "mut_prob": 0.4, "obs_freq": 0.4, "obs_present": 1, "depth": 10.0},
                 {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "lin1", "position": 2, "ref_aa": "A", "aa": "C", "plm_prob": 0.1, "mut_prob": 0.2, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.7, "mut_prob": 0.6, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 2, "ref_aa": "A", "aa": "S", "plm_prob": 0.8, "mut_prob": 0.9, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 3, "ref_aa": "E", "aa": "A", "plm_prob": 0.2, "mut_prob": 0.3, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_raw", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "K", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.6, "mut_prob": 0.6, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
                 {"model": "ESMC_600M_FLU_final_checkpoint", "epoch_label": "final_checkpoint", "epoch_value": 1.0, "lineage": "lin1", "position": 1, "ref_aa": "A", "aa": "C", "plm_prob": 0.3, "mut_prob": 0.4, "obs_freq": 0.4, "obs_present": 1, "depth": 10.0},
                 {"model": "ESMC_600M_FLU_final_checkpoint", "epoch_label": "final_checkpoint", "epoch_value": 1.0, "lineage": "lin1", "position": 2, "ref_aa": "A", "aa": "C", "plm_prob": 0.2, "mut_prob": 0.2, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_final_checkpoint", "epoch_label": "final_checkpoint", "epoch_value": 1.0, "lineage": "J.2_int", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.75, "mut_prob": 0.55, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_final_checkpoint", "epoch_label": "final_checkpoint", "epoch_value": 1.0, "lineage": "J.2_int", "position": 2, "ref_aa": "A", "aa": "S", "plm_prob": 0.85, "mut_prob": 0.95, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_final_checkpoint", "epoch_label": "final_checkpoint", "epoch_value": 1.0, "lineage": "J.2_int", "position": 3, "ref_aa": "E", "aa": "A", "plm_prob": 0.25, "mut_prob": 0.35, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "ESMC_600M_FLU_final_checkpoint", "epoch_label": "final_checkpoint", "epoch_value": 1.0, "lineage": "K", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.6, "mut_prob": 0.6, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
             ]
         )
         alpha_df = pd.DataFrame(
@@ -1164,7 +1207,11 @@ class TestRunAnalysisSmoke:
             epoch_summary_df=pd.DataFrame(),
             scatter_alphas=[],
             scatter_max_points=100,
-            lineage_cache={"lin1": {"n_sequences": 2}},
+            lineage_cache={
+                "lin1": {"n_sequences": 2},
+                "J.2_int": {"n_sequences": 2, "reference_path": str(j2_ref)},
+                "K": {"n_sequences": 2, "reference_path": str(k_ref)},
+            },
             dynamic_pseudocount=1e-3,
             mutation_baseline_x=-2.0,
             metrics_output_dir=tmp_path / "metrics",
@@ -1177,6 +1224,7 @@ class TestRunAnalysisSmoke:
         assert (latest_plot_dir / "alpha_sweep_logistic_metrics_selected_mutation_counts.png").exists()
         assert (latest_plot_dir / "alpha_sweep_metrics_selected_with_raw.png").exists()
         assert (latest_plot_dir / "alpha_sweep_metrics_selected_with_raw_mutation_counts.png").exists()
+        assert (latest_plot_dir / "ranked_mutations_j2_int_vs_k_lineage.png").exists()
         assert (tmp_path / "alpha_sweep_logistic_metrics_selected.png").exists()
         assert (tmp_path / "alpha_sweep_logistic_metrics_selected_mutation_counts.png").exists()
         assert (tmp_path / "alpha_sweep_metrics_selected_mutation_counts.png").exists()
@@ -1207,6 +1255,132 @@ class TestRunAnalysisSmoke:
         logistic_report = pd.read_csv(tmp_path / "metrics" / "logistic_regression_comparison_report.tsv", sep="\t")
         assert {"standalone_binary_term", "hurdle_binary_term"}.issubset(set(logistic_report["framework"]))
         assert {"plm_prob", "mutation_accessibility"}.issubset(set(logistic_report["predictor"]))
+
+    def test_export_plots_lineage_comparison_plot_handles_helper_without_mutation_column(self, tmp_path, monkeypatch):
+        j2_ref = tmp_path / "J.2_int.nt.fa"
+        k_ref = tmp_path / "K.nt.fa"
+        write_fasta(j2_ref, [("J.2_int", "ATGGCTGAA")])
+        write_fasta(k_ref, [("K", "ATGTCTGAA")])
+
+        def fake_evaluate_alpha_sweep(df, alpha_grid, **kwargs):
+            return pd.DataFrame({"alpha": [0.0], "mut_flat_global_spearman_r": [0.2], "mut_flat_nonzero_pearson_r": [0.1]})
+
+        def fake_get_ranked_mutations(prob_matrix, ref_seq, obs_muts):
+            ranked_df = pd.DataFrame(
+                [
+                    {"Position": 1, "AA": "S", "Probability": 0.8, "Rank": 1},
+                    {"Position": 2, "AA": "C", "Probability": 0.3, "Rank": 2},
+                ]
+            )
+            obs_df = ranked_df.iloc[[0]].copy()
+            return ranked_df, obs_df
+
+        _install_fake_functions_hf(
+            monkeypatch,
+            evaluate_alpha_sweep=fake_evaluate_alpha_sweep,
+            get_ranked_mutations=fake_get_ranked_mutations,
+        )
+
+        combined_df = pd.DataFrame(
+            [
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.8, "mut_prob": 0.4, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 2, "ref_aa": "A", "aa": "C", "plm_prob": 0.3, "mut_prob": 0.5, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "K", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.7, "mut_prob": 0.6, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+            ]
+        )
+
+        rma.export_plots(
+            output_dir=tmp_path,
+            combined_df=combined_df,
+            alpha_df=pd.DataFrame(),
+            epoch_summary_df=pd.DataFrame(),
+            scatter_alphas=[],
+            scatter_max_points=100,
+            lineage_cache={
+                "J.2_int": {"n_sequences": 2, "reference_path": str(j2_ref)},
+                "K": {"n_sequences": 2, "reference_path": str(k_ref)},
+            },
+            dynamic_pseudocount=1e-3,
+            mutation_baseline_x=-2.0,
+            metrics_output_dir=tmp_path / "metrics",
+        )
+
+        assert (tmp_path / "per_model" / "m1" / "ranked_mutations_j2_int_vs_k_lineage.png").exists()
+
+    def test_export_plots_lineage_comparison_plot_skips_when_reference_missing(self, tmp_path, monkeypatch):
+        def fake_get_ranked_mutations(prob_matrix, ref_seq, obs_muts):
+            return pd.DataFrame([{"Position": 1, "AA": "S", "Probability": 0.8, "Rank": 1}]), pd.DataFrame()
+
+        _install_fake_functions_hf(
+            monkeypatch,
+            evaluate_alpha_sweep=lambda *a, **k: pd.DataFrame(),
+            get_ranked_mutations=fake_get_ranked_mutations,
+        )
+
+        combined_df = pd.DataFrame(
+            [
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.8, "mut_prob": 0.4, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "K", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.7, "mut_prob": 0.6, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+            ]
+        )
+
+        rma.export_plots(
+            output_dir=tmp_path,
+            combined_df=combined_df,
+            alpha_df=pd.DataFrame(),
+            epoch_summary_df=pd.DataFrame(),
+            scatter_alphas=[],
+            scatter_max_points=100,
+            lineage_cache={
+                "J.2_int": {"n_sequences": 2, "reference_path": str(tmp_path / "missing.fa")},
+                "K": {"n_sequences": 2, "reference_path": str(tmp_path / "missing_k.fa")},
+            },
+            dynamic_pseudocount=1e-3,
+            mutation_baseline_x=-2.0,
+            metrics_output_dir=tmp_path / "metrics",
+        )
+
+        assert not (tmp_path / "per_model" / "m1" / "ranked_mutations_j2_int_vs_k_lineage.png").exists()
+
+    def test_export_plots_lineage_comparison_plot_skips_when_no_highlighted_mutations(self, tmp_path, monkeypatch):
+        j2_ref = tmp_path / "J.2_int.nt.fa"
+        k_ref = tmp_path / "K.nt.fa"
+        write_fasta(j2_ref, [("J.2_int", "ATGGCTGAA")])
+        write_fasta(k_ref, [("K", "ATGGCTGAA")])
+
+        def fake_get_ranked_mutations(prob_matrix, ref_seq, obs_muts):
+            return pd.DataFrame([{"Position": 1, "AA": "S", "Probability": 0.8, "Rank": 1}]), pd.DataFrame()
+
+        _install_fake_functions_hf(
+            monkeypatch,
+            evaluate_alpha_sweep=lambda *a, **k: pd.DataFrame(),
+            get_ranked_mutations=fake_get_ranked_mutations,
+        )
+
+        combined_df = pd.DataFrame(
+            [
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.8, "mut_prob": 0.4, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "K", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.7, "mut_prob": 0.6, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+            ]
+        )
+
+        rma.export_plots(
+            output_dir=tmp_path,
+            combined_df=combined_df,
+            alpha_df=pd.DataFrame(),
+            epoch_summary_df=pd.DataFrame(),
+            scatter_alphas=[],
+            scatter_max_points=100,
+            lineage_cache={
+                "J.2_int": {"n_sequences": 2, "reference_path": str(j2_ref)},
+                "K": {"n_sequences": 2, "reference_path": str(k_ref)},
+            },
+            dynamic_pseudocount=1e-3,
+            mutation_baseline_x=-2.0,
+            metrics_output_dir=tmp_path / "metrics",
+        )
+
+        assert not (tmp_path / "per_model" / "m1" / "ranked_mutations_j2_int_vs_k_lineage.png").exists()
 
     def test_hurdle_alpha_sweep_summary_includes_expected_models(self):
         combined_df = pd.DataFrame(
