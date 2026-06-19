@@ -6,26 +6,24 @@ Layer-wise Representation Probe: Reconstructing PLANT 3D Coordinates from PLM/ES
 import sys
 sys.path.append("/home3/oml4h/PLM_SARS-CoV-2")
 
-# --- BULLETPROOF DESCRIPTOR PATCH FOR ESM TOKENIZER CONFLICTS ---
-from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
+# --- CONDITIONAL PATCH: ONLY APPLIES IF RUNNING ESM-C ---
+if any(x in "".join(sys.argv).lower() for x in ["esmc", "esm_c", "300m", "6b"]):
+    from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
 
-# 1. Override tokens with functional properties containing dummy setters
-tokens_to_patch = ["cls_token", "pad_token", "eos_token", "unk_token", "bos_token", "mask_token"]
-for attr in tokens_to_patch:
-    token_str = f"<{attr.split('_')[0]}>"
-    setattr(EsmSequenceTokenizer, attr, property(
-        fget=lambda self, t=token_str: t,
-        fset=lambda self, val: None
-    ))
+    tokens_to_patch = ["cls_token", "pad_token", "eos_token", "unk_token", "bos_token", "mask_token"]
+    for attr in tokens_to_patch:
+        token_str = f"<{attr.split('_')[0]}>"
+        setattr(EsmSequenceTokenizer, attr, property(
+            fget=lambda self, t=token_str: t,
+            fset=lambda self, val: None
+        ))
 
-# 2. Directly expose the token ID mappings to bypass the missing __getattr__ completely
-setattr(EsmSequenceTokenizer, "pad_token_id", property(lambda self: self._get_token_id("<pad>")))
-setattr(EsmSequenceTokenizer, "cls_token_id", property(lambda self: self._get_token_id("<cls>")))
-setattr(EsmSequenceTokenizer, "eos_token_id", property(lambda self: self._get_token_id("<eos>")))
-setattr(EsmSequenceTokenizer, "unk_token_id", property(lambda self: self._get_token_id("<unk>")))
-setattr(EsmSequenceTokenizer, "mask_token_id", property(lambda self: self._get_token_id("<mask>")))
-# ----------------------------------------------------------------
-
+    setattr(EsmSequenceTokenizer, "pad_token_id", property(lambda self: self._get_token_id("<pad>")))
+    setattr(EsmSequenceTokenizer, "cls_token_id", property(lambda self: self._get_token_id("<cls>")))
+    setattr(EsmSequenceTokenizer, "eos_token_id", property(lambda self: self._get_token_id("<eos>")))
+    setattr(EsmSequenceTokenizer, "unk_token_id", property(lambda self: self._get_token_id("<unk>")))
+    setattr(EsmSequenceTokenizer, "mask_token_id", property(lambda self: self._get_token_id("<mask>")))
+# --------------------------------------------------------
 
 from Functions_HuggingFace import embed_sequence, ESMCAlphabetWrapper
 
@@ -124,12 +122,12 @@ def main():
     # 2. Map Fallback Hub Proxies for Local Directory Discrepancies
     # -------------------------------------------------------------------------
     model_lower = args.model_name_or_path.lower()
-    is_esmc = "esmc" in model_lower or "evolutionaryscale" in model_lower
+    is_esmc = "esmc" in model_lower or "evolutionaryscale" in model_lower or "esm_c" in model_lower
     
-    if "300m" in model_lower:
-        fallback_hub_model = "EvolutionaryScale/esmc-300m-2024-12"
-    elif "6b" in model_lower or "600m" in model_lower:
+    if "6b" in model_lower:
         fallback_hub_model = "EvolutionaryScale/esmc-6b-2024-12"
+    elif "600m" in model_lower:
+        fallback_hub_model = "EvolutionaryScale/esmc-600m-2024-12"
     elif is_esmc:
         fallback_hub_model = "EvolutionaryScale/esmc-300m-2024-12"
     else:
@@ -141,56 +139,29 @@ def main():
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_type)
     print(f"Inference execution engine set to: {device}")
-    
-    model_lower = args.model_name_or_path.lower()
-    is_esmc = "esmc" in model_lower or "evolutionaryscale" in model_lower or "esm_c" in model_lower
-    
-    
+
     if is_esmc:
         from esm.models.esmc import ESMC
-        from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
         
-        # 1. Load the model
-        model = ESMC.from_pretrained(model_safe_name if "esmc" in model_safe_name else "esmc_300m").to(device)
+        if "6b" in model_lower:
+            target_variant = "esmc_6b"
+        elif "600m" in model_lower:
+            target_variant = "esmc_600m"
+        elif "300m" in model_lower or "esm_c_300m" in model_lower:
+            target_variant = "esmc_300m"
+        else:
+            raise ValueError(
+                f"CRITICAL CONFIG ERROR: Could not explicitly map your path "
+                f"'{args.model_name_or_path}' to a known ESM-C variant (esmc_300m, esmc_600m, esmc_6b). "
+                f"Execution halted to prevent invalid fallback benchmarks."
+            )
+            
+        print(f"Loading native ESM-C checkpoint strictly verified as: {target_variant}")
+        model = ESMC.from_pretrained(target_variant).to(device)
         
-        # 2. Build a stable, concrete tokenizer class that satisfies all requirements
-        class StableESMCTokenizer(EsmSequenceTokenizer):
-            @property
-            def pad_token_id(self):
-                return self._get_token_id("<pad>")
-            @property
-            def pad_token(self):
-                return "<pad>"
-            @property
-            def mask_token(self):
-                return "<mask>"
-            @property
-            def cls_token(self):
-                return "<cls>"
-            @property
-            def eos_token(self):
-                return "<eos>"
-            @property
-            def unk_token(self):
-                return "<unk>"
-                
-            # Mute the Hugging Face initialization mutations
-            def __setattr__(self, name, value):
-                if name in ["cls_token", "pad_token", "eos_token", "unk_token", "bos_token", "mask_token"]:
-                    return
-                super().__setattr__(name, value)
-
-        # 3. Instantiate it using the model's existing underlying vocabulary configuration
-        stable_tokenizer = StableESMCTokenizer()
-        
-        # 4. Force-inject it directly into the model to satisfy model._tokenize()
-        model.tokenizer = stable_tokenizer
-        
-        # 5. Connect it to your downstream pipeline components
-        alphabet = ESMCAlphabetWrapper(stable_tokenizer)
+        alphabet = ESMCAlphabetWrapper(model.tokenizer)
         batch_converter = alphabet.get_batch_converter()
     else:
-        # Standard HF/FAIR ESM Setup
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
         model = AutoModel.from_pretrained(args.model_name_or_path, output_hidden_states=True, trust_remote_code=True).to(device)
         alphabet = tokenizer
@@ -209,37 +180,37 @@ def main():
         
     print(f"Resolved model architecture parameters. Processing sequence truncation threshold at {plm_max_aa_length} AA.")
 
-   # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # 6 & 7. Sequence Processing and Representation Harvesting Loop
     # -------------------------------------------------------------------------
     print(f"Extracting layer hidden states for {len(sequences)} records via embed_sequence...")
     
-    # We need to find out how many layers the model has by running a single test probe
     test_res, _, _, _ = embed_sequence(sequences[0], model, device, model_layers=0, batch_converter=batch_converter, alphabet=alphabet)
     
-    # Hidden states are contained inside results wrapper
     if is_esmc:
         num_extracted_layers = len(test_res.hidden_states)
     else:
         num_extracted_layers = len(getattr(test_res, "hidden_states", test_res[2]))
 
-    # Initialize a dict of lists for each layer matrix
     layer_embeddings = {i: [] for i in range(num_extracted_layers)}
 
     for seq in sequences:
-        # Iterate over every layer systematically to collect layers for the downstream regression loop
-        for layer_idx in range(num_extracted_layers):
-            _, _, base_mean_embedding, _ = embed_sequence(
-                sequence=seq,
-                model=model,
-                device=device,
-                model_layers=layer_idx,
-                batch_converter=batch_converter,
-                alphabet=alphabet
-            )
-            layer_embeddings[layer_idx].append(base_mean_embedding.numpy())
-
-    # Convert lists to solid matrix configurations
+        # Assuming embed_sequence returns an object containing all hidden states
+        embeddings_all_layers, _, _, _ = embed_sequence(
+            sequence=seq,
+            model=model,
+            device=device,
+            model_layers=None, # Or pass structural parameter to get all layers
+            batch_converter=batch_converter,
+            alphabet=alphabet
+        )
+        
+        # Extract states from the returned object (adapt based on your custom function's return structure)
+        states = embeddings_all_layers.hidden_states if is_esmc else getattr(embeddings_all_layers, "hidden_states", embeddings_all_layers[2])
+    
+    for layer_idx in range(num_extracted_layers):
+        # Apply your pooling/mean logic here if embed_sequence does not do it per-layer automatically
+        layer_embeddings[layer_idx].append(states[layer_idx].detach().cpu().numpy())
     for layer_idx in layer_embeddings:
         layer_matrix = np.array(layer_embeddings[layer_idx])
         if not np.isfinite(layer_matrix).all():
