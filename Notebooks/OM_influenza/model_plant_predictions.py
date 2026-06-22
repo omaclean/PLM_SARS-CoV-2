@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Layer-wise Representation Probe: Reconstructing PLANT 3D Coordinates from PLM/ESM-C Layers
+Layer-wise Representation Probe: Pairwise Distance Correlation between PLM/ESM-C Layers and PLANT 3D Coordinates
 """
 import sys
 sys.path.append("/home3/oml4h/PLM_SARS-CoV-2")
@@ -35,13 +35,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer, AutoModel
-from sklearn.linear_model import Ridge
-from sklearn.model_selection import KFold, cross_validate
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
+from scipy.spatial.distance import pdist
+from scipy.stats import pearsonr, spearmanr
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Probe internal PLM/ESM-C layer representations via linear coordinate regression.")
+    parser = argparse.ArgumentParser(description="Probe internal PLM/ESM-C layer representations via pairwise distance correlation.")
     parser.add_argument(
         "--input_csv", 
         type=str, 
@@ -67,7 +67,7 @@ def parse_args():
         help="Directory where target tabular metrics and trajectory plots will be written."
     )
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for generating model hidden states.")
-    parser.add_argument("--num_folds", type=int, default=5, help="Number of splits for Cross-Validation.")
+    parser.add_argument("--num_folds", type=int, default=5, help="Retained for CLI compatibility; unused in distance calculation.")
     parser.add_argument("--random_seed", type=int, default=42, help="Random seed value for deterministic operations.")
     return parser.parse_args()
 
@@ -89,7 +89,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     
     model_safe_name = os.path.basename(args.model_name_or_path.rstrip("/"))
-    print(f"Initialising layer coordinate-regression pipeline for model: {args.model_name_or_path}")
+    print(f"Initialising layer distance-correlation pipeline for model: {args.model_name_or_path}")
     
     # -------------------------------------------------------------------------
     # 1. Load and Merge Datasets
@@ -116,23 +116,21 @@ def main():
             
     df = df.dropna(subset=["X", "Y", "Z", "seq"]).reset_index(drop=True)
     
-# -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # 2. Framework Routing and Architecture Initialisation
     # -------------------------------------------------------------------------
     model_lower = args.model_name_or_path.lower()
     is_esmc = "esmc" in model_lower or "evolutionaryscale" in model_lower or "esm_c" in model_lower
     
     is_6b = "6b" in model_lower
-    is_finetune = "checkpoint" in model_lower or "finetune" in model_lower
+    is_finetune = "checkpoint" in model_lower or "finetune" in model_lower or "my_sc2" in model_lower or "magma" in model_lower
     
-    # Route vanilla 300m/600m to native esm; route 6B and custom checkpoints to Hugging Face
     use_native_esmc = is_esmc and (not is_6b) and (not is_finetune)
 
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_type)
     print(f"Inference execution engine set to: {device}")
 
-    # Runtime Alias Injection: Prevents KeyError: 'esmc' on legacy transformers versions
     if (not use_native_esmc) and is_esmc:
         from transformers.models.auto.configuration_auto import CONFIG_MAPPING
         from transformers.models.auto.modeling_auto import MODEL_FOR_MASKED_LM_MAPPING
@@ -145,46 +143,98 @@ def main():
             MODEL_FOR_MASKED_LM_MAPPING[EsmConfig] = EsmForMaskedLM
 
     if not use_native_esmc:
-        print(f"Loading architecture via Hugging Face AutoModelForMaskedLM from: {args.model_name_or_path}")
-        from transformers import AutoModelForMaskedLM
+        import json
+        from transformers import EsmConfig, EsmForMaskedLM
         
-        # Safe Tokenizer resolution block to sidestep missing ESMCTokenizer definitions
+        num_layers, hidden_size, num_heads, max_pos, vocab_size = 33, 1280, 20, 1026, 64000
+        if is_esmc:
+            num_layers, hidden_size, num_heads, max_pos, vocab_size = 30, 960, 15, 2048, 33
+            if is_6b:
+                num_layers, hidden_size, num_heads = 80, 4096, 32
+            elif "600m" in model_lower:
+                num_layers, hidden_size, num_heads = 36, 1152, 18
+
+        config_file = os.path.join(args.model_name_or_path, "config.json")
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, "r") as f:
+                    cfg = json.load(f)
+                
+                def safe_int(val):
+                    if isinstance(val, (list, tuple)):
+                        val = val[0] if len(val) > 0 else 0
+                    return int(float(val))
+
+                if "num_layers" in cfg or "num_hidden_layers" in cfg or "layers" in cfg:
+                    num_layers = safe_int(cfg.get("num_layers", cfg.get("num_hidden_layers", cfg.get("layers"))))
+                if "d_model" in cfg or "hidden_size" in cfg:
+                    hidden_size = safe_int(cfg.get("d_model", cfg.get("hidden_size")))
+                if "num_heads" in cfg or "num_attention_heads" in cfg or "n_heads" in cfg:
+                    num_heads = safe_int(cfg.get("num_heads", cfg.get("num_attention_heads", cfg.get("n_heads"))))
+                if "max_position_embeddings" in cfg or "max_seq_len" in cfg:
+                    max_pos = safe_int(cfg.get("max_position_embeddings", cfg.get("max_seq_len")))
+                if "vocab_size" in cfg:
+                    vocab_size = safe_int(cfg.get("vocab_size"))
+            except Exception as e:
+                print(f"Warning: Could not read local config.json ({e}). Defaulting to safety parameters.")
+
         try:
             tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
             tokenizer.padding_idx = tokenizer.pad_token_id
             alphabet = tokenizer
             batch_converter = lambda x: (None, None, tokenizer([s for _, s in x], padding=True, return_tensors="pt")["input_ids"])
+            pad_token_id = tokenizer.pad_token_id
         except Exception as e:
-            # FIX 1: Access type(e).__name__ to avoid dumping the massive list of HF models to stdout
-            print(f"AutoTokenizer unresolvable ({type(e).__name__}). Defaulting to direct EsmSequenceTokenizer instantiation...")
+            print(f"AutoTokenizer unresolvable ({type(e).__name__}). Enforcing direct EsmSequenceTokenizer instantiation...")
             from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
             base_tokenizer = EsmSequenceTokenizer()
             base_tokenizer.padding_idx = base_tokenizer._get_token_id("<pad>")
-            
             alphabet = ESMCAlphabetWrapper(base_tokenizer)
             alphabet.padding_idx = base_tokenizer.padding_idx
             
-            # FIX 2: Implement manual batch converter to resolve the NoneType callable crash
             def manual_esm_batch_converter(batch):
-                # Extract sequence labels and raw strings from the format passed by embed_sequence
                 strs = [item[1] for item in batch]
                 labels = [item[0] for item in batch]
-                
-                # Vectorise sequences using the native tokenization rules
                 tokenized = [base_tokenizer.encode(s) for s in strs]
                 max_len = max(len(t) for t in tokenized)
                 pad_token = base_tokenizer._get_token_id("<pad>")
-                
-                # Construct padded matrices matching typical batch structures
                 padded_tokens = [t + [pad_token] * (max_len - len(t)) for t in tokenized]
                 return labels, strs, torch.tensor(padded_tokens, dtype=torch.long)
                 
             batch_converter = manual_esm_batch_converter
+            pad_token_id = base_tokenizer.padding_idx
+
+        hf_config = EsmConfig(
+            vocab_size=vocab_size,
+            num_hidden_layers=num_layers,
+            hidden_size=hidden_size,
+            num_attention_heads=num_heads,
+            max_position_embeddings=max_pos,
+            pad_token_id=pad_token_id,
+            output_hidden_states=True
+        )
+        hf_config.intermediate_size = 4 * hidden_size
+        
+        print(f"Loading model via explicit HF configuration scheme -> Layers: {num_layers}, Dimension: {hidden_size}, Vocab: {vocab_size}")
+
+        config_bak = config_file + ".bak"
+        has_config_to_hide = os.path.exists(config_file)
+        
+        if has_config_to_hide:
+            os.rename(config_file, config_bak)
             
-        model = AutoModelForMaskedLM.from_pretrained(args.model_name_or_path, output_hidden_states=True, trust_remote_code=True).to(device)
+        try:
+            model = EsmForMaskedLM.from_pretrained(
+                args.model_name_or_path, 
+                config=hf_config, 
+                trust_remote_code=True,
+                torch_dtype=torch.bfloat16 if device_type == "cuda" else torch.float32
+            ).to(device)
+        finally:
+            if has_config_to_hide:
+                os.rename(config_bak, config_file)
 
     else:
-        # Load vanilla ESM-C 300M or 600M checkpoints directly via the local native esm registry
         from esm.models.esmc import ESMC
         if "600m" in model_lower:
             target_variant = "esmc_600m"
@@ -198,6 +248,7 @@ def main():
         batch_converter = alphabet.get_batch_converter()
 
     model.eval()
+    
     # -------------------------------------------------------------------------
     # 3. Dynamic Sequence Length Extraction & Truncation Guard
     # -------------------------------------------------------------------------
@@ -220,17 +271,14 @@ def main():
     # -------------------------------------------------------------------------
     print(f"Extracting layer hidden states for {len(sequences)} records via embed_sequence...")
     
-    # Cold run to dynamically discover total model layer depth
     test_res, _, _, _ = embed_sequence(sequences[0], model, device, model_layers=0, batch_converter=batch_converter, alphabet=alphabet)
     
     if use_native_esmc:
         num_extracted_layers = len(test_res.hidden_states)
     else:
-        # Safe attribute verification to avoid eager tuple-indexing evaluation bugs
         if hasattr(test_res, "hidden_states") and test_res.hidden_states is not None:
             num_extracted_layers = len(test_res.hidden_states)
         elif isinstance(test_res, (tuple, list)):
-            # Route based on presence/absence of an evaluation loss element in the tuple
             num_extracted_layers = len(test_res[1]) if len(test_res) == 2 else len(test_res[2])
         else:
             raise ValueError("Could not dynamically resolve hidden_states from model output structure.")
@@ -247,7 +295,6 @@ def main():
             alphabet=alphabet
         )
         
-        # Isolate layer state references safely based on framework layout
         if use_native_esmc:
             states = embeddings_all_layers.hidden_states
         else:
@@ -282,75 +329,68 @@ def main():
         layer_embeddings[layer_idx] = layer_matrix
 
     print(f"Extracted feature matrices across {num_extracted_layers} distinct layers.")
+    
     # -------------------------------------------------------------------------
-    # 5. Layer-wise Linear Coordinate Regression Probing
+    # 5. Layer-wise Pairwise Distance Correlation Analysis
     # -------------------------------------------------------------------------
+    print("Computing pairwise Euclidean distances for target antigenic 3D coordinate space...")
+    # Computes compressed upper-triangular distance vector to avoid redundant pairings and self-distance zeros
+    flat_coords_dist = pdist(y_targets, metric="euclidean")
+    
     layer_metrics = []
     
+    print("Analysing pairwise representation distances across hidden layers...")
     for layer_idx in range(num_extracted_layers):
         X_features = layer_embeddings[layer_idx]
         
+        # Standardise representation vectors to ensure distance calculations are numerically stable
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X_features)
         
-        regressor = Ridge(alpha=1.0, random_state=args.random_seed)
-        kf_cv = KFold(n_splits=args.num_folds, shuffle=True, random_state=args.random_seed)
+        # Compute pairwise Euclidean distances in embedding space
+        flat_emb_dist = pdist(X_scaled, metric="euclidean")
         
-        cross_val_scores = cross_validate(
-            regressor, 
-            X_scaled, 
-            y_targets, 
-            cv=kf_cv, 
-            scoring=["r2", "neg_mean_squared_error"], 
-            n_jobs=-1
-        )
-        
-        mean_r2 = np.mean(cross_val_scores["test_r2"])
-        std_r2 = np.std(cross_val_scores["test_r2"])
-        mean_mse = -np.mean(cross_val_scores["test_neg_mean_squared_error"])
+        # Calculate linear (Pearson) and monotonic rank-based (Spearman) relationship matrices
+        p_corr, _ = pearsonr(flat_emb_dist, flat_coords_dist)
+        s_corr, _ = spearmanr(flat_emb_dist, flat_coords_dist)
         
         layer_metrics.append({
             "Layer": layer_idx,
-            "Mean_R2": mean_r2,
-            "Std_R2": std_r2,
-            "Mean_MSE": mean_mse
+            "Pearson_R": p_corr,
+            "Spearman_R": s_corr
         })
         
-        print(f"Layer {layer_idx:02d} | Mean CV R² Score: {mean_r2:.4f} | Mean MSE: {mean_mse:.4f}")
+        print(f"Layer {layer_idx:02d} | Pearson r: {p_corr:.4f} | Spearman rho: {s_corr:.4f}")
         
     # -------------------------------------------------------------------------
     # 6. Export Statistical Tables and Diagnostic Plots
     # -------------------------------------------------------------------------
     summary_df = pd.DataFrame(layer_metrics)
-    summary_export_path = os.path.join(args.output_dir, f"layer_coordinate_probe_metrics_{model_safe_name}.csv")
+    summary_export_path = os.path.join(args.output_dir, f"layer_distance_correlation_{model_safe_name}.csv")
     summary_df.to_csv(summary_export_path, index=False)
     print(f"Saved metric output tables to: {summary_export_path}")
     
-    optimal_row = summary_df.loc[summary_df["Mean_R2"].idxmax()]
+    # Identify optimal tracking layer based on maximal monotonic trend preservation
+    optimal_row = summary_df.loc[summary_df["Spearman_R"].idxmax()]
     print("-" * 80)
-    print(f"OPTIMAL COORDINATE RECONSTRUCTION LAYER IDENTIFIED FOR {model_safe_name}:")
-    print(f"Layer Index: {int(optimal_row['Layer'])} (Mean R²: {optimal_row['Mean_R2']:.4f})")
+    print(f"OPTIMAL GEOMETRIC DISTANCE CONGRUENCE LAYER IDENTIFIED FOR {model_safe_name}:")
+    print(f"Layer Index: {int(optimal_row['Layer'])} (Spearman rho: {optimal_row['Spearman_R']:.4f} | Pearson r: {optimal_row['Pearson_R']:.4f})")
     print("-" * 80)
     
     plt.figure(figsize=(11, 6))
-    plt.plot(summary_df["Layer"], summary_df["Mean_R2"], marker="o", linewidth=2, color="#2ca02c", label="Mean R² Score")
-    plt.fill_between(
-        summary_df["Layer"], 
-        summary_df["Mean_R2"] - summary_df["Std_R2"], 
-        summary_df["Mean_R2"] + summary_df["Std_R2"], 
-        alpha=0.15, 
-        color="#2ca02c"
-    )
+    plt.plot(summary_df["Layer"], summary_df["Pearson_R"], marker="o", linewidth=2, color="#1f77b4", label="Pearson r")
+    plt.plot(summary_df["Layer"], summary_df["Spearman_R"], marker="s", linewidth=2, color="#2ca02c", label="Spearman rho")
+    
     plt.axvline(x=optimal_row['Layer'], color="red", linestyle="--", alpha=0.7, label=f"Optimal Layer ({int(optimal_row['Layer'])})")
     
     plt.xlabel("Layer Index (Layer 0 = Input Token Embeddings)")
-    plt.ylabel(f"Standard {args.num_folds}-Fold Cross-Validation R² (Variance Explained)")
-    plt.title(f"Linear Recoverability of PLANT 3D Coordinates Across Model Layers\nModel: {model_safe_name}")
+    plt.ylabel("Pairwise Distance Correlation Coefficient")
+    plt.title(f"Geometric Congruence of PLM Hidden Spaces with PLANT 3D Coordinate Manifold\nModel: {model_safe_name}")
     plt.grid(True, linestyle=":", alpha=0.6)
     plt.legend(loc="lower right")
     plt.tight_layout()
     
-    plot_export_path = os.path.join(args.output_dir, f"layer_coordinate_trajectory_{model_safe_name}.png")
+    plot_export_path = os.path.join(args.output_dir, f"layer_distance_trajectory_{model_safe_name}.png")
     plt.savefig(plot_export_path, dpi=300)
     plt.close()
     print(f"Diagnostic plot successfully exported to: {plot_export_path}")
