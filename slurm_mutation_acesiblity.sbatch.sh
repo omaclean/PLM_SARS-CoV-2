@@ -12,10 +12,14 @@
 set -euo pipefail
 
 REGEN_FIGURES_ONLY=false
+FORCE_RECOMPUTE_PLM=false
 for arg in "$@"; do
   case "$arg" in
     --regen-figures-only|--regen_figures_only)
       REGEN_FIGURES_ONLY=true
+      ;;
+    --force-recompute-plm|--force_recompute_plm)
+      FORCE_RECOMPUTE_PLM=true
       ;;
     *)
       echo "Unknown argument: $arg" >&2
@@ -91,6 +95,7 @@ echo "model_tag=${MODEL_TAG}"
 echo "base_model_name=${BASE_MODEL_NAME}"
 echo "model_layer=${MODEL_LAYER}"
 echo "regen_figures_only=${REGEN_FIGURES_ONLY}"
+echo "force_recompute_plm=${FORCE_RECOMPUTE_PLM}"
 echo "log_dir=${LOG_DIR}"
 echo "hostname=$(hostname)  nodelist=${SLURM_NODELIST:-manual}"
 
@@ -174,6 +179,9 @@ fi
   if [[ "${REGEN_FIGURES_ONLY}" == "true" ]]; then
     printf ' --regen-figures-only'
   fi
+  if [[ "${FORCE_RECOMPUTE_PLM}" == "true" ]]; then
+    printf ' --force-recompute-plm'
+  fi
   printf '\n'
 } > "${LOG_DIR}/command.txt"
 
@@ -192,6 +200,10 @@ RUN_ARGS=(
 
 if [[ "${REGEN_FIGURES_ONLY}" == "true" ]]; then
   RUN_ARGS+=(--regen-figures-only)
+fi
+
+if [[ "${FORCE_RECOMPUTE_PLM}" == "true" ]]; then
+  RUN_ARGS+=(--force-recompute-plm)
 fi
 
 "${PYTHON_CMD[@]}" "${RUN_ARGS[@]}" 2>&1 | tee -a "${RUN_LOG}"

@@ -12,7 +12,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import csv
 from matplotlib.colors import LogNorm
-from matplotlib.ticker import NullLocator
+from matplotlib.ticker import LogLocator, NullLocator
 from scipy.stats import pearsonr, spearmanr
 from adjustText import adjust_text
 
@@ -432,6 +432,8 @@ def _hide_log_minor_ticks(ax):
     ax.xaxis.set_minor_locator(NullLocator())
     ax.yaxis.set_minor_locator(NullLocator())
     ax.tick_params(axis="both", which="minor", bottom=False, top=False, left=False, right=False)
+    ax.xaxis.set_major_locator(LogLocator(base=100.0, subs=(1.0,), numticks=100))
+    ax.yaxis.set_major_locator(LogLocator(base=100.0, subs=(1.0,), numticks=100))
 
 # --- Main Execution Functions ---
 

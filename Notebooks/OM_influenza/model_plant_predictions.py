@@ -146,9 +146,9 @@ def main():
         import json
         from transformers import EsmConfig, EsmForMaskedLM
         
-        num_layers, hidden_size, num_heads, max_pos, vocab_size = 33, 1280, 20, 1026, 64000
+        num_layers, hidden_size, num_heads, max_pos, vocab_size = 33, 1280, 20, 1026, 33
         if is_esmc:
-            num_layers, hidden_size, num_heads, max_pos, vocab_size = 30, 960, 15, 2048, 33
+            num_layers, hidden_size, num_heads, max_pos, vocab_size = 30, 960, 15, 2048, 64000
             if is_6b:
                 num_layers, hidden_size, num_heads = 80, 4096, 32
             elif "600m" in model_lower:
@@ -185,24 +185,35 @@ def main():
             batch_converter = lambda x: (None, None, tokenizer([s for _, s in x], padding=True, return_tensors="pt")["input_ids"])
             pad_token_id = tokenizer.pad_token_id
         except Exception as e:
-            print(f"AutoTokenizer unresolvable ({type(e).__name__}). Enforcing direct EsmSequenceTokenizer instantiation...")
-            from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
-            base_tokenizer = EsmSequenceTokenizer()
-            base_tokenizer.padding_idx = base_tokenizer._get_token_id("<pad>")
-            alphabet = ESMCAlphabetWrapper(base_tokenizer)
-            alphabet.padding_idx = base_tokenizer.padding_idx
-            
-            def manual_esm_batch_converter(batch):
-                strs = [item[1] for item in batch]
-                labels = [item[0] for item in batch]
-                tokenized = [base_tokenizer.encode(s) for s in strs]
-                max_len = max(len(t) for t in tokenized)
-                pad_token = base_tokenizer._get_token_id("<pad>")
-                padded_tokens = [t + [pad_token] * (max_len - len(t)) for t in tokenized]
-                return labels, strs, torch.tensor(padded_tokens, dtype=torch.long)
+            if not is_esmc:
+                print(f"AutoTokenizer failed for {args.model_name_or_path} ({type(e).__name__}). Falling back to 'facebook/esm2_t33_650M_UR50D' tokenizer...")
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D", trust_remote_code=True)
+                    tokenizer.padding_idx = tokenizer.pad_token_id
+                    alphabet = tokenizer
+                    batch_converter = lambda x: (None, None, tokenizer([s for _, s in x], padding=True, return_tensors="pt")["input_ids"])
+                    pad_token_id = tokenizer.pad_token_id
+                except Exception as e2:
+                    raise RuntimeError(f"Failed to load fallback ESM2 tokenizer: {e2}") from e
+            else:
+                print(f"AutoTokenizer unresolvable ({type(e).__name__}). Enforcing direct EsmSequenceTokenizer instantiation...")
+                from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
+                base_tokenizer = EsmSequenceTokenizer()
+                base_tokenizer.padding_idx = base_tokenizer._get_token_id("<pad>")
+                alphabet = ESMCAlphabetWrapper(base_tokenizer)
+                alphabet.padding_idx = base_tokenizer.padding_idx
                 
-            batch_converter = manual_esm_batch_converter
-            pad_token_id = base_tokenizer.padding_idx
+                def manual_esm_batch_converter(batch):
+                    strs = [item[1] for item in batch]
+                    labels = [item[0] for item in batch]
+                    tokenized = [base_tokenizer.encode(s) for s in strs]
+                    max_len = max(len(t) for t in tokenized)
+                    pad_token = base_tokenizer._get_token_id("<pad>")
+                    padded_tokens = [t + [pad_token] * (max_len - len(t)) for t in tokenized]
+                    return labels, strs, torch.tensor(padded_tokens, dtype=torch.long)
+                    
+                batch_converter = manual_esm_batch_converter
+                pad_token_id = base_tokenizer.padding_idx
 
         hf_config = EsmConfig(
             vocab_size=vocab_size,
@@ -337,6 +348,21 @@ def main():
     # Computes compressed upper-triangular distance vector to avoid redundant pairings and self-distance zeros
     flat_coords_dist = pdist(y_targets, metric="euclidean")
     
+    # Calculate direct sequence difference baseline (Hamming distance)
+    n_seqs = len(sequences)
+    flat_seq_dist = []
+    for i in range(n_seqs):
+        for j in range(i + 1, n_seqs):
+            seq1 = sequences[i]
+            seq2 = sequences[j]
+            dist = sum(1 for c1, c2 in zip(seq1, seq2) if c1 != c2) + abs(len(seq1) - len(seq2))
+            flat_seq_dist.append(dist)
+    flat_seq_dist = np.array(flat_seq_dist, dtype=float)
+    
+    baseline_pearson, _ = pearsonr(flat_seq_dist, flat_coords_dist)
+    baseline_spearman, _ = spearmanr(flat_seq_dist, flat_coords_dist)
+    print(f"Sequence Difference Baseline | Pearson r: {baseline_pearson:.4f} | Spearman rho: {baseline_spearman:.4f}")
+    
     layer_metrics = []
     
     print("Analysing pairwise representation distances across hidden layers...")
@@ -354,13 +380,19 @@ def main():
         p_corr, _ = pearsonr(flat_emb_dist, flat_coords_dist)
         s_corr, _ = spearmanr(flat_emb_dist, flat_coords_dist)
         
+        # Calculate correlation to sequence Hamming distance
+        p_corr_seq, _ = pearsonr(flat_emb_dist, flat_seq_dist)
+        s_corr_seq, _ = spearmanr(flat_emb_dist, flat_seq_dist)
+        
         layer_metrics.append({
             "Layer": layer_idx,
             "Pearson_R": p_corr,
-            "Spearman_R": s_corr
+            "Spearman_R": s_corr,
+            "Pearson_R_to_Seq": p_corr_seq,
+            "Spearman_R_to_Seq": s_corr_seq
         })
         
-        print(f"Layer {layer_idx:02d} | Pearson r: {p_corr:.4f} | Spearman rho: {s_corr:.4f}")
+        print(f"Layer {layer_idx:02d} | Pearson r (to target): {p_corr:.4f} | Spearman rho (to target): {s_corr:.4f} | Pearson r (to seq): {p_corr_seq:.4f} | Spearman rho (to seq): {s_corr_seq:.4f}")
         
     # -------------------------------------------------------------------------
     # 6. Export Statistical Tables and Diagnostic Plots
@@ -378,16 +410,25 @@ def main():
     print("-" * 80)
     
     plt.figure(figsize=(11, 6))
-    plt.plot(summary_df["Layer"], summary_df["Pearson_R"], marker="o", linewidth=2, color="#1f77b4", label="Pearson r")
-    plt.plot(summary_df["Layer"], summary_df["Spearman_R"], marker="s", linewidth=2, color="#2ca02c", label="Spearman rho")
+    
+    # Plot target coordinate correlations
+    plt.plot(summary_df["Layer"], summary_df["Pearson_R"], marker="o", linewidth=2, color="#1f77b4", label="Pearson r (vs Target)")
+    plt.plot(summary_df["Layer"], summary_df["Spearman_R"], marker="s", linewidth=2, color="#2ca02c", label="Spearman rho (vs Target)")
+    
+    # Plot sequence distance correlations
+    plt.plot(summary_df["Layer"], summary_df["Pearson_R_to_Seq"], marker="x", linewidth=2, color="#ff7f0e", label="Pearson r (vs AA Seq)")
+    plt.plot(summary_df["Layer"], summary_df["Spearman_R_to_Seq"], marker="d", linewidth=2, color="#9467bd", label="Spearman rho (vs AA Seq)")
     
     plt.axvline(x=optimal_row['Layer'], color="red", linestyle="--", alpha=0.7, label=f"Optimal Layer ({int(optimal_row['Layer'])})")
+    plt.axhline(y=baseline_pearson, color="#1f77b4", linestyle=":", alpha=0.8, label=f"Pearson baseline (AA diff: {baseline_pearson:.4f})")
+    plt.axhline(y=baseline_spearman, color="#2ca02c", linestyle=":", alpha=0.8, label=f"Spearman baseline (AA diff: {baseline_spearman:.4f})")
     
     plt.xlabel("Layer Index (Layer 0 = Input Token Embeddings)")
     plt.ylabel("Pairwise Distance Correlation Coefficient")
-    plt.title(f"Geometric Congruence of PLM Hidden Spaces with PLANT 3D Coordinate Manifold\nModel: {model_safe_name}")
+    plt.title(f"Geometric Congruence and Sequence Correlation across PLM Layers\nModel: {model_safe_name}")
     plt.grid(True, linestyle=":", alpha=0.6)
     plt.legend(loc="lower right")
+    plt.ylim(0.5, 1.0)
     plt.tight_layout()
     
     plot_export_path = os.path.join(args.output_dir, f"layer_distance_trajectory_{model_safe_name}.png")

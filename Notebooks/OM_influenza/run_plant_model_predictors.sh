@@ -1,5 +1,6 @@
 # Define target tracking arrays containing paths to OG architectures and local fine-tuned checkpoints
 MODELS=(
+    "/home3/oml4h/hugging_face_downloads/model_weights_topublish/ESM2-HA80"
     "facebook/esm2_t33_650M_UR50D" 
     "/home3/oml4h/hugging_face_downloads/ESM_C_6B"
     "/home3/oml4h/hugging_face_downloads/ESM_C_300M"

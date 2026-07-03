@@ -1215,6 +1215,7 @@ class TestRunAnalysisSmoke:
             dynamic_pseudocount=1e-3,
             mutation_baseline_x=-2.0,
             metrics_output_dir=tmp_path / "metrics",
+            mutation_model="H3N2",
         )
 
         latest_plot_dir = tmp_path / "per_model" / "ESMC_600M_FLU_final_checkpoint"
@@ -1269,7 +1270,7 @@ class TestRunAnalysisSmoke:
             ranked_df = pd.DataFrame(
                 [
                     {"Position": 1, "AA": "S", "Probability": 0.8, "Rank": 1},
-                    {"Position": 2, "AA": "C", "Probability": 0.3, "Rank": 2},
+                    {"Position": 0, "AA": "C", "Probability": 0.3, "Rank": 2},
                 ]
             )
             obs_df = ranked_df.iloc[[0]].copy()
@@ -1303,13 +1304,155 @@ class TestRunAnalysisSmoke:
             dynamic_pseudocount=1e-3,
             mutation_baseline_x=-2.0,
             metrics_output_dir=tmp_path / "metrics",
+            mutation_model="H3N2",
         )
 
         assert (tmp_path / "per_model" / "m1" / "ranked_mutations_j2_int_vs_k_lineage.png").exists()
 
+    def test_export_plots_lineage_comparison_plot_uses_rank_labels_and_integer_ticks(self, tmp_path, monkeypatch):
+        j2_ref = tmp_path / "J.2_int.nt.fa"
+        k_ref = tmp_path / "K.nt.fa"
+        write_fasta(j2_ref, [("J.2_int", "ATGGCTGAA")])
+        write_fasta(k_ref, [("K", "ATGTCTGAA")])
+
+        captured = {"labels": [], "figure": None}
+
+        def fake_adjust_text(texts, **kwargs):
+            captured["labels"] = [text.get_text() for text in texts]
+            return texts
+
+        monkeypatch.setitem(sys.modules, "adjustText", types.SimpleNamespace(adjust_text=fake_adjust_text))
+
+        def fake_export_publication_figure(path, figure=None, **kwargs):
+            if path.name == "ranked_mutations_j2_int_vs_k_lineage.png":
+                captured["figure"] = figure
+                path.parent.mkdir(parents=True, exist_ok=True)
+                figure.savefig(path, dpi=72)
+            elif figure is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                figure.savefig(path, dpi=72)
+
+        monkeypatch.setattr(rma, "export_publication_figure", fake_export_publication_figure)
+
+        def fake_get_ranked_mutations(prob_matrix, ref_seq, obs_muts):
+            ranked_df = pd.DataFrame(
+                [
+                    {"Position": 0, "AA": "S", "Probability": 0.8, "Rank": 1},
+                    {"Position": 1, "AA": "C", "Probability": 0.3, "Rank": 2},
+                ]
+            )
+            obs_df = ranked_df.copy()
+            return ranked_df, obs_df
+
+        _install_fake_functions_hf(
+            monkeypatch,
+            evaluate_alpha_sweep=lambda *a, **k: pd.DataFrame(),
+            get_ranked_mutations=fake_get_ranked_mutations,
+        )
+
+        combined_df = pd.DataFrame(
+            [
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.8, "mut_prob": 0.4, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 2, "ref_aa": "A", "aa": "C", "plm_prob": 0.3, "mut_prob": 0.5, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "K", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.7, "mut_prob": 0.6, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+            ]
+        )
+
+        rma.export_plots(
+            output_dir=tmp_path,
+            combined_df=combined_df,
+            alpha_df=pd.DataFrame(),
+            epoch_summary_df=pd.DataFrame(),
+            scatter_alphas=[],
+            scatter_max_points=100,
+            lineage_cache={
+                "J.2_int": {"n_sequences": 2, "reference_path": str(j2_ref)},
+                "K": {"n_sequences": 2, "reference_path": str(k_ref)},
+            },
+            dynamic_pseudocount=1e-3,
+            mutation_baseline_x=-2.0,
+            metrics_output_dir=tmp_path / "metrics",
+            mutation_model="H3N2",
+        )
+
+        assert captured["labels"]
+        assert all("(N=" in label for label in captured["labels"])
+        assert captured["figure"] is not None
+        rank_formatter = captured["figure"].axes[0].xaxis.get_major_formatter()
+        assert rank_formatter(1.0, 0) == "1"
+        assert rank_formatter(2.0, 0) == "2"
+
+    def test_export_plots_lineage_comparison_plot_uses_canonical_h3_labels(self, tmp_path, monkeypatch):
+        j2_ref = tmp_path / "J.2_int.nt.fa"
+        k_ref = tmp_path / "K.nt.fa"
+        write_fasta(j2_ref, [("J.2_int", "ATGGCTGAA")])
+        write_fasta(k_ref, [("K", "ATGTCTGAA")])
+
+        captured = {"labels": []}
+
+        def fake_adjust_text(texts, **kwargs):
+            captured["labels"] = [text.get_text() for text in texts]
+            return texts
+
+        monkeypatch.setitem(sys.modules, "adjustText", types.SimpleNamespace(adjust_text=fake_adjust_text))
+
+        def fake_export_publication_figure(path, figure=None, **kwargs):
+            if figure is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                figure.savefig(path, dpi=72)
+
+        monkeypatch.setattr(rma, "export_publication_figure", fake_export_publication_figure)
+
+        def fake_get_ranked_mutations(prob_matrix, ref_seq, obs_muts):
+            ranked_df = pd.DataFrame(
+                [
+                    {"Position": 0, "AA": "S", "Probability": 0.8, "Rank": 1},
+                    {"Position": 1, "AA": "C", "Probability": 0.3, "Rank": 2},
+                ]
+            )
+            obs_df = ranked_df.iloc[[0]].copy()
+            return ranked_df, obs_df
+
+        _install_fake_functions_hf(
+            monkeypatch,
+            evaluate_alpha_sweep=lambda *a, **k: pd.DataFrame(),
+            get_ranked_mutations=fake_get_ranked_mutations,
+            create_h3_numbering_map=lambda *a, **k: {0: "145", 1: "146"},
+            mutations_to_canonical=lambda mutations, h3_map: [f"CANON_{mutation}" for mutation in mutations],
+        )
+
+        combined_df = pd.DataFrame(
+            [
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.8, "mut_prob": 0.4, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "J.2_int", "position": 2, "ref_aa": "A", "aa": "C", "plm_prob": 0.3, "mut_prob": 0.5, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+                {"model": "m1", "epoch_label": "raw_model", "epoch_value": 0.0, "lineage": "K", "position": 1, "ref_aa": "M", "aa": "S", "plm_prob": 0.7, "mut_prob": 0.6, "obs_freq": 0.0, "obs_present": 0, "depth": 10.0},
+            ]
+        )
+
+        rma.export_plots(
+            output_dir=tmp_path,
+            combined_df=combined_df,
+            alpha_df=pd.DataFrame(),
+            epoch_summary_df=pd.DataFrame(),
+            scatter_alphas=[],
+            scatter_max_points=100,
+            lineage_cache={
+                "J.2_int": {"n_sequences": 2, "reference_path": str(j2_ref)},
+                "K": {"n_sequences": 2, "reference_path": str(k_ref)},
+            },
+            dynamic_pseudocount=1e-3,
+            mutation_baseline_x=-2.0,
+            metrics_output_dir=tmp_path / "metrics",
+            mutation_model="H3N2",
+        )
+
+        assert captured["labels"]
+        assert captured["labels"][0].startswith("CANON_")
+        assert "(N=1)" in captured["labels"][0]
+
     def test_export_plots_lineage_comparison_plot_skips_when_reference_missing(self, tmp_path, monkeypatch):
         def fake_get_ranked_mutations(prob_matrix, ref_seq, obs_muts):
-            return pd.DataFrame([{"Position": 1, "AA": "S", "Probability": 0.8, "Rank": 1}]), pd.DataFrame()
+            return pd.DataFrame([{"Position": 0, "AA": "S", "Probability": 0.8, "Rank": 1}]), pd.DataFrame()
 
         _install_fake_functions_hf(
             monkeypatch,
@@ -1338,6 +1481,7 @@ class TestRunAnalysisSmoke:
             dynamic_pseudocount=1e-3,
             mutation_baseline_x=-2.0,
             metrics_output_dir=tmp_path / "metrics",
+            mutation_model="H3N2",
         )
 
         assert not (tmp_path / "per_model" / "m1" / "ranked_mutations_j2_int_vs_k_lineage.png").exists()
@@ -1349,7 +1493,7 @@ class TestRunAnalysisSmoke:
         write_fasta(k_ref, [("K", "ATGGCTGAA")])
 
         def fake_get_ranked_mutations(prob_matrix, ref_seq, obs_muts):
-            return pd.DataFrame([{"Position": 1, "AA": "S", "Probability": 0.8, "Rank": 1}]), pd.DataFrame()
+            return pd.DataFrame([{"Position": 0, "AA": "S", "Probability": 0.8, "Rank": 1}]), pd.DataFrame()
 
         _install_fake_functions_hf(
             monkeypatch,
@@ -1378,6 +1522,7 @@ class TestRunAnalysisSmoke:
             dynamic_pseudocount=1e-3,
             mutation_baseline_x=-2.0,
             metrics_output_dir=tmp_path / "metrics",
+            mutation_model="H3N2",
         )
 
         assert not (tmp_path / "per_model" / "m1" / "ranked_mutations_j2_int_vs_k_lineage.png").exists()

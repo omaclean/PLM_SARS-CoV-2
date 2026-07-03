@@ -3330,3 +3330,123 @@ def _clean_pattern_tag(file_pattern: str) -> str:
     tag = tag.replace(".fasta", "")
     tag = re.sub(r"_+", "_", tag).strip("_")
     return _safe_label(tag) if tag else "pattern"
+
+
+def compute_codon_distances_for_df(df, lineage_cache, aa_to_codons):
+    """
+    Computes codon mutational distance (1, 2, or 3 nucleotide mutations) 
+    for each row in a dataframe.
+
+    Uses direct positional lookup: the 'position' column in *df* is 1-indexed
+    into the full reference protein, so ``pos - 1`` gives the 0-indexed protein
+    position whose codon is at ``full_ref_nt[(pos-1)*3 : (pos-1)*3 + 3]``.
+    """
+    import warnings
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+    
+    standard_genetic_code = {
+        "TTT": "F", "TTC": "F", "TTA": "L", "TTG": "L",
+        "TCT": "S", "TCC": "S", "TCA": "S", "TCG": "S",
+        "TAT": "Y", "TAC": "Y", "TAA": "*", "TAG": "*",
+        "TGT": "C", "TGC": "C", "TGA": "*", "TGG": "W",
+        "CTT": "L", "CTC": "L", "CTA": "L", "CTG": "L",
+        "CCT": "P", "CCC": "P", "CCA": "P", "CCG": "P",
+        "CAT": "H", "CAC": "H", "CAA": "Q", "CAG": "Q",
+        "CGT": "R", "CGC": "R", "CGA": "R", "CGG": "R",
+        "ATT": "I", "ATC": "I", "ATA": "I", "ATG": "M",
+        "ACT": "T", "ACC": "T", "ACA": "T", "ACG": "T",
+        "AAT": "N", "AAC": "N", "AAA": "K", "AAG": "K",
+        "AGT": "S", "AGC": "S", "AGA": "R", "AGG": "R",
+        "GTT": "V", "GTC": "V", "GTA": "V", "GTG": "V",
+        "GCT": "A", "GCC": "A", "GCA": "A", "GCG": "A",
+        "GAT": "D", "GAC": "D", "GAA": "E", "GAG": "E",
+        "GGT": "G", "GGC": "G", "GGA": "G", "GGG": "G",
+    }
+    
+    def translate_codon_local(codon):
+        return standard_genetic_code.get(codon.upper().replace("U", "T"), "X")
+        
+    def hamming_distance(c1, c2):
+        return sum(1 for x, y in zip(c1, c2) if x != y)
+        
+    def get_min_nt_mutations(ref_codon, target_aa, aa_to_codons_dict):
+        if not ref_codon or len(ref_codon) != 3 or target_aa not in aa_to_codons_dict:
+            return np.nan
+        ref_codon_upper = ref_codon.upper().replace("U", "T")
+        if not all(base in "ACGT" for base in ref_codon_upper):
+            return np.nan
+        target_codons = aa_to_codons_dict[target_aa]
+        if not target_codons:
+            return np.nan
+        return min(hamming_distance(ref_codon_upper, tc.upper().replace("U", "T")) for tc in target_codons)
+
+    # Preload reference sequences for each lineage
+    _mismatch_warned = set()
+    for lin in df["lineage"].dropna().unique():
+        lin_str = str(lin)
+        if lin_str not in lineage_cache:
+            continue
+        lin_data = lineage_cache[lin_str]
+        if not lin_data.get("full_ref_protein") and "reference_path" in lin_data and lin_data["reference_path"]:
+            try:
+                ref_payload = _load_single_focal_reference(str(lin_data["reference_path"]), lin_str)
+                lin_data["full_ref_protein"] = ref_payload["protein"]
+                lin_data["full_ref_nt"] = ref_payload["nucleotide"]
+            except Exception:
+                pass
+
+    def compute_row_distance(row):
+        lin = row.get("lineage")
+        pos = row.get("position")
+        target_aa = row.get("aa")
+        if pd.isna(lin) or pd.isna(pos) or pd.isna(target_aa):
+            return pd.Series([None, np.nan], index=["ref_codon", "nt_mutations"])
+        lin_str = str(lin)
+        if lin_str not in lineage_cache:
+            return pd.Series([None, np.nan], index=["ref_codon", "nt_mutations"])
+        lin_data = lineage_cache[lin_str]
+        
+        full_ref_nt = lin_data.get("full_ref_nt")
+        if not full_ref_nt and "reference_path" in lin_data and lin_data["reference_path"]:
+            try:
+                ref_payload = _load_single_focal_reference(str(lin_data["reference_path"]), lin_str)
+                full_ref_nt = ref_payload["nucleotide"]
+                lin_data["full_ref_nt"] = full_ref_nt
+                lin_data["full_ref_protein"] = ref_payload["protein"]
+            except Exception:
+                pass
+                
+        if not full_ref_nt:
+            return pd.Series([None, np.nan], index=["ref_codon", "nt_mutations"])
+            
+        # Direct positional lookup: position is 1-indexed into the full
+        # reference protein, so pos-1 gives the 0-indexed codon index.
+        pos_idx = int(pos) - 1
+            
+        if pos_idx < 0 or (pos_idx * 3 + 3) > len(full_ref_nt):
+            return pd.Series([None, np.nan], index=["ref_codon", "nt_mutations"])
+            
+        ref_codon = full_ref_nt[pos_idx * 3 : pos_idx * 3 + 3]
+
+        # Validate codon translation matches ref_aa from the dataframe
+        ref_aa_csv = row.get("ref_aa")
+        if ref_aa_csv and not pd.isna(ref_aa_csv):
+            codon_aa = translate_codon_local(ref_codon)
+            warn_key = (lin_str, int(pos))
+            if codon_aa != str(ref_aa_csv) and warn_key not in _mismatch_warned:
+                _mismatch_warned.add(warn_key)
+                warnings.warn(
+                    f"Codon/AA mismatch at {lin_str} position {int(pos)}: "
+                    f"codon {ref_codon} translates to {codon_aa} but ref_aa={ref_aa_csv}"
+                )
+
+        min_mut = get_min_nt_mutations(ref_codon, target_aa, aa_to_codons)
+        return pd.Series([ref_codon, min_mut], index=["ref_codon", "nt_mutations"])
+
+    res_df = df.apply(compute_row_distance, axis=1)
+    df_copy = df.copy()
+    df_copy["ref_codon"] = res_df["ref_codon"]
+    df_copy["nt_mutations"] = res_df["nt_mutations"]
+    return df_copy

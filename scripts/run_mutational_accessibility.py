@@ -19,6 +19,27 @@ import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# Cap CPU thread usage to 12 threads for OpenBLAS, MKL, OMP, etc.
+os.environ["OMP_NUM_THREADS"] = "12"
+os.environ["MKL_NUM_THREADS"] = "12"
+os.environ["OPENBLAS_NUM_THREADS"] = "12"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "12"
+os.environ["NUMEXPR_NUM_THREADS"] = "12"
+
+try:
+    import torch
+    try:
+        torch.set_num_threads(12)
+    except RuntimeError:
+        pass
+    try:
+        torch.set_num_interop_threads(12)
+    except RuntimeError:
+        pass
+except ImportError:
+    pass
+
+
 import numpy as np
 import pandas as pd
 from Bio import Align, SeqIO
@@ -29,6 +50,29 @@ REPO_ROOT = SCRIPT_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from Functions_HuggingFace import _load_single_focal_reference
+
+STANDARD_GENETIC_CODE = {
+    "TTT": "F", "TTC": "F", "TTA": "L", "TTG": "L",
+    "TCT": "S", "TCC": "S", "TCA": "S", "TCG": "S",
+    "TAT": "Y", "TAC": "Y", "TAA": "*", "TAG": "*",
+    "TGT": "C", "TGC": "C", "TGA": "*", "TGG": "W",
+    "CTT": "L", "CTC": "L", "CTA": "L", "CTG": "L",
+    "CCT": "P", "CCC": "P", "CCA": "P", "CCG": "P",
+    "CAT": "H", "CAC": "H", "CAA": "Q", "CAG": "Q",
+    "CGT": "R", "CGC": "R", "CGA": "R", "CGG": "R",
+    "ATT": "I", "ATC": "I", "ATA": "I", "ATG": "M",
+    "ACT": "T", "ACC": "T", "ACA": "T", "ACG": "T",
+    "AAT": "N", "AAC": "N", "AAA": "K", "AAG": "K",
+    "AGT": "S", "AGC": "S", "AGA": "R", "AGG": "R",
+    "GTT": "V", "GTC": "V", "GTA": "V", "GTG": "V",
+    "GCT": "A", "GCC": "A", "GCA": "A", "GCG": "A",
+    "GAT": "D", "GAC": "D", "GAA": "E", "GAG": "E",
+    "GGT": "G", "GGC": "G", "GGA": "G", "GGG": "G",
+}
+
+def translate_codon(codon: str) -> str:
+    return STANDARD_GENETIC_CODE.get(codon.upper().replace("U", "T"), "X")
 
 IGNORE_ALIGNMENT_CHARS = {"-", "*", "."}
 STANDARD_AMINO_ACIDS = tuple("ACDEFGHIKLMNPQRSTVWY")
@@ -383,6 +427,14 @@ def apply_arg_defaults(args: argparse.Namespace) -> argparse.Namespace:
     for key, value in defaults.items():
         if not hasattr(args, key):
             setattr(args, key, value)
+
+    # Cap CPU thread counts to at most 12
+    if hasattr(args, "alpha_sweep_max_workers"):
+        if args.alpha_sweep_max_workers is None or args.alpha_sweep_max_workers > 12:
+            args.alpha_sweep_max_workers = 12
+    else:
+        setattr(args, "alpha_sweep_max_workers", 12)
+
     return args
 
 
@@ -3906,6 +3958,143 @@ def export_plots(
         export_publication_figure(target_dir / "plm_vs_mut_prob_scatter.png", figure=fig)
         plt.close(fig)
 
+        # Parallel plot by codon mutation distance (1, 2, or 3 nucleotide mutations to that codon)
+        try:
+            from Functions_HuggingFace import build_codon_aa_mutation_tables
+            active_model = mutation_model
+            if active_model is None:
+                for key, val in lineage_cache.items():
+                    if isinstance(val, dict) and "mutation_model" in val:
+                        active_model = val["mutation_model"]
+                        break
+                if active_model is None:
+                    out_str = str(output_dir).upper()
+                    if "SC2" in out_str:
+                        active_model = "SC2"
+                    elif "H1N1" in out_str:
+                        active_model = "H1N1"
+                    elif "H3N2" in out_str:
+                        active_model = "H3N2"
+            if active_model not in ("SC2", "H1N1", "H3N2"):
+                active_model = "SC2"
+            tables = build_codon_aa_mutation_tables(active_model)
+            aa_to_codons = tables.get("aa_to_codons_all", tables.get("aa_to_codons"))
+            from Functions_HuggingFace import compute_codon_distances_for_df
+            plot_df_dist = compute_codon_distances_for_df(plot_df, lineage_cache, aa_to_codons)
+            # Filter to keep only valid 1, 2, or 3 nucleotide mutations
+            plot_df_dist = plot_df_dist.loc[plot_df_dist["nt_mutations"].isin([1, 2, 3])]
+
+            # Print sanity checks and warnings for outliers
+            print(f"\n[MUTATION DISTANCE PLOT SANITY CHECK] {title_prefix}:")
+            standard_genetic_code = {
+                "TTT": "F", "TTC": "F", "TTA": "L", "TTG": "L",
+                "TCT": "S", "TCC": "S", "TCA": "S", "TCG": "S",
+                "TAT": "Y", "TAC": "Y", "TAA": "*", "TAG": "*",
+                "TGT": "C", "TGC": "C", "TGA": "*", "TGG": "W",
+                "CTT": "L", "CTC": "L", "CTA": "L", "CTG": "L",
+                "CCT": "P", "CCC": "P", "CCA": "P", "CCG": "P",
+                "CAT": "H", "CAC": "H", "CAA": "Q", "CAG": "Q",
+                "CGT": "R", "CGC": "R", "CGA": "R", "CGG": "R",
+                "ATT": "I", "ATC": "I", "ATA": "I", "ATG": "M",
+                "ACT": "T", "ACC": "T", "ACA": "T", "ACG": "T",
+                "AAT": "N", "AAC": "N", "AAA": "K", "AAG": "K",
+                "AGT": "S", "AGC": "S", "AGA": "R", "AGG": "R",
+                "GTT": "V", "GTC": "V", "GTA": "V", "GTG": "V",
+                "GCT": "A", "GCC": "A", "GCA": "A", "GCG": "A",
+                "GAT": "D", "GAC": "D", "GAA": "E", "GAG": "E",
+                "GGT": "G", "GGC": "G", "GGA": "G", "GGG": "G",
+            }
+            for lin in sorted(plot_df_dist["lineage"].dropna().unique()):
+                lin_df = plot_df_dist.loc[plot_df_dist["lineage"] == lin]
+                expected_count = 0
+                lin_str = str(lin)
+                if lin_str in lineage_cache and lineage_cache[lin_str].get("full_ref_protein"):
+                    expected_count = 19 * len(lineage_cache[lin_str]["full_ref_protein"])
+                actual_count = len(lin_df)
+                print(f"  Lineage {lin_str}: expected {expected_count} datapoints (19 * {len(lineage_cache[lin_str]['full_ref_protein']) if lin_str in lineage_cache and lineage_cache[lin_str].get('full_ref_protein') else 0}) vs {actual_count} actually plotted.")
+            
+            # Print low-probability codon-amino acid mutation outliers
+            cond1 = (plot_df_dist["nt_mutations"] == 1) & (plot_df_dist["mut_prob"] < 1e-6)
+            subset1 = plot_df_dist.loc[cond1]
+            if not subset1.empty:
+                print(f"  WARNING: Found {len(subset1)} entries with mut_num=1 but mut_prob < 1e-6:")
+                for _, row in subset1.iterrows():
+                    ref_c = row.get("ref_codon", "")
+                    ref_c_aa = standard_genetic_code.get(ref_c.upper().replace("U", "T"), "X") if ref_c else "X"
+                    print(f"    Lineage {row['lineage']}, Pos {row['position']}: ref_codon={ref_c} ({ref_c_aa}), ref_aa={row['ref_aa']} -> aa={row['aa']} (mut_prob={row['mut_prob']:.2e}, plm_prob={row['plm_prob']:.2e})")
+
+            cond2 = (plot_df_dist["nt_mutations"] == 2) & (plot_df_dist["mut_prob"] < 1e-11)
+            subset2 = plot_df_dist.loc[cond2]
+            if not subset2.empty:
+                print(f"  WARNING: Found {len(subset2)} entries with mut_num=2 but mut_prob < 1e-11:")
+                for _, row in subset2.iterrows():
+                    ref_c = row.get("ref_codon", "")
+                    ref_c_aa = standard_genetic_code.get(ref_c.upper().replace("U", "T"), "X") if ref_c else "X"
+                    print(f"    Lineage {row['lineage']}, Pos {row['position']}: ref_codon={ref_c} ({ref_c_aa}), ref_aa={row['ref_aa']} -> aa={row['aa']} (mut_prob={row['mut_prob']:.2e}, plm_prob={row['plm_prob']:.2e})")
+            print()
+
+            # Recalculate statistics on the filtered subset for this plot
+            valid_df = plot_df_dist.dropna(subset=["plm_prob", "mut_prob"])
+            if len(valid_df) > 1:
+                sub_rho, _ = spearmanr(valid_df["plm_prob"], valid_df["mut_prob"])
+                sub_pearson = safe_pearson(valid_df["plm_prob"], valid_df["mut_prob"])
+            else:
+                sub_rho, sub_pearson = np.nan, np.nan
+
+            fig_dist, ax_dist = plt.subplots(figsize=(6, 5))
+            dark2_colors = sns.color_palette("Dark2", 3)
+            color_map = {1: dark2_colors[0], 2: dark2_colors[1], 3: dark2_colors[2]}
+
+            # Plot groups 3, 2, 1 sequentially so 1-nt mutations are on top
+            for num_muts in [3, 2, 1]:
+                sub_df = plot_df_dist.loc[plot_df_dist["nt_mutations"] == num_muts]
+                if not sub_df.empty:
+                    ax_dist.scatter(
+                        sub_df["plm_prob"],
+                        sub_df["mut_prob"],
+                        color=color_map[num_muts],
+                        alpha=0.3,
+                        s=10,
+                        edgecolors="none",
+                        label=f"{num_muts}",
+                    )
+
+            ax_dist.set_xscale("log")
+            ax_dist.set_yscale("log")
+            _hide_log_minor_ticks(ax_dist)
+            ax_dist.set_xlabel("PLM Probability", fontsize=label_fontsize + 2)
+            ax_dist.set_ylabel("Mutation Probability", fontsize=label_fontsize + 2)
+            ax_dist.set_title(
+                f"{_plm_vs_mut_title_text(title_prefix, plot_frame)}\n"
+                f"Spearman ρ(x, y)={sub_rho:.3f}; "
+                f"Pearson r(x, y)={sub_pearson:.3f}"
+            )
+            ax_dist.grid(True, which="major", ls="--", alpha=0.4)
+            handles, labels = ax_dist.get_legend_handles_labels()
+            by_label = dict(zip(labels, handles))
+            ordered_labels = [label for label in ["1", "2", "3"] if label in by_label]
+            ordered_handles = [by_label[label] for label in ordered_labels]
+            leg_dist = ax_dist.legend(
+                ordered_handles,
+                ordered_labels,
+                title="Mut_num",
+                loc="upper left",
+                bbox_to_anchor=(1.02, 1),
+                frameon=True,
+                facecolor="white",
+                edgecolor="none",
+            )
+            # Make the legend points way bigger and opaque
+            handles_to_update = getattr(leg_dist, "legend_handles", getattr(leg_dist, "legendHandles", []))
+            for lh in handles_to_update:
+                lh.set_alpha(1.0)
+                lh.set_sizes([50])
+            fig_dist.tight_layout()
+            export_publication_figure(target_dir / "plm_vs_mut_prob_scatter_by_mutation_distance.png", figure=fig_dist)
+            plt.close(fig_dist)
+        except Exception as e:
+            print(f"Warning: Failed to create parallel plot by mutation distance: {e}")
+
     def _load_reference_protein_from_path(reference_path: object) -> Optional[str]:
         if reference_path is None or pd.isna(reference_path):
             return None
@@ -4613,6 +4802,10 @@ def _regenerate_figures_from_existing_tables(
     else:
         dynamic_pseudocount = 1e-16
 
+    mutation_model_val = args.mutation_model
+    if mutation_model_val is None and not existing_panel_metadata_df.empty and "mutation_model" in existing_panel_metadata_df.columns:
+        mutation_model_val = existing_panel_metadata_df["mutation_model"].dropna().iloc[0]
+
     export_plots(
         output_dir=plots_dir,
         combined_df=combined_df,
@@ -4624,7 +4817,7 @@ def _regenerate_figures_from_existing_tables(
         dynamic_pseudocount=dynamic_pseudocount,
         mutation_baseline_x=args.mutation_baseline_x,
         metrics_output_dir=tables_dir,
-        mutation_model=args.mutation_model,
+        mutation_model=mutation_model_val,
     )
     return 0
 
