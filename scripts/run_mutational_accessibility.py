@@ -951,6 +951,9 @@ def ensure_plm_matrix(
     if plm_payload is None:
         runtime = runtime_cache.get(("__runtime__", model_tag))
         if runtime is None:
+            if not args.gpu_required:
+                print("Error: This application requires a GPU to run.", file=sys.stderr)
+                sys.exit(1)
             if args.gpu_required and not torch.cuda.is_available():
                 raise RuntimeError("--gpu-required was set but CUDA is unavailable for PLM inference")
             model, device, batch_converter, alphabet = _load_plm_runtime(
@@ -2521,13 +2524,18 @@ def export_plots(
     dynamic_pseudocount: float,
     mutation_baseline_x: float,
     metrics_output_dir: Optional[Path] = None,
+    mutation_model: Optional[str] = None,
 ) -> None:
     import matplotlib.pyplot as plt
     import seaborn as sns
-    from matplotlib.ticker import FuncFormatter, NullLocator
+    from matplotlib.ticker import FuncFormatter, LogLocator, MaxNLocator, NullLocator
     from scipy.special import expit
     from scipy.stats import spearmanr
     from Functions_HuggingFace import evaluate_alpha_sweep, get_ranked_mutations
+    try:
+        from adjustText import adjust_text
+    except ImportError:
+        adjust_text = None
 
     metrics_output_dir = ensure_dir(Path(metrics_output_dir) if metrics_output_dir is not None else output_dir)
     alpha_xlabel = "mutational accessibility weighting Alpha\n(mut_acc^alpha) 0= PLM only"
@@ -2713,6 +2721,8 @@ def export_plots(
         ax.xaxis.set_minor_locator(NullLocator())
         ax.yaxis.set_minor_locator(NullLocator())
         ax.tick_params(axis="both", which="minor", bottom=False, top=False, left=False, right=False)
+        ax.xaxis.set_major_locator(LogLocator(base=100.0, subs=(1.0,), numticks=100))
+        ax.yaxis.set_major_locator(LogLocator(base=100.0, subs=(1.0,), numticks=100))
 
     def _two_dp_formatter(value, _pos) -> str:
         return f"{value:.2f}"
@@ -3913,12 +3923,43 @@ def export_plots(
             return str(records[0].seq.translate(to_stop=True)).strip().upper()
         return sequence_text
 
+    def _canonical_reference_path_for_mutation_model(model_name: Optional[str]) -> Optional[Path]:
+        canonical_refs = {
+            "H3N2": REPO_ROOT / "Sequences" / "H3N2_canonical.fa",
+        }
+        if model_name is None:
+            return None
+        canonical_path = canonical_refs.get(str(model_name))
+        if canonical_path is None or not canonical_path.exists():
+            return None
+        return canonical_path
+
     def _lineage_reference_mutations(
         focal_ref_seq: str,
         comparison_ref_seq: str,
-    ) -> List[Tuple[int, str]]:
+    ) -> Tuple[List[Tuple[int, str]], Dict[Tuple[int, str], str]]:
         if not focal_ref_seq or not comparison_ref_seq:
-            return []
+            return [], {}
+        try:
+            from Functions_HuggingFace import get_mutations
+
+            raw_mutations = [
+                mutation for mutation in get_mutations(focal_ref_seq, comparison_ref_seq)
+                if "del" not in mutation and "-" not in mutation
+            ]
+            direct_mutations: List[Tuple[int, str]] = []
+            direct_lookup: Dict[Tuple[int, str], str] = {}
+            for mutation in raw_mutations:
+                match = re.fullmatch(r"([A-Z*-])(\d+)([A-Z*-])", str(mutation))
+                if match is None:
+                    continue
+                mutation_key = (int(match.group(2)) - 1, match.group(3))
+                direct_mutations.append(mutation_key)
+                direct_lookup[mutation_key] = str(mutation)
+            if direct_mutations:
+                return direct_mutations, direct_lookup
+        except Exception:
+            pass
         aligner = Align.PairwiseAligner()
         aligner.mode = "global"
         aligner.match_score = 2.0
@@ -3927,18 +3968,36 @@ def export_plots(
         aligner.extend_gap_score = -0.5
         alignment = next(iter(aligner.align(focal_ref_seq, comparison_ref_seq)), None)
         if alignment is None:
-            return []
+            return [], {}
         aligned_focal, aligned_comparison = str(alignment[0]), str(alignment[1])
+        raw_mutations = []
+        try:
+            from Functions_HuggingFace import get_mutations
+
+            raw_mutations = [
+                mutation for mutation in get_mutations(aligned_focal, aligned_comparison)
+                if "del" not in mutation and "-" not in mutation
+            ]
+        except Exception:
+            raw_mutations = []
         mutations: List[Tuple[int, str]] = []
+        raw_mutation_lookup: Dict[Tuple[int, str], str] = {}
         focal_pos = -1
+        mutation_idx = 0
         for focal_char, comparison_char in zip(aligned_focal, aligned_comparison):
             if focal_char != "-":
                 focal_pos += 1
             if focal_char == "-" or comparison_char == "-":
                 continue
             if focal_char != comparison_char:
-                mutations.append((focal_pos, comparison_char))
-        return mutations
+                mutation_key = (focal_pos, comparison_char)
+                mutations.append(mutation_key)
+                if mutation_idx < len(raw_mutations):
+                    raw_mutation_lookup[mutation_key] = raw_mutations[mutation_idx]
+                    mutation_idx += 1
+                else:
+                    raw_mutation_lookup[mutation_key] = f"{focal_char}{focal_pos + 1}{comparison_char}"
+        return mutations, raw_mutation_lookup
 
     def _write_lineage_comparison_ranked_plot(
         target_dir: Path,
@@ -3971,7 +4030,7 @@ def export_plots(
         if not comparison_ref_seq:
             return
 
-        highlighted_mutations = _lineage_reference_mutations(focal_ref_seq, comparison_ref_seq)
+        highlighted_mutations, highlighted_mutation_labels = _lineage_reference_mutations(focal_ref_seq, comparison_ref_seq)
         if not highlighted_mutations:
             return
 
@@ -3994,6 +4053,23 @@ def export_plots(
             model_name=model_label,
             model_display_label=focal_df.iloc[0]["model_display_label"] if "model_display_label" in focal_df.columns else None,
         )
+        canonical_mutation_lookup: Dict[str, str] = {}
+        canonical_h3_map = None
+        canonical_converter = None
+
+        canonical_reference_path = _canonical_reference_path_for_mutation_model(mutation_model)
+        if canonical_reference_path is not None:
+            try:
+                from Functions_HuggingFace import create_h3_numbering_map, mutations_to_canonical
+
+                canonical_ref_seq = _load_reference_protein_from_path(canonical_reference_path)
+                if canonical_ref_seq:
+                    canonical_h3_map = create_h3_numbering_map(focal_ref_seq, canonical_ref_seq, HA2_start=330)
+                    canonical_converter = mutations_to_canonical
+            except Exception:
+                canonical_mutation_lookup = {}
+                canonical_h3_map = None
+                canonical_converter = None
 
         def _add_mutation_labels(frame: pd.DataFrame) -> pd.DataFrame:
             if frame.empty or "Mutation" in frame.columns or not {"Position", "AA"}.issubset(frame.columns):
@@ -4002,13 +4078,8 @@ def export_plots(
             positions = pd.to_numeric(labelled["Position"], errors="coerce")
             if positions.isna().any():
                 return labelled
-            position_values = positions.astype(int)
-            if ((position_values >= 1) & (position_values <= len(focal_ref_seq))).all():
-                ref_indices = position_values - 1
-                display_positions = position_values
-            else:
-                ref_indices = position_values
-                display_positions = position_values + 1
+            ref_indices = positions.astype(int)
+            display_positions = ref_indices + 1
             fallback_labels = []
             for ref_index, display_pos, aa in zip(ref_indices, display_positions, labelled["AA"]):
                 if 0 <= int(ref_index) < len(focal_ref_seq):
@@ -4018,67 +4089,134 @@ def export_plots(
             labelled["Mutation"] = fallback_labels
             return labelled
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5.8), sharey=True)
-        panel_specs = [
-            ("PLM probabilities", plm_matrix),
-            ("Mutation probabilities", mut_matrix),
-        ]
-        for ax, (panel_title, matrix) in zip(axes, panel_specs):
-            ranked_df, obs_df = get_ranked_mutations(matrix, focal_ref_seq, highlighted_mutations)
-            if ranked_df.empty:
-                ax.set_title(panel_title)
-                ax.set_xlabel("Rank (1 = highest probability)")
-                ax.set_ylabel("log10(probability)")
-                ax.grid(True, which="major", ls="-", alpha=0.2)
-                continue
+        def _canonicalize_mutation_labels(frame: pd.DataFrame) -> pd.DataFrame:
+            if frame.empty or "Mutation" not in frame.columns:
+                return frame
+            labelled = frame.copy()
+            raw_display_mutations = [
+                highlighted_mutation_labels.get((int(pos), str(aa)), str(mutation))
+                for pos, aa, mutation in zip(labelled["Position"], labelled["AA"], labelled["Mutation"])
+            ]
+            if canonical_converter is not None and canonical_h3_map is not None:
+                unresolved = [mutation for mutation in raw_display_mutations if mutation not in canonical_mutation_lookup]
+                if unresolved:
+                    canonical_mutation_lookup.update(dict(zip(unresolved, canonical_converter(unresolved, canonical_h3_map))))
+            labelled["DisplayMutation"] = [canonical_mutation_lookup.get(str(mutation), str(mutation)) for mutation in raw_display_mutations]
+            return labelled
 
-            ranked_df = _add_mutation_labels(ranked_df)
-            ranked_df["log10Probability"] = np.log10(np.clip(ranked_df["Probability"], 1e-32, None))
-            ax.plot(ranked_df["Rank"], ranked_df["log10Probability"], color="lightgray", linewidth=1.1)
+        # Define explicit font sizes configuration to pass into rc_context if export_publication_figure overrides parameters
+        custom_rc_params = {
+            "axes.labelsize": 19,
+            "axes.titlesize": 20,
+            "xtick.labelsize": 17,
+            "ytick.labelsize": 17,
+        }
 
-            if not obs_df.empty:
-                obs_df = _add_mutation_labels(obs_df)
-                obs_df["log10Probability"] = np.log10(np.clip(obs_df["Probability"], 1e-32, None))
-                ax.scatter(
-                    obs_df["Rank"],
-                    obs_df["log10Probability"],
-                    color="#d62728",
-                    s=24,
-                    zorder=5,
-                    label=f"{focal_lineage} -> {comparison_title_label}",
-                )
-                for _, row in obs_df.iterrows():
-                    ax.annotate(
-                        str(row["Mutation"]),
-                        (float(row["Rank"]), float(row["log10Probability"])),
-                        xytext=(3, 3),
-                        textcoords="offset points",
-                        fontsize=8,
-                        color="#8b0000",
+        with plt.rc_context(rc=custom_rc_params):
+            fig, axes = plt.subplots(1, 2, figsize=(17.5, 6.5), sharey=True)
+            axis_label_fontsize = 20
+            tick_label_fontsize = 17
+            panel_label_fontsize = 14
+            panel_specs = [
+                ("PLM probabilities", plm_matrix),
+                ("Mutation probabilities", mut_matrix),
+            ]
+            for ax, (panel_title, matrix) in zip(axes, panel_specs):
+                ranked_df, obs_df = get_ranked_mutations(matrix, focal_ref_seq, highlighted_mutations)
+                
+                if ranked_df.empty:
+                    _style_axis_text(ax)
+                    ax.set_title(panel_title, fontsize=27, pad=21)
+                    ax.set_xlabel("Rank (1 = highest probability)", fontsize=axis_label_fontsize, labelpad=14)
+                    ax.set_ylabel("log10(probability)", fontsize=axis_label_fontsize, labelpad=16)
+                    ax.tick_params(axis="both", which="major", labelsize=tick_label_fontsize)
+                    
+                    
+                    
+                    ax.grid(True, which="major", ls="-", alpha=0.2)
+                    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+                    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{int(round(value))}"))
+                    continue
+
+                ranked_df = _add_mutation_labels(ranked_df)
+                ranked_df = _canonicalize_mutation_labels(ranked_df)
+                ranked_df["log10Probability"] = np.log10(np.clip(ranked_df["Probability"], 1e-32, None))
+                ax.plot(ranked_df["Rank"], ranked_df["log10Probability"], color="lightgray", linewidth=1.15)
+                ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+                if not obs_df.empty:
+                    obs_df = _add_mutation_labels(obs_df)
+                    obs_df = _canonicalize_mutation_labels(obs_df)
+                    obs_df["log10Probability"] = np.log10(np.clip(obs_df["Probability"], 1e-32, None))
+                    ax.scatter(
+                        obs_df["Rank"],
+                        obs_df["log10Probability"],
+                        color="#d62728",
+                        s=30,
+                        zorder=5,
+                        label=f"{focal_lineage} -> {comparison_title_label}",
                     )
+                    ax.set_ylim(top=1.6,bottom=-16)
+                    text_artists = []
+                    for label_idx, (_, row) in enumerate(obs_df.iterrows()):
+                        label_text = f"{row.get('DisplayMutation', row['Mutation'])} (N={int(row['Rank'])})"
+                        x_direction = 1.0 if label_idx % 2 == 0 else -1.0
+                        x_offset = 0.6 * x_direction
+                        y_offset = 0.06 * ((label_idx % 3) + 1)
+                        text_artists.append(
+                            ax.text(
+                                float(row["Rank"]) + x_offset,
+                                float(row["log10Probability"]) + y_offset,
+                                label_text,
+                                fontsize=panel_label_fontsize,
+                                color="#8b0000",
+                                ha="left" if x_direction > 0 else "right",
+                                va="bottom",
+                                zorder=6,
+                            )
+                        )
+                    if text_artists:
+                      if text_artists:
+                        if adjust_text is not None:
+                            adjust_text(
+                                text_artists,
+                                x=obs_df["Rank"].astype(float).to_numpy(),
+                                y=obs_df["log10Probability"].astype(float).to_numpy(),
+                                ax=ax,
+                                only_move={"static": "y", "text": "xy"},
+                                expand=(1.35, 1.65),
+                                force_static=(0.35, 0.5),
+                                force_text=(0.32, 0.5),
+                                arrowprops={"arrowstyle": "-", "color": "#8b0000", "lw": 0.5, "alpha": 0.65},
+                            )
+                        else:
+                            for idx, text_artist in enumerate(text_artists):
+                                text_artist.set_position(
+                                    (
+                                        float(obs_df.iloc[idx]["Rank"]) + 0.55,
+                                        float(obs_df.iloc[idx]["log10Probability"]) + (0.07 * ((idx % 4) + 1)),
+                                    )
+                                )
 
-            ax.set_title(panel_title)
-            ax.set_xlabel("Rank (1 = highest probability)")
-            ax.set_ylabel("log10(probability)")
-            ax.grid(True, which="major", ls="-", alpha=0.2)
-            _style_axis_text(ax)
+                # 1. Execute styling functions first
+                _style_axis_text(ax)
+                ax.grid(True, which="major", ls="-", alpha=0.2)
+                ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+                ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{int(round(value))}"))
+                ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+                ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{int(value):d}" if float(value).is_integer() else ""))
 
-        handles, labels = _collect_axes_legend_entries(axes)
-        if handles:
-            fig.legend(
-                handles,
-                labels,
-                loc="upper center",
-                bbox_to_anchor=(0.5, 0.96),
-                ncol=1,
-                frameon=False,
-                fontsize=legend_fontsize,
-            )
-        fig.suptitle(f"{model_display_label} | {focal_lineage} vs {comparison_title_label}")
-        fig._suptitle.set_fontsize(title_fontsize + 2)
-        plt.tight_layout(rect=(0, 0, 1, 0.9))
-        export_publication_figure(target_dir / "ranked_mutations_j2_int_vs_k_lineage.png", figure=fig)
-        plt.close(fig)
+                # 2. Force modifications over structural style configurations at the absolute end of the axis setup
+                ax.set_title(panel_title, fontsize=27, pad=21)
+                ax.set_xlabel("Rank (1 = highest probability)", fontsize=axis_label_fontsize, labelpad=14)
+                ax.set_ylabel("log10(probability)", fontsize=axis_label_fontsize, labelpad=16)
+                ax.tick_params(axis="both", which="major", labelsize=tick_label_fontsize)
+                
+
+            fig.subplots_adjust(left=0.08, right=0.995, bottom=0.13, top=0.92, wspace=0.18)
+            fig.tight_layout(pad=0.8)
+            export_publication_figure(target_dir / "ranked_mutations_j2_int_vs_k_lineage.png", figure=fig)
+            plt.close(fig)
 
     if not combined_df.empty:
         _write_plm_vs_mut_outputs(output_dir, combined_df, "PLM vs mutation probability (all models)")
@@ -4486,6 +4624,7 @@ def _regenerate_figures_from_existing_tables(
         dynamic_pseudocount=dynamic_pseudocount,
         mutation_baseline_x=args.mutation_baseline_x,
         metrics_output_dir=tables_dir,
+        mutation_model=args.mutation_model,
     )
     return 0
 
@@ -4845,6 +4984,7 @@ def run_analysis(args: argparse.Namespace) -> int:
         dynamic_pseudocount=dynamic_pseudocount,
         mutation_baseline_x=args.mutation_baseline_x,
         metrics_output_dir=tables_dir,
+        mutation_model=args.mutation_model,
     )
     return 0
 
