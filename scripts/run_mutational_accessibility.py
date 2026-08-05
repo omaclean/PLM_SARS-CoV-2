@@ -300,7 +300,10 @@ def build_parser() -> argparse.ArgumentParser:
     plm_group.add_argument(
         "--model-layer",
         type=int,
-        help="Layer index to use for PLM inference.",
+        default=None,
+        help="Layer index for PLM inference. Omit to use the model's final layer, "
+             "resolved from the loaded model (33 for ESM-2 650M, 30/36/80 for ESM-C "
+             "300M/600M/6B). A fixed value does not transfer between model sizes.",
     )
     plm_group.add_argument(
         "--checkpoint-dir",
@@ -359,8 +362,6 @@ def validate_args(args: argparse.Namespace) -> None:
             missing.append("--model-tag")
         if not args.base_model:
             missing.append("--base-model")
-        if args.model_layer is None:
-            missing.append("--model-layer")
         if missing:
             raise ValueError(
                 "Checkpoint-backed PLM runs require " + ", ".join(missing)

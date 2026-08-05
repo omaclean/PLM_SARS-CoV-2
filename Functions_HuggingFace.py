@@ -436,6 +436,32 @@ class ESMCAlphabetWrapper:
     def get_batch_converter(self):
         return None
 
+def resolve_last_layer(model):
+    """Index of the model's final representation layer.
+
+    Hardcoding this does not survive changing model: ESM-2 650M has 33 layers,
+    ESM-C 300M has 30, 600M has 36 and 6B has 80, so a fixed 33 silently reads a
+    mid-stack representation from the 6B and an out-of-range one from the 300M.
+    Returns None for ESM-C, where the final layer is addressed as -1 because
+    `hidden_states` holds exactly one entry per block with no embedding row.
+    """
+    if model.__class__.__name__ == "ESMC":
+        blocks = getattr(getattr(model, "transformer", None), "blocks", None)
+        return len(blocks) if blocks is not None else None
+
+    # fair-esm exposes num_layers and indexes repr_layers 1..num_layers.
+    num_layers = getattr(model, "num_layers", None)
+    if num_layers is not None:
+        return int(num_layers)
+
+    # HuggingFace: hidden_states is embeddings + one per layer, so the last
+    # index equals num_hidden_layers.
+    config = getattr(model, "config", None)
+    if config is not None and getattr(config, "num_hidden_layers", None) is not None:
+        return int(config.num_hidden_layers)
+    return None
+
+
 def embed_sequence(sequence, model, device, model_layers, batch_converter, alphabet):
     """Embed a protein sequence with either FAIR-ESM, HuggingFace-style ESM APIs, or ESMC.
 
@@ -458,7 +484,12 @@ def embed_sequence(sequence, model, device, model_layers, batch_converter, alpha
         kwargs = {"enabled": True, "device_type": "cuda", "dtype": torch.bfloat16} if device.type == "cuda" else {"enabled": False, "device_type": "cpu"}
         with torch.no_grad(), torch.autocast(**kwargs):
             results = model.forward(sequence_tokens=batch_tokens)
-            layer_idx = model_layers if model_layers < len(results.hidden_states) else -1
+            # model_layers=None means "final layer". ESM-C hidden_states holds one
+            # entry per block (no embedding row), so the last is -1.
+            if model_layers is None:
+                layer_idx = -1
+            else:
+                layer_idx = model_layers if model_layers < len(results.hidden_states) else -1
             token_representation = results.hidden_states[layer_idx][0]
             logits_tensor = results.sequence_logits[0]
             
@@ -494,12 +525,13 @@ def embed_sequence(sequence, model, device, model_layers, batch_converter, alpha
 
         # FAIR-ESM style API
         if "repr_layers" in forward_params:
-            fair_kwargs = {"repr_layers": [model_layers]}
+            _layer = model_layers if model_layers is not None else resolve_last_layer(model)
+            fair_kwargs = {"repr_layers": [_layer]}
             if "return_contacts" in forward_params:
                 fair_kwargs["return_contacts"] = False
             results = model(batch_tokens, **fair_kwargs)
 
-            token_representation = results["representations"][model_layers][0]
+            token_representation = results["representations"][_layer][0]
             logits_tensor = results["logits"][0]
 
         else:
@@ -515,7 +547,9 @@ def embed_sequence(sequence, model, device, model_layers, batch_converter, alpha
                 hidden_states = results.get("hidden_states", None)
 
             if hidden_states is not None and len(hidden_states) > 0:
-                if model_layers < len(hidden_states):
+                if model_layers is None:
+                    token_representation = hidden_states[-1][0]
+                elif model_layers < len(hidden_states):
                     token_representation = hidden_states[model_layers][0]
                 else:
                     print(
@@ -3044,6 +3078,134 @@ def _save_key_matrix(matrix_like, filename, key_matrix_dir, index=True):
     pd.DataFrame(matrix_like).to_csv(os.path.join(key_matrix_dir, filename), index=index)
 
 
+_ESM_TOKENIZER_HARDCODED = {
+    "mask_token": "<mask>", "cls_token": "<cls>", "pad_token": "<pad>",
+    "eos_token": "<eos>", "unk_token": "<unk>", "bos_token": "<cls>", "sep_token": "<eos>",
+}
+_ESM_TOKENIZER_PATCHED = False
+
+
+def patch_esm_sequence_tokenizer():
+    """Make EsmSequenceTokenizer constructible on older transformers.
+
+    esm>=3 declares cls/pad/mask/eos as read-only properties and resolves them
+    through SpecialTokensMixin machinery that transformers 4.41.2 lacks, so a
+    bare EsmSequenceTokenizer() dies with "property 'cls_token' ... has no
+    setter". esm pins transformers<4.48.2 and its real lower bound is
+    undocumented, so patching is cheaper than version-chasing. Idempotent.
+    """
+    global _ESM_TOKENIZER_PATCHED
+    if _ESM_TOKENIZER_PATCHED:
+        return
+    try:
+        from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer as _EsmTok
+    except ImportError:
+        return
+
+    def _get_token_patched(self, token_name):
+        private_map = getattr(self, "_special_tokens_map", None)
+        token_str = private_map.get(token_name) if private_map is not None else None
+        if token_str is None:
+            token_str = _ESM_TOKENIZER_HARDCODED.get(token_name)
+        assert isinstance(token_str, str), (
+            f"EsmSequenceTokenizer._get_token: could not resolve {token_name!r}"
+        )
+        return token_str
+
+    _EsmTok._get_token = _get_token_patched
+
+    def _make_setter(attr_name):
+        def _setter(self, value):
+            if value is None:
+                return
+            private = getattr(self, "_special_tokens_map", None)
+            if private is not None:
+                private[attr_name] = value
+            _ESM_TOKENIZER_HARDCODED[attr_name] = value
+        return _setter
+
+    for attr in ("cls_token", "bos_token", "eos_token", "unk_token",
+                 "pad_token", "mask_token", "sep_token"):
+        prop = getattr(_EsmTok, attr, None)
+        if isinstance(prop, property) and prop.fset is None:
+            setattr(_EsmTok, attr, property(prop.fget, _make_setter(attr), prop.fdel, prop.__doc__))
+
+    _ESM_TOKENIZER_PATCHED = True
+    print("[info] EsmSequenceTokenizer property patch applied (transformers compat).")
+
+
+def _build_esmc_6b(device=None, load_pretrained=True):
+    """Construct ESM-C 6B, optionally filling it from the cached HF checkpoint.
+
+    Defaults to the GPU when one is present. Building on CPU would materialise
+    ~25GB of host RAM for the parameters plus the shard buffers, then copy the
+    whole thing across the bus; constructing on the device and streaming the
+    shards straight there avoids both. Falls back to CPU only when CUDA is
+    absent (e.g. a login-node import check), where it will be slow but valid.
+
+    `ESMC.from_pretrained("esmc_6b")` raises: esm's LOCAL_MODEL_REGISTRY only
+    knows esmc_300m and esmc_600m because 6B is Forge-API only upstream. The
+    biohub export is a transformers-style checkpoint whose keys are prefixed
+    "esmc." (and "lm_head." for the output head), so they are remapped onto
+    esm-native names.
+
+    Pass load_pretrained=False when a fine-tuned checkpoint is about to be
+    loaded over the top; that skips ~24GB of pointless shard reads.
+    """
+    import json
+    from pathlib import Path as _Path
+    from huggingface_hub import snapshot_download
+    from safetensors.torch import load_file
+    from esm.models.esmc import ESMC
+    from esm.tokenization import get_esmc_model_tokenizers
+
+    patch_esm_sequence_tokenizer()
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if str(device) == "cpu":
+        print("[warning] Building ESM-C 6B on CPU: ~25GB of host RAM and very slow inference. "
+              "This is only intended for import checks.")
+
+    with torch.device(device):
+        model = ESMC(
+            d_model=2560, n_heads=40, n_layers=80,
+            tokenizer=get_esmc_model_tokenizers(),
+            use_flash_attn=False,
+        ).eval()
+
+    if not load_pretrained:
+        return model
+
+    snapshot_path = _Path(snapshot_download(
+        repo_id="biohub/esmc-6b-2024-12",
+        allow_patterns=["*.json", "*.safetensors", "*.txt"],
+    ))
+
+    def _remap(key):
+        if key.startswith("esmc."):
+            return key[len("esmc."):]
+        if key.startswith("lm_head."):
+            return "sequence_head." + key[len("lm_head."):]
+        return key
+
+    index_file = snapshot_path / "model.safetensors.index.json"
+    state_dict = {}
+    if index_file.exists():
+        weight_map = json.loads(index_file.read_text())["weight_map"]
+        for shard in sorted(set(weight_map.values())):
+            for key, value in load_file(snapshot_path / shard, device=str(device)).items():
+                state_dict[_remap(key)] = value
+    elif (snapshot_path / "model.safetensors").exists():
+        for key, value in load_file(snapshot_path / "model.safetensors", device=str(device)).items():
+            state_dict[_remap(key)] = value
+    else:
+        raise FileNotFoundError(f"esmc_6b weights not found in {snapshot_path}")
+
+    model.load_state_dict(state_dict, strict=True)
+    return model
+
+
 def _load_plm_runtime(base_model_name, checkpoint_dir=None):
     if "esmc" in base_model_name.lower() or "esm-c" in base_model_name.lower():
         try:
@@ -3055,10 +3217,29 @@ def _load_plm_runtime(base_model_name, checkpoint_dir=None):
         # In fact, we should move it to Functions_HuggingFace too if it's not there.
         # But for now we assume it's available.
         from Functions_HuggingFace import ESMCAlphabetWrapper
+
+        # Must precede any ESM-C construction: from_pretrained and the 6B builder
+        # both instantiate EsmSequenceTokenizer, which raises on this
+        # transformers version unless patched.
+        patch_esm_sequence_tokenizer()
         
-        model_id = "esmc_600m" if "600m" in base_model_name.lower() else "esmc_300m"
-        model = ESMC.from_pretrained(model_id)
-        
+        # Size is selected explicitly. The previous form was
+        #   "esmc_600m" if "600m" in name else "esmc_300m"
+        # which silently built a 300M model for any other size, so a 6B
+        # checkpoint loaded into the wrong architecture instead of erroring.
+        _name = base_model_name.lower()
+        if "6b" in _name:
+            model = _build_esmc_6b(load_pretrained=checkpoint_dir is None)
+        elif "600m" in _name:
+            model = ESMC.from_pretrained("esmc_600m")
+        elif "300m" in _name:
+            model = ESMC.from_pretrained("esmc_300m")
+        else:
+            raise ValueError(
+                f"Unrecognised ESM-C size in {base_model_name!r}; expected 300m, 600m or 6b."
+            )
+
+
         if checkpoint_dir:
             import os
             safetensors_path = os.path.join(checkpoint_dir, "model.safetensors")
