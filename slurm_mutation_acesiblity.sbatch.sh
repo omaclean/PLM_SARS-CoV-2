@@ -9,7 +9,9 @@
 #
 #   sbatch slurm_mutation_acesiblity.sbatch.sh --checkpoint-dir DIR [options]
 #
-#   --checkpoint-dir DIR   REQUIRED. A directory containing model.safetensors,
+#   --raw-only             score the base model alone (no fine-tuned checkpoint)
+#   --precomputed FILE     score a precomputed PLM probability matrix instead
+#   --checkpoint-dir DIR   A directory containing model.safetensors,
 #                          e.g. <run>/model/final_checkpoint
 #   --output-dir DIR       default: <run_dir>/mutational_accessibility
 #   --model-tag TAG        default: derived from the run directory name
@@ -22,7 +24,16 @@
 #   --test-mode            quick pass over a few targets
 #   --regen-figures-only   re-plot from cached results
 #   --force-recompute-plm  ignore cached PLM outputs
+#   --no-biochem           skip the biochemical control report
+#   --biochem-boot N       bootstrap replicates for it (default 200, ~15-25 min)
 #   -h | --help
+#
+# Every run ends by writing a biochemical control report into
+# <output-dir>/biochem — the confound ladder, its figures, and a generated
+# REPORT.md. It asks whether the model's agreement with codon mutation
+# probability survives controlling for biochemistry and for the genetic code.
+# It is a post-processing step on the tables this job already wrote, so it
+# cannot affect them, and a failure there is reported without failing the job.
 #
 # Example — score the finished ESM-C 600M flu run:
 #   sbatch slurm_mutation_acesiblity.sbatch.sh --checkpoint-dir \
@@ -51,6 +62,8 @@ ENV_ESMC=/projects/u6dr/OM/envs/plm_isambardconda_esmc_fsdp2    # esm 3.2.3
 ENV_PREFIX=
 
 CHECKPOINT_ROOT=
+RAW_ONLY=false
+PRECOMPUTED=
 OUTPUT_DIR=
 MODEL_TAG=
 BASE_MODEL_NAME=
@@ -60,12 +73,17 @@ MUTATION_MODEL=H3N2
 REGEN_FIGURES_ONLY=false
 FORCE_RECOMPUTE_PLM=false
 TEST_MODE=false
+RUN_BIOCHEM=true
+BIOCHEM_BOOT=200
+BIOCHEM_CODE=/home/u6dr/omaclean.u6dr/plm_entropy/esm-2-finetune_biochem/code
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --checkpoint-dir) CHECKPOINT_ROOT=$2; shift 2;;
+    --raw-only)       RAW_ONLY=true;      shift;;
+    --precomputed)    PRECOMPUTED=$2;     shift 2;;
     --output-dir)     OUTPUT_DIR=$2;      shift 2;;
     --model-tag)      MODEL_TAG=$2;       shift 2;;
     --base-model)     BASE_MODEL_NAME=$2; shift 2;;
@@ -74,6 +92,9 @@ while [[ $# -gt 0 ]]; do
     --mutation-model) MUTATION_MODEL=$2;  shift 2;;
     --env-prefix)     ENV_PREFIX=$2;      shift 2;;
     --test-mode)      TEST_MODE=true;     shift;;
+    --no-biochem)     RUN_BIOCHEM=false;  shift;;
+    --biochem-boot)   BIOCHEM_BOOT=$2;    shift 2;;
+    --biochem-code)   BIOCHEM_CODE=$2;    shift 2;;
     --regen-figures-only|--regen_figures_only) REGEN_FIGURES_ONLY=true; shift;;
     --force-recompute-plm|--force_recompute_plm) FORCE_RECOMPUTE_PLM=true; shift;;
     -h|--help) usage; exit 0;;
@@ -81,18 +102,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${CHECKPOINT_ROOT}" ]]; then
-  echo "ERROR: --checkpoint-dir is required." >&2; usage; exit 1
+if [[ -z "${CHECKPOINT_ROOT}" && "${RAW_ONLY}" != "true" && -z "${PRECOMPUTED}" ]]; then
+  echo "ERROR: give one of --checkpoint-dir, --raw-only or --precomputed." >&2; usage; exit 1
 fi
 CHECKPOINT_ROOT=${CHECKPOINT_ROOT%/}
-if [[ ! -d "${CHECKPOINT_ROOT}" ]]; then
+if [[ -n "${CHECKPOINT_ROOT}" && ! -d "${CHECKPOINT_ROOT}" ]]; then
   echo "ERROR: checkpoint dir does not exist: ${CHECKPOINT_ROOT}" >&2; exit 1
+fi
+if [[ -n "${PRECOMPUTED}" && ! -f "${PRECOMPUTED}" ]]; then
+  echo "ERROR: precomputed matrix not found: ${PRECOMPUTED}" >&2; exit 1
 fi
 
 # ── Locate the training run directory that owns this checkpoint ───────────────
 # Layout is <run_dir>/model/final_checkpoint (or /model/checkpoint-N), so walk up
 # past the checkpoint and the model/ level to find the run root.
-RUN_DIR=${CHECKPOINT_ROOT}
+RUN_DIR=${CHECKPOINT_ROOT:-${OUTPUT_DIR}}
 case "$(basename "${RUN_DIR}")" in
   final_checkpoint|checkpoint-*) RUN_DIR=$(dirname "${RUN_DIR}") ;;
 esac
@@ -107,7 +131,7 @@ RUN_LABEL=$(basename "${RUN_DIR}")
 # "esmc_300m"`, which silently built a 300M model for any other size; it now
 # dispatches on 300m/600m/6b explicitly and raises on anything else.
 if [[ -z "${BASE_MODEL_NAME}" ]]; then
-  lower=$(echo "${CHECKPOINT_ROOT}" | tr '[:upper:]' '[:lower:]')
+  lower=$(echo "${CHECKPOINT_ROOT}${PRECOMPUTED}${OUTPUT_DIR}" | tr '[:upper:]' '[:lower:]')
   case "${lower}" in
     *esmc_6b*|*esm-c6b*|*_6b_*)     BASE_MODEL_NAME=esm-c6b ;;
     *esmc_600m*|*600m*|*esm-c600m*) BASE_MODEL_NAME=esm-c600m ;;
@@ -156,6 +180,7 @@ echo "model_layer=${MODEL_LAYER:-<final layer, inferred>}"
 echo "guide_path=${GUIDE_PATH}"
 echo "mutation_model=${MUTATION_MODEL}"
 echo "test_mode=${TEST_MODE}  regen_figures_only=${REGEN_FIGURES_ONLY}  force_recompute_plm=${FORCE_RECOMPUTE_PLM}"
+echo "biochem_report=${RUN_BIOCHEM}  biochem_boot=${BIOCHEM_BOOT}"
 echo "hostname=$(hostname)  nodelist=${SLURM_NODELIST:-manual}"
 
 env | sort > "${LOG_DIR}/environment.txt"
@@ -184,9 +209,9 @@ import os, sys
 from pathlib import Path
 
 guide_path = Path(os.environ["GUIDE_PATH"])
-checkpoint_root = Path(os.environ["CHECKPOINT_ROOT"])
+checkpoint_root = Path(os.environ["CHECKPOINT_ROOT"]) if os.environ.get("CHECKPOINT_ROOT") else None
 print('guide_exists=', guide_path.exists())
-print('checkpoint_root_exists=', checkpoint_root.exists())
+print('checkpoint_root_exists=', checkpoint_root.exists() if checkpoint_root else 'n/a')
 
 errors = []
 if not guide_path.exists():
@@ -206,7 +231,9 @@ else:
     if missing:
         errors.append("ERROR: guide references missing files: " + "; ".join(missing[:5]))
 
-if not checkpoint_root.exists():
+if checkpoint_root is None:
+    print("no checkpoint supplied (raw-only or precomputed run)")
+elif not checkpoint_root.exists():
     errors.append(f"ERROR: checkpoint root not found: {checkpoint_root}")
 else:
     child_checkpoints = sorted(
@@ -240,10 +267,17 @@ RUN_ARGS=(
   --mutation-model "${MUTATION_MODEL}"
   --output-dir "${OUTPUT_DIR}"
   --expect-protein-diversity
-  --model-tag "${MODEL_TAG}"
   --base-model "${BASE_MODEL_NAME}"
-  --checkpoint-dir "${CHECKPOINT_ROOT}"
 )
+[[ -n "${CHECKPOINT_ROOT}" ]] && RUN_ARGS+=(--checkpoint-dir "${CHECKPOINT_ROOT}")
+# --model-tag and --precomputed-plm-path are mutually exclusive in the analysis
+# script's argparse, so only one may be passed. With a precomputed matrix the
+# label falls back to the matrix filename stem.
+if [[ -n "${PRECOMPUTED}" ]]; then
+  RUN_ARGS+=(--precomputed-plm-path "${PRECOMPUTED}")
+else
+  RUN_ARGS+=(--model-tag "${MODEL_TAG}")
+fi
 # Only pin the layer if asked; otherwise the analysis resolves the final layer
 # from the loaded model, which differs per size (33 / 30 / 36 / 80).
 [[ -n "${MODEL_LAYER}" ]] && RUN_ARGS+=(--model-layer "${MODEL_LAYER}")
@@ -259,6 +293,37 @@ RUN_ARGS=(
 cat "${LOG_DIR}/command.txt"
 
 "${PYTHON_CMD[@]}" "${RUN_ARGS[@]}" 2>&1 | tee -a "${RUN_LOG}"
+
+# ── Biochemical control report ────────────────────────────────────────────────
+# Post-processing over the tables written above: the confound ladder, its two
+# figures and a generated REPORT.md, into ${OUTPUT_DIR}/biochem. Deliberately
+# non-fatal — the accessibility results are the deliverable and are already on
+# disk by this point, so a plotting or dependency failure here must not mark a
+# successful scoring run as failed. --test-mode runs are skipped: they score a
+# handful of targets, and a ladder built on those would be noise wearing a
+# report's clothing.
+BIOCHEM_LOG=${LOG_DIR}/biochem_report.log
+if [[ "${RUN_BIOCHEM}" != "true" ]]; then
+  echo "[$(date -Is)] biochemical report skipped (--no-biochem)"
+elif [[ "${TEST_MODE}" == "true" ]]; then
+  echo "[$(date -Is)] biochemical report skipped (--test-mode: too few targets to control)"
+elif [[ ! -f "${BIOCHEM_CODE}/run_report.py" ]]; then
+  echo "[$(date -Is)] WARNING: biochemical report skipped, no run_report.py at ${BIOCHEM_CODE}" >&2
+else
+  echo "[$(date -Is)] biochemical control report (${BIOCHEM_BOOT} bootstrap replicates)"
+  set +e
+  "${PYTHON_CMD[@]}" "${BIOCHEM_CODE}/run_report.py" \
+    --run-dir "${OUTPUT_DIR}" --label "${MODEL_TAG}" --boot "${BIOCHEM_BOOT}" \
+    2>&1 | tee -a "${BIOCHEM_LOG}"
+  BIOCHEM_RC=${PIPESTATUS[0]}
+  set -e
+  case "${BIOCHEM_RC}" in
+    0) echo "[$(date -Is)] biochemical report in ${OUTPUT_DIR}/biochem/REPORT.md" ;;
+    2) echo "[$(date -Is)] biochemical report had nothing to analyse (no combined_long_table.csv)" ;;
+    *) echo "[$(date -Is)] WARNING: biochemical report failed (rc=${BIOCHEM_RC}) — see ${BIOCHEM_LOG}." \
+            "The mutational-accessibility results above are unaffected." >&2 ;;
+  esac
+fi
 
 echo "[$(date -Is)] Mutational accessibility job finished"
 echo "[$(date -Is)] results in ${OUTPUT_DIR}"
