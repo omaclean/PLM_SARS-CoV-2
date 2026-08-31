@@ -10,3 +10,6 @@ dev
 Sequences/IAV_lineage_files
 Sequences/gisaid_and_genbank_data
 Sequences
+
+# Lives in its own repo: github.com/omaclean/evolution_simulation
+Notebooks/OM_influenza/sim_set/

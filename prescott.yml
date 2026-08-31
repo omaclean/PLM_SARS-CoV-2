@@ -1,0 +1,79 @@
+name: PRESCOTT
+# Environment for the PRESCOTT/ESCOTT influenza diversity-prediction pipeline
+# (scripts/run_prescott_diversity.py).
+#
+# Pins follow /home3/oml4h/PRESCOTT/requirements.txt with one deliberate
+# exception. That file caps numpy at <1.24, but every conda-forge prody build
+# requires numpy>=1.24.1, so the two cannot be satisfied together. The cap is
+# stale: it exists for the numpy 1.24 removal of the np.float/np.int aliases,
+# and neither escott.py nor prescott.py uses them. numpy is therefore allowed up
+# to <2, which is still required — biopython 1.79 predates the numpy 2 ABI.
+#
+#   conda env create -f prescott.yml
+#   conda activate PRESCOTT
+#   pip install --no-deps -e /home3/oml4h/PRESCOTT
+#
+# --no-deps is deliberate: pip would otherwise re-resolve requirements.txt and
+# pull a numpy that fights the conda solve above. The env already satisfies every
+# dependency. This installs the `escott` and `prescott` console entry points.
+channels:
+  - conda-forge
+  - bioconda
+  - salilab
+dependencies:
+  - python=3.10
+  # --- PRESCOTT core (see PRESCOTT/requirements.txt) ---
+  - numpy>=1.24,<2
+  - scipy
+  - pandas<2.2
+  - matplotlib-base
+  - scikit-learn
+  - biopython=1.79
+  - biotite
+  - prody
+  # --- R side: computePred.R / pred.R are the GEMME core of ESCOTT ---
+  - r-base=4.3.*
+  - r-seqinr
+  # --- external binaries ESCOTT/JET2 shell out to ---
+  - openjdk=17.*          # JET2 is a Java program
+  # PRESCOTT's Dockerfile pins dssp v3 "because v4 has some incompatibilites with
+  # biotite". That is no longer true, and v3 is not usable here anyway: the only
+  # conda build (salilab/dssp=3.0.0) links libboost_thread.so.1.73.0, which no
+  # longer resolves. biotite 1.2 branches on the dssp version itself
+  # (DsspApp.__init__ -> self._new_cli = get_version(...)[0] >= 4), and v4.6.1 was
+  # verified working against PRESCOTT/data/blat-af2.pdb.
+  - dssp=4.6.1
+  - freesasa              # solvent accessibility without the naccess licence
+  # --- alignment tooling used to build the ESCOTT input MSA ---
+  - mafft
+  - muscle
+  - blast
+  - hmmer
+  # --- analysis/plotting, mirroring scripts/run_mutational_accessibility.py ---
+  - seaborn
+  - statsmodels
+  - tqdm
+  - pyarrow
+  # The driver imports run_mutational_accessibility, which imports Functions_HuggingFace, which
+  # imports torch/esm/py3Dmol at module scope (Functions_HuggingFace.py:8-21) — unguarded, so they
+  # are hard requirements even though no model is ever run here. Installing them keeps the whole
+  # pipeline AND its tests in this single env instead of splitting across two.
+  #
+  # pytorch MUST come from conda-forge, not pip. The pip wheel links the system libstdc++, so
+  # `import torch` before `import pandas` makes pandas' C extension fail with
+  # "GLIBCXX_3.4.29 not found" — and run_mutational_accessibility.py imports torch (line 30)
+  # before pandas (line 44), hitting exactly that order. The conda-forge build links this env's
+  # own libstdc++ and the order stops mattering.
+  - pytorch=*=cpu*
+  - py3dmol
+  - adjusttext
+  - ipython
+  # --- test toolchain (suite lives in tests_prescott_iav/, its own tree) ---
+  - pytest
+  - pytest-cov
+  - pytest-xdist
+  - pytest-timeout
+  - pytest-mock
+  - pip
+  - pip:
+      - fair-esm          # Functions_HuggingFace imports `esm`; not on conda-forge
