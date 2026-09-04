@@ -3242,14 +3242,33 @@ def _load_plm_runtime(base_model_name, checkpoint_dir=None):
 
         if checkpoint_dir:
             import os
+            # Two on-disk formats, one state dict. The HF-Trainer path writes
+            # model.safetensors; the FSDP2 path writes esmc_weights.pt instead,
+            # as does the LoRA entry point once it has merged its adapters back
+            # into the base weights. Both carry native ESM-C keys with identical
+            # shapes, so either loads into the same module.
             safetensors_path = os.path.join(checkpoint_dir, "model.safetensors")
+            native_path = os.path.join(checkpoint_dir, "esmc_weights.pt")
             if os.path.exists(safetensors_path):
                 print(f"Loading ESMC weights from {safetensors_path}")
                 state_dict = load_file(safetensors_path)
-                state_dict = {k.replace("esmc.", "") if k.startswith("esmc.") else k: v for k, v in state_dict.items()}
-                model.load_state_dict(state_dict)
+            elif os.path.exists(native_path):
+                print(f"Loading ESMC weights from {native_path}")
+                state_dict = torch.load(native_path, map_location="cpu", weights_only=True)
             else:
-                print(f"Warning: ESMC checkpoint safetensors not found at {safetensors_path}")
+                # Never fall through to the unloaded module: _build_esmc_6b is
+                # called with load_pretrained=False whenever a checkpoint_dir is
+                # given, so continuing past this point would score a randomly
+                # initialised 6B under the fine-tuned model's name.
+                raise FileNotFoundError(
+                    f"No ESM-C weights found in {checkpoint_dir}: expected "
+                    f"model.safetensors or esmc_weights.pt."
+                )
+            state_dict = {
+                k[len("esmc."):] if k.startswith("esmc.") else k: v
+                for k, v in state_dict.items()
+            }
+            model.load_state_dict(state_dict)
         
         alphabet = ESMCAlphabetWrapper(model.tokenizer)
         batch_converter = alphabet.get_batch_converter()

@@ -11,12 +11,13 @@
 #
 #   --raw-only             score the base model alone (no fine-tuned checkpoint)
 #   --precomputed FILE     score a precomputed PLM probability matrix instead
-#   --checkpoint-dir DIR   A directory containing model.safetensors,
+#   --checkpoint-dir DIR   A directory containing model.safetensors (HF-Trainer
+#                          path) or esmc_weights.pt (FSDP2 and LoRA paths),
 #                          e.g. <run>/model/final_checkpoint
 #   --output-dir DIR       default: <run_dir>/mutational_accessibility
 #   --model-tag TAG        default: derived from the run directory name
 #   --base-model NAME      default: inferred from the checkpoint path
-#                          (esm-c600m | esm-c300m | esm2_t33_650M_UR50D)
+#                          (esm-c6b | esm-c600m | esm-c300m | esm2_t33_650M_UR50D)
 #   --model-layer N        default: the model's final layer, inferred
 #   --guide-path CSV       default: Sequences/IAV_lineage_guide.csv
 #   --mutation-model M     SC2 | H1N1 | H3N2                 (default H3N2)
@@ -77,7 +78,7 @@ RUN_BIOCHEM=true
 BIOCHEM_BOOT=200
 BIOCHEM_CODE=/home/u6dr/omaclean.u6dr/plm_entropy/esm-2-finetune_biochem/code
 
-usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -236,18 +237,25 @@ if checkpoint_root is None:
 elif not checkpoint_root.exists():
     errors.append(f"ERROR: checkpoint root not found: {checkpoint_root}")
 else:
+    # Two names for the same state dict: the HF-Trainer path writes
+    # model.safetensors, the FSDP2 path writes esmc_weights.pt, and the LoRA
+    # entry point writes esmc_weights.pt after merging its adapters into the
+    # base weights. _load_plm_runtime reads both, so either satisfies preflight.
+    weight_names = ('model.safetensors', 'esmc_weights.pt')
+    def weights_in(directory):
+        return [name for name in weight_names if (directory / name).exists()]
+
     child_checkpoints = sorted(
         path.name for path in checkpoint_root.iterdir()
-        if path.is_dir() and (path / 'model.safetensors').exists()
+        if path.is_dir() and weights_in(path)
     )
-    direct_weights = (checkpoint_root / 'model.safetensors').exists()
+    direct_weights = weights_in(checkpoint_root)
     print('discovered_checkpoints=', child_checkpoints)
-    print('direct_model_safetensors=', direct_weights)
+    print('direct_weights=', direct_weights)
     if not child_checkpoints and not direct_weights:
         errors.append(
-            f"ERROR: no model.safetensors found in {checkpoint_root} or any of its subdirectories. "
-            "Note the FSDP2 training path writes esmc_weights.pt instead, which this analysis "
-            "code cannot read."
+            f"ERROR: none of {' / '.join(weight_names)} found in {checkpoint_root} "
+            "or any of its subdirectories."
         )
 
 for msg in errors:

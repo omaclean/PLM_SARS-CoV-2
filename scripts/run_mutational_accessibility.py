@@ -628,13 +628,28 @@ def infer_epoch_value(epoch_label: str, fallback_index: int) -> float:
     return float(fallback_index)
 
 
+# The HF-Trainer path writes model.safetensors; the FSDP2 path (and the LoRA
+# entry point, which merges its adapters into the base weights before saving)
+# writes esmc_weights.pt. A directory holding either one is a loadable
+# checkpoint, and _load_plm_runtime reads both.
+CHECKPOINT_WEIGHT_FILENAMES = ("model.safetensors", "esmc_weights.pt")
+
+
+def _checkpoint_weights_path(checkpoint_dir: Path) -> Optional[Path]:
+    for filename in CHECKPOINT_WEIGHT_FILENAMES:
+        candidate = Path(checkpoint_dir) / filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _discover_checkpoint_dirs(checkpoint_root: Path) -> List[Path]:
     if not checkpoint_root.is_dir():
         return []
 
     child_dirs = [
         child for child in checkpoint_root.iterdir()
-        if child.is_dir() and (child / "model.safetensors").exists()
+        if child.is_dir() and _checkpoint_weights_path(child) is not None
     ]
     if not child_dirs:
         return []
@@ -734,8 +749,8 @@ def _raw_model_spec(args: argparse.Namespace) -> Dict[str, object]:
 def _checkpoint_signature(checkpoint_dir: Optional[Path]) -> Optional[str]:
     if checkpoint_dir is None:
         return None
-    weights_path = Path(checkpoint_dir) / "model.safetensors"
-    if not weights_path.exists():
+    weights_path = _checkpoint_weights_path(checkpoint_dir)
+    if weights_path is None:
         return None
 
     digest = hashlib.sha256()
@@ -827,11 +842,12 @@ def build_model_specs(args: argparse.Namespace) -> List[Dict[str, object]]:
                     }
                 )
             return _normalise_epoch_values(_deduplicate_model_specs(specs))
-        elif (args.checkpoint_dir / "model.safetensors").exists():
+        elif _checkpoint_weights_path(args.checkpoint_dir) is not None:
             print(
-                f"Warning: no epoch subdirectories containing model.safetensors were found "
-                f"inside {args.checkpoint_dir}. A model.safetensors was found directly in "
-                f"that directory — treating it as a single checkpoint."
+                f"Warning: no epoch subdirectories containing model weights were found "
+                f"inside {args.checkpoint_dir}. "
+                f"{_checkpoint_weights_path(args.checkpoint_dir).name} was found directly "
+                f"in that directory — treating it as a single checkpoint."
             )
             epoch_label = args.checkpoint_dir.name
             return _normalise_epoch_values(_deduplicate_model_specs([
@@ -849,8 +865,9 @@ def build_model_specs(args: argparse.Namespace) -> List[Dict[str, object]]:
             ]))
         else:
             print(
-                f"Warning: no model.safetensors found in {args.checkpoint_dir} or any "
-                f"of its subdirectories. Proceeding, but PLM inference will likely fail."
+                f"Warning: none of {'/'.join(CHECKPOINT_WEIGHT_FILENAMES)} found in "
+                f"{args.checkpoint_dir} or any of its subdirectories. Proceeding, but "
+                f"PLM inference will fail when it tries to load them."
             )
 
     epoch_label = args.checkpoint_dir.name if args.checkpoint_dir else args.model_tag
